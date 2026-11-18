@@ -1,0 +1,37 @@
+[Unit]
+Description=Claude Assistant (Telegram bridge for Claude Code)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=assistant
+Group=assistant
+WorkingDirectory=/home/assistant
+EnvironmentFile=/home/assistant/.config/claude-assistant/env
+Environment=PATH=/home/assistant/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/assistant/app/.venv/bin/claude-assistant --config /home/assistant/config.toml
+Restart=on-failure
+RestartSec=10
+# Let a running task finish its current step before systemd kills it.
+TimeoutStopSec=30
+
+# --- Isolation from the rest of the server -----------------------------------------
+# The bridge and every `claude` it starts are limited to these resources,
+# so the assistant can't starve your other projects.
+MemoryMax=2G
+CPUQuota=150%
+TasksMax=256
+# Other users' home directories are hidden; only /home/assistant is visible.
+ProtectHome=tmpfs
+BindPaths=/home/assistant
+# The rest of the filesystem is read-only.
+ProtectSystem=strict
+ReadWritePaths=/home/assistant
+PrivateTmp=true
+NoNewPrivileges=true
+# Hide other projects that live outside /home (- = ignore if missing):
+InaccessiblePaths=-/opt -/srv -/var/www
+
+[Install]
+WantedBy=multi-user.target
