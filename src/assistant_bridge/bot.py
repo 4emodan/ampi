@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import chatlog
+from .chatlog import CHATS_DIR
 from .claude_runner import ClaudeRunner, RunResult
 from .config import Group, Profile
 from .store import Conversation, Store, now_iso
@@ -56,8 +58,32 @@ def bridge_system_prompt(profile: Profile) -> str:
         "To send a file to the user, put a line `SEND_FILE: <path relative to the working directory>` "
         "on its own line in your reply. Only files inside the working directory can be sent.\n"
         "Nobody can approve tool permissions or answer questions while you work: if something is denied or you "
-        "need a decision, finish and say what you need in your reply."
+        "need a decision, finish and say what you need in your reply.\n\n"
+        + _conversations_prompt(profile)
     )
+
+
+def _conversations_prompt(profile: Profile) -> str:
+    lines = [
+        "You talk to the owner in several places, each with its own session. Every message there and every "
+        f"reply of yours is logged under {CHATS_DIR}/ in your working directory, one Markdown file per day "
+        "(YYYY-MM-DD.md, entries in time order):",
+        f"- {CHATS_DIR}/private/main/ – the owner's private chat with you; "
+        f"{CHATS_DIR}/private/topic-*/ – its topics",
+    ]
+    for g in profile.groups:
+        lines.append(
+            f"- {CHATS_DIR}/{g.name}/ – the Telegram group \"{g.name}\", where you act on everything the owner "
+            f"posts or forwards (your instructions there: groups/{g.name}.md)"
+        )
+    lines.append(
+        "When the owner refers to another conversation or a group (e.g. \"read the last 100 messages in "
+        f"{profile.groups[0].name if profile.groups else 'the other chat'}\"), read those logs: newest files "
+        "first, Grep to search. They are the only history you have: Telegram doesn't let you fetch older "
+        "messages, so anything from before logging started is not available. Notes you saved (notes/) are "
+        "shared by all conversations."
+    )
+    return "\n".join(lines)
 
 
 class TelegramLike(Protocol):
@@ -211,16 +237,23 @@ class ProfileBot:
         chat_id, thread_id = key
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
-            if group is None:
-                prompt = await self._build_prompt(msgs[0])
-            else:
-                prompt = await self._build_batch_prompt(msgs)
-            if not prompt:
+            bodies = []
+            for m in msgs:
+                body = await self._build_prompt(m)
+                if body:
+                    bodies.append((m, body))
+            if not bodies:
                 return
+            prompt = _join_items([b for _, b in bodies])
             if group is not None and group.fresh_session:
                 conv = self.store.reset_session(self.profile.name, chat_id, thread_id)
             else:
                 conv = self.store.get_or_create(self.profile.name, chat_id, thread_id)
+            log_dir = chatlog.conversation_dir(
+                self.profile.workspace, chat_id, thread_id, group.name if group else None, conv.title
+            )
+            for m, body in bodies:
+                chatlog.append(log_dir, "Owner", body, chatlog.message_time(m))
             system_prompt = self.system_prompt
             if group is not None:
                 system_prompt += "\n\n" + self._group_prompt(group, title)
@@ -240,6 +273,7 @@ class ProfileBot:
                 )
             except asyncio.CancelledError:
                 self._record(conv, started_at, RunResult(ok=False, text="", error="cancelled"), prompt)
+                chatlog.append(log_dir, "Assistant", "(stopped by /cancel)")
                 with contextlib.suppress(Exception):
                     await self._send_text(chat_id, thread_id, "⏹ Stopped.", markdown=False)
                 return
@@ -251,6 +285,11 @@ class ProfileBot:
                 # Claude Code created the session; later turns resume it.
                 self.store.mark_started(self.profile.name, chat_id, thread_id, conv.session_id)
             self._record(conv, started_at, result, prompt)
+            reply = (result.text or "").strip()
+            if not result.ok:
+                reply = (reply + "\n\n" if reply else "") + f"⚠️ {result.error or 'error'}"
+            if reply and reply != NO_REPLY:
+                chatlog.append(log_dir, "Assistant", reply)
             await self._deliver(chat_id, thread_id, result, quiet_ok=group is not None)
 
     def _group_prompt(self, group: Group, title: str) -> str:
@@ -292,16 +331,6 @@ class ProfileBot:
             await asyncio.sleep(4.5)
 
     # --- incoming content ---------------------------------------------------------------
-
-    async def _build_batch_prompt(self, msgs: list[dict]) -> str:
-        items = []
-        for msg in msgs:
-            body = await self._build_prompt(msg)
-            if body:
-                items.append(body)
-        if len(items) <= 1:
-            return items[0] if items else ""
-        return "\n\n".join(f"--- Item {i} of {len(items)} ---\n{body}" for i, body in enumerate(items, 1))
 
     async def _build_prompt(self, msg: dict) -> str:
         text = (msg.get("text") or msg.get("caption") or "").strip()
@@ -496,6 +525,12 @@ class ProfileBot:
         if stats.cost_usd:
             lines.append(f"Estimated API-equivalent cost: ${stats.cost_usd:.2f} (covered by your plan)")
         await self._send_text(chat_id, thread_id, "\n".join(lines), markdown=False)
+
+
+def _join_items(items: list[str]) -> str:
+    if len(items) == 1:
+        return items[0]
+    return "\n\n".join(f"--- Item {i} of {len(items)} ---\n{body}" for i, body in enumerate(items, 1))
 
 
 def _forward_note(msg: dict) -> str | None:

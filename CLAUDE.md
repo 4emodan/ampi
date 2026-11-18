@@ -40,6 +40,8 @@ src/assistant_bridge/   the bridge (Python 3.11+, only dependency httpx)
   claude_runner.py      runs `claude -p --output-format json` (--session-id / --resume), strips API-key env vars
   text.py               Markdown -> Telegram HTML, message splitting
   bot.py                one ProfileBot per Telegram bot: routing, commands, attachments, group batches
+  chatlog.py            logs every conversation to <workspace>/chats/ so any session can read the others
+                        (the Bot API can't fetch chat history; these logs are the only history)
   main.py               entry point (`claude-assistant --config ... [--check]`)
 tests/                  pytest; fake claude CLI + fake Telegram API, no network
 deploy/                 install.sh, systemd unit (runs as user `assistant`, isolated)
