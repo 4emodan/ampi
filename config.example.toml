@@ -1,0 +1,51 @@
+# Claude Assistant bridge configuration.
+# Copy to config.toml (on the server: /home/assistant/config.toml) and edit.
+# Relative paths are resolved against the directory this file is in.
+
+# Command used to start Claude Code. Must be the official CLI, signed in with your Claude account.
+# Never add "--bare": it ignores the subscription login and needs an API key.
+claude_command = ["claude"]
+
+# SQLite file with conversations, run log and Telegram offsets.
+db_path = "data/bridge.sqlite3"
+
+# How many `claude -p` runs may execute at the same time (all profiles together).
+# Each run uses roughly 300-500 MB of RAM.
+max_concurrent_runs = 2
+
+# A single run (one message, including long research) is stopped after this many seconds.
+run_timeout_seconds = 1800
+
+# One [[profiles]] block per Telegram bot. Every profile is you; each gets its own
+# workspace (memory, notes, files, persona) and its own conversations.
+[[profiles]]
+name = "personal"
+# Name of the environment variable that holds this bot's token (from @BotFather).
+bot_token_env = "TG_TOKEN_PERSONAL"
+# Telegram user IDs allowed to talk to this bot (yours). Everyone else is ignored and logged.
+owner_ids = [123456789]
+# Working directory for Claude. Put the profile's CLAUDE.md (persona, rules) here.
+workspace = "profiles/personal"
+# Model alias or full name; omit to use Claude Code's default.
+model = "sonnet"
+# Tools Claude may use without asking. Anything else is denied (nobody can approve prompts).
+allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"]
+# Extra arguments passed to `claude` on every run (optional).
+extra_args = []
+
+# Groups this bot acts in. It handles every message YOU post or forward there; others are ignored.
+# First turn off privacy mode: @BotFather -> /setprivacy -> pick the bot -> Disable, then (re-)add the bot.
+# To find chat_id, post in the group and look for "not in the config: chat_id=..." in the log.
+# What to do with each item goes in <workspace>/groups/<name>.md (plain words, re-read on every run).
+# [[profiles.groups]]
+# chat_id = -1001234567890
+# name = "clipboard"
+# batch_seconds = 5       # messages forwarded together are handled in one run
+# fresh_session = true    # new context per batch (memory lives in notes files); false = one ongoing conversation
+
+# [[profiles]]
+# name = "work"
+# bot_token_env = "TG_TOKEN_WORK"
+# owner_ids = [123456789]
+# workspace = "profiles/work"
+# model = "opus"
