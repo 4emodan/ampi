@@ -1,0 +1,10 @@
+.env
+*.env
+secrets/
+.claude/settings.local.json
+.venv/
+__pycache__/
+.pytest_cache/
+config.toml
+data/
+profiles/
