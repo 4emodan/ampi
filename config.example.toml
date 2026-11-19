@@ -29,6 +29,7 @@ workspace = "profiles/personal"
 # Model alias or full name; omit to use Claude Code's default.
 model = "sonnet"
 # Tools Claude may use without asking. Anything else is denied (nobody can approve prompts).
+# With the Telegram reader (docs/SETUP.md, section 7) also add "Skill" and "Bash(tg-read:*)".
 allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"]
 # Extra arguments passed to `claude` on every run (optional).
 extra_args = []

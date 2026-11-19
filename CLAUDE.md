@@ -43,8 +43,13 @@ src/assistant_bridge/   the bridge (Python 3.11+, only dependency httpx)
   chatlog.py            logs every conversation to <workspace>/chats/ so any session can read the others
                         (the Bot API can't fetch chat history; these logs are the only history)
   main.py               entry point (`claude-assistant --config ... [--check]`)
+src/tg_reader/          optional read-only access to the owner's Telegram account (Telethon)
+  server.py             `tg-reader serve|login`: daemon as user `tgreader`, holds the session, Unix socket
+  reader.py             the only allowed requests: list chats, read a chat, search (never send/delete)
+  client.py             `tg-read`: stdlib-only client the assistant runs (skill: templates/skills/telegram)
 tests/                  pytest; fake claude CLI + fake Telegram API, no network
-deploy/                 install.sh, systemd unit (runs as user `assistant`, isolated)
+deploy/                 install.sh, systemd unit (runs as user `assistant`, isolated);
+                        install-tg-reader.sh, tg-reader.service (user `tgreader`)
 templates/profile/      starter CLAUDE.md for a profile workspace
 docs/SETUP.md           server setup steps
 ```

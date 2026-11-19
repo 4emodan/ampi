@@ -70,6 +70,23 @@ The bot can act on every message you post or forward in a group, e.g. a "Clipboa
 
 Only your own messages are handled; anyone else in the group is ignored. Messages forwarded together are handled in one run (`batch_seconds`, default 5). If there's nothing worth saying, the bot stays silent.
 
+## 7. Reading all your Telegram chats (optional)
+
+A bot can't read history or chats it isn't in. The `tg-reader` service logs in to Telegram **as you** (with Telethon) and gives the assistant a read-only `tg-read` command plus a `telegram` skill, so you can ask "read the last 100 messages in Clipboard" or "what did Anna say about the flat".
+
+The login session could do anything your account can, so it is kept away from the assistant: it lives with a separate `tgreader` user whose home the assistant can't see, and the assistant can only send it fixed read-only requests (list chats, read a chat, search) over `/run/tg-reader/tg-reader.sock`. Nothing it does marks messages as read.
+
+1. `sudo bash deploy/install-tg-reader.sh`
+2. At <https://my.telegram.org> → **API development tools**, create an app (any name) and put its `api_id` and `api_hash` in `/home/tgreader/env`.
+3. Log in; Telegram sends a code to your app, and you type it (and your 2FA password, if set) yourself:
+   ```bash
+   sudo -u tgreader -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/tg-reader login'
+   ```
+4. `systemctl restart tg-reader && journalctl -u tg-reader -n 20` (should say "listening").
+5. In `config.toml`, add `"Skill"` and `"Bash(tg-read:*)"` to `allowed_tools`, then `systemctl restart claude-assistant`.
+
+To revoke it: Telegram → Settings → Devices → **Ampi reader (read-only)** → Terminate session, and `systemctl disable --now tg-reader`.
+
 ## Isolation and limits
 
 - The service runs as `assistant`, sees no other home directories, and gets a read-only view of the rest of the filesystem.

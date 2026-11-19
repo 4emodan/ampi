@@ -1,0 +1,32 @@
+[Unit]
+Description=Telegram reader for Claude Assistant (read-only access to the owner's account)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgreader
+Group=tgread
+EnvironmentFile=/home/tgreader/env
+ExecStart=/home/tgreader/app/.venv/bin/tg-reader serve
+# /run/tg-reader/tg-reader.sock: only tgreader and the tgread group (the assistant) can reach it.
+RuntimeDirectory=tg-reader
+RuntimeDirectoryMode=0750
+UMask=0007
+Restart=on-failure
+RestartSec=30
+
+MemoryMax=300M
+CPUQuota=50%
+TasksMax=32
+# The session file in /home/tgreader is the only thing it can write; other homes are hidden.
+ProtectHome=tmpfs
+BindPaths=/home/tgreader
+ProtectSystem=strict
+ReadWritePaths=/home/tgreader
+PrivateTmp=true
+NoNewPrivileges=true
+InaccessiblePaths=-/opt -/srv -/var/www
+
+[Install]
+WantedBy=multi-user.target

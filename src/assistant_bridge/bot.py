@@ -63,6 +63,9 @@ def bridge_system_prompt(profile: Profile) -> str:
     )
 
 
+TELEGRAM_SKILL = Path(".claude/skills/telegram/SKILL.md")  # installed by deploy/install-tg-reader.sh
+
+
 def _conversations_prompt(profile: Profile) -> str:
     lines = [
         "You talk to the owner in several places, each with its own session. Every message there and every "
@@ -76,12 +79,22 @@ def _conversations_prompt(profile: Profile) -> str:
             f"- {CHATS_DIR}/{g.name}/ – the Telegram group \"{g.name}\", where you act on everything the owner "
             f"posts or forwards (your instructions there: groups/{g.name}.md)"
         )
+    example = profile.groups[0].name if profile.groups else "the other chat"
+    if (profile.workspace / TELEGRAM_SKILL).is_file():
+        history = (
+            "These logs only start when logging began and only cover chats with you. For anything else "
+            "(older messages, any other chat, group or channel of the owner) use the telegram skill "
+            "(`tg-read`), which reads the owner's own Telegram account."
+        )
+    else:
+        history = (
+            "They are the only history you have: Telegram doesn't let you fetch older messages, so anything "
+            "from before logging started is not available."
+        )
     lines.append(
-        "When the owner refers to another conversation or a group (e.g. \"read the last 100 messages in "
-        f"{profile.groups[0].name if profile.groups else 'the other chat'}\"), read those logs: newest files "
-        "first, Grep to search. They are the only history you have: Telegram doesn't let you fetch older "
-        "messages, so anything from before logging started is not available. Notes you saved (notes/) are "
-        "shared by all conversations."
+        f"When the owner refers to another conversation or a group (e.g. \"read the last 100 messages in "
+        f"{example}\"), read those logs: newest files first, Grep to search. {history} Notes you saved "
+        "(notes/) are shared by all conversations."
     )
     return "\n".join(lines)
 

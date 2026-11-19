@@ -11,7 +11,7 @@ Setup: [docs/SETUP.md](docs/SETUP.md). Requirements: [REQUIREMENTS.md](REQUIREME
 
 ## Status: MVP
 
-Done: Telegram chat bridge, profiles, topics as conversations, groups (acts on everything you post or forward, e.g. a Clipboard group), attachments in and out, conversation logs shared across sessions (ask in one chat about another), per-conversation model, run log, systemd deployment with isolation.
+Done: Telegram chat bridge, profiles, topics as conversations, groups (acts on everything you post or forward, e.g. a Clipboard group), attachments in and out, conversation logs shared across sessions (ask in one chat about another), read-only access to all your Telegram chats and their full history (optional `tg-reader`), per-conversation model, run log, systemd deployment with isolation.
 
 Not yet: scheduled tasks, email monitoring, Gmail/Calendar/Todoist/YouTube integrations, approval buttons for sending/deleting, voice transcription, streaming replies.
 
