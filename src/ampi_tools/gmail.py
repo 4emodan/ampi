@@ -12,9 +12,10 @@ import os
 import re
 import secrets
 import time
+import unicodedata
 import urllib.parse
 from email.message import EmailMessage
-from email.utils import getaddresses, parseaddr
+from email.utils import formataddr, getaddresses, parseaddr
 from pathlib import Path
 from typing import Any
 
@@ -213,12 +214,18 @@ class Gmail:
 
     async def read(self, mid: str) -> str:
         names = await self.label_names()
-        return format_full(await self.message(mid), names)
+        msg = await self.message(mid)
+        # Parsing hostile HTML runs in a thread, so a slow parse never blocks approvals or other requests.
+        return await asyncio.wait_for(asyncio.to_thread(format_full, msg, names), 30)
 
     async def thread(self, tid: str) -> str:
         names = await self.label_names()
         data = await self._req("GET", f"/threads/{tid}", {"format": "full"})
-        return "\n\n".join(format_full(m, names) for m in data.get("messages", []))
+
+        def render() -> str:
+            return "\n\n".join(format_full(m, names) for m in data.get("messages", []))
+
+        return await asyncio.wait_for(asyncio.to_thread(render), 60)
 
     # --- changing ---------------------------------------------------------------------
 
@@ -258,8 +265,14 @@ class Gmail:
                 out["subject"] = s if s.lower().startswith("re:") else f"Re: {s}"
             if not out["to"]:
                 out["to"] = h.get("reply-to") or h.get("from", "")
-        if not recipients(out["to"]):
+        # Parse the addresses once, strictly, and rebuild the headers from the result: the summary and
+        # the sent email then name exactly the same recipients (lenient header parsing can't add any).
+        out["to"] = strict_addresses(out["to"], "to")
+        out["cc"] = strict_addresses(out["cc"], "cc") if out["cc"].strip() else ""
+        if not out["to"]:
             raise ToolError("who to? (--to)")
+        out["subject"] = normalize_text(out["subject"]).replace("\n", " ").strip()
+        out["body"] = normalize_text(out["body"])
         return out
 
     @staticmethod
@@ -416,6 +429,31 @@ def format_full(msg: dict, names: dict[str, str]) -> str:
         lines.append("Attachments: " + "; ".join(files))
     lines += ["", text or "(no text)"]
     return "\n".join(lines)
+
+
+ADDRESS_RE = re.compile(r"[^@\s<>(),;:\"\[\]\\]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+")
+
+
+def strict_addresses(value: str, field: str) -> str:
+    """Parses a To/Cc value; refuses anything ambiguous; returns a cleanly rebuilt header value."""
+    if "\n" in value or "\r" in value:
+        raise ToolError(f"{field}: line breaks aren't allowed")
+    pairs = getaddresses([value], strict=True) if "strict" in getaddresses.__code__.co_varnames else getaddresses([value])
+    # Every "@" in the value must belong to one parsed address, so nothing is silently dropped.
+    if not pairs or value.count("@") != len(pairs) or any(not ADDRESS_RE.fullmatch(a) for _, a in pairs):
+        raise ToolError(f"{field}: can't read {value!r} as a list of email addresses")
+    return ", ".join(formataddr((normalize_text(n).replace("\n", " ").strip(), a)) for n, a in pairs)
+
+
+_SPACES = re.compile(r"[\t   -   　]")
+
+
+def normalize_text(s: str) -> str:
+    """What's approved must be what's sent: no invisible or look-alike characters to hide data in."""
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = _SPACES.sub(" ", s)
+    s = "".join(ch for ch in s if ch == "\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Co", "Cs"))
+    return "\n".join(line.rstrip() for line in s.split("\n")).strip("\n")
 
 
 def sender_address(value: str) -> str:

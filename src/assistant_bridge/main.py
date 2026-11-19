@@ -112,6 +112,7 @@ async def serve(config: Config) -> None:
         timeout_seconds=config.run_timeout_seconds,
         max_concurrent=config.max_concurrent_runs,
         env=env,
+        settings_file=str(config.claude_settings) if config.claude_settings else None,
     )
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -123,6 +124,10 @@ async def serve(config: Config) -> None:
         bots = []
         for p in config.profiles:
             p.workspace.mkdir(parents=True, exist_ok=True)
+            dot = p.workspace / ".claude"
+            if hasattr(os, "getuid") and (not dot.is_dir() or dot.stat().st_uid != 0):
+                log.warning("[%s] %s is missing or not owned by root: Claude could give itself settings or hooks. "
+                            "Run deploy/install.sh as root.", p.name, dot)
             bots.append(ProfileBot(p, TelegramAPI(p.bot_token, client), store, runner))
         pollers = [asyncio.create_task(b.poll_forever(), name=f"poll-{b.profile.name}") for b in bots]
         if config.tools.approvals:

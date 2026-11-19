@@ -37,6 +37,8 @@ InaccessiblePaths=-/opt -/srv -/var/www -/etc/claude-assistant
 # other projects on this server). Unix sockets (the helper daemons) still work.
 ProtectProc=invisible
 IPAddressDeny=localhost
+# ...except the local DNS resolver (systemd-resolved), which everything needs.
+IPAddressAllow=127.0.0.53/32
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

@@ -45,6 +45,8 @@ rsync -a --delete \
   --exclude config.toml --exclude '*.env' \
   "$SRC_DIR"/ "$APP_DIR"/
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+# Whatever happens next, never leave the code owned by the assistant user.
+trap 'chown -R root:"$APP_USER" "$APP_DIR"; chmod -R go-w "$APP_DIR"' EXIT
 as_app "cd '$APP_DIR' && UV_PYTHON_PREFERENCE=only-system ~/.local/bin/uv sync --no-dev -q --python /usr/bin/python3"
 # Read-only for the assistant from here on: Claude must not be able to change the code it runs under.
 chown -R root:"$APP_USER" "$APP_DIR"

@@ -64,7 +64,8 @@ def deliver(
         # Only a plain file name, saved under save_dir: never a path. The text comes from other people,
         # so writing it anywhere (e.g. ~/.ssh/authorized_keys) would be a way around the permission rules.
         name = out.removeprefix(f"{save_dir.as_posix()}/")
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}", name) or ".." in name:
+        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}", name) or ".." in name
+                or name.lower().startswith("claude")):  # CLAUDE.md here would be loaded as instructions
             raise SystemExit(f"-o takes a plain file name (saved under {save_dir}/), not {out!r}")
     save_dir.mkdir(exist_ok=True)
     if save_dir.is_symlink() or not save_dir.is_dir():

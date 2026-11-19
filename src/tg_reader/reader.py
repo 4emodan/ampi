@@ -17,7 +17,9 @@ from typing import Any
 MAX_LIMIT = 2000
 DIALOG_SCAN = 1000  # how many dialogs to look through when resolving a chat by name
 DIALOG_TTL = 300  # seconds the chat list is cached
-REQUESTS_PER_MINUTE = 20
+REQUESTS_PER_MINUTE = 20  # cost units per minute for the assistant; one unit is about one API call
+WATCHER_UNITS_PER_MINUTE = 20  # separate budget for the bridge's watchers ("since"), so Claude can't starve them
+MAX_SEARCH = 200
 RESOLVES_PER_DAY = 20  # lookups of @usernames that are not in the chat list
 SINCE_BATCH = 200
 # Chats the assistant may never read: 777000 is Telegram's own service chat with login codes.
@@ -169,15 +171,16 @@ class Reader:
         self.clock = clock
         self._lock = asyncio.Lock()
         self._dialogs: tuple[float, list] | None = None
-        self._calls: deque[float] = deque()
+        self._calls: dict[str, deque[float]] = {"assistant": deque(), "watchers": deque()}
         self._cooldown_until = 0.0
         self._resolves: deque[float] = deque()
+        self._resolved: dict[str, int] = {}  # @username -> peer id, so repeat lookups cost nothing
 
     async def handle(self, request: dict) -> dict:
         """Never raises: errors come back as {"ok": False, "error": ...}."""
         async with self._lock:
             try:
-                self._admit()
+                self._admit(request)
                 return await self._dispatch(request)
             except UserError as e:
                 return {"ok": False, "error": str(e)}
@@ -187,15 +190,25 @@ class Reader:
                     self._cooldown_until = self.clock() + wait
                 return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    def _admit(self) -> None:
+    def _admit(self, request: dict) -> None:
+        """Charges the request about one unit per 100 messages it may fetch (Telegram pages by 100)."""
         now = self.clock()
         if now < self._cooldown_until:
             raise UserError(f"Telegram asked to slow down; try again in {int(self._cooldown_until - now) + 1} s")
-        while self._calls and now - self._calls[0] > 60:
-            self._calls.popleft()
-        if len(self._calls) >= REQUESTS_PER_MINUTE:
-            raise UserError("too many Telegram requests in the last minute; wait, and fetch more per request")
-        self._calls.append(now)
+        cmd = request.get("cmd")
+        limit = request.get("limit")
+        limit = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else 100
+        if cmd == "search":
+            limit = min(limit, MAX_SEARCH)
+        cost = max(1, min(-(-limit // 100), MAX_LIMIT // 100)) if cmd in ("history", "search") else 1
+        bucket, budget = (("watchers", WATCHER_UNITS_PER_MINUTE) if cmd == "since"
+                          else ("assistant", REQUESTS_PER_MINUTE))
+        calls = self._calls[bucket]
+        while calls and now - calls[0] > 60:
+            calls.popleft()
+        if len(calls) + cost > budget:
+            raise UserError("too many Telegram requests in the last minute; wait a minute (big fetches count more)")
+        calls.extend([now] * cost)
 
     async def _dispatch(self, request: dict) -> dict:
         cmd = request.get("cmd")
@@ -268,10 +281,12 @@ class Reader:
             raise UserError(f"{s!r} isn't a valid @username")
         exact, partial = [], []
         for d in await self.dialogs():
-            if d.id in self.deny:
-                continue
             name = d.name or ""
             username = (getattr(getattr(d, "entity", None), "username", None) or "").lower()
+            if d.id in self.deny:
+                if want_id == d.id or (want_user and want_user == username):
+                    raise UserError("that chat is off limits")
+                continue
             if want_id is not None:
                 if d.id == want_id:
                     return d.entity, name, d.id
@@ -286,14 +301,20 @@ class Reader:
             raise UserError(f"no chat with id {want_id} in your chat list (use the id `tg-read chats` shows)")
         if want_user is not None:
             # Not one of your chats: Telegram resolves the public username. That call has strict flood
-            # limits, so it is capped per day.
-            now = self.clock()
-            while self._resolves and now - self._resolves[0] > 86400:
-                self._resolves.popleft()
-            if len(self._resolves) >= RESOLVES_PER_DAY:
-                raise UserError("too many lookups of unknown @usernames today")
-            self._resolves.append(now)
-            return s, s, None
+            # limits, so new lookups are capped per day; known ones are remembered.
+            peer_id = self._resolved.get(want_user)
+            if peer_id is None:
+                now = self.clock()
+                while self._resolves and now - self._resolves[0] > 86400:
+                    self._resolves.popleft()
+                if len(self._resolves) >= RESOLVES_PER_DAY:
+                    raise UserError("too many lookups of unknown @usernames today")
+                self._resolves.append(now)
+                peer_id = await self.client.get_peer_id(s)
+                self._resolved[want_user] = peer_id
+            if peer_id in self.deny:
+                raise UserError("that chat is off limits")
+            return s, s, peer_id
         matches = exact or partial
         if len(matches) == 1:
             return matches[0].entity, matches[0].name, matches[0].id
@@ -366,7 +387,7 @@ class Reader:
     async def search(self, query: str, limit: Any = None) -> str:
         if not query.strip():
             raise UserError("search for what?")
-        n = _limit(limit, 50)
+        n = min(_limit(limit, 50), MAX_SEARCH)
         found = []
         async for m in self.client.iter_messages(None, search=query, limit=n):
             if getattr(m, "chat_id", None) in self.deny:

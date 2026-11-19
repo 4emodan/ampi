@@ -159,7 +159,7 @@ def todoist_ops(a: argparse.Namespace) -> list[dict]:
     if c == "comment":
         return [{"op": "todoist.comment", "args": {"id": a.id, "text": a.text}}]
     if c == "new-project":
-        return [{"op": "todoist.add_project", "args": {"name": a.name, "parent": a.parent}}]
+        return [{"op": "todoist.add_project", "args": {"name": a.name, "project": a.parent}}]
     if c == "new-section":
         return [{"op": "todoist.add_section", "args": {"project": a.project, "name": a.name}}]
     if c == "new-label":

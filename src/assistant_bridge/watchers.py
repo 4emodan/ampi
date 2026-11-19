@@ -30,6 +30,7 @@ SEEN_MAX = 2000
 MAX_ITEMS = 50  # per run; the rest are handled on the next check
 FAILS_BEFORE_NOTICE = 3
 RUN_FAILS_BEFORE_SKIP = 5
+QUICK_FAILURE_MS = 60_000  # a run that failed faster than this most likely did nothing yet
 LATE_LIMIT = timedelta(hours=3)  # a scheduled run missed by more than this (server down) is skipped
 
 
@@ -92,22 +93,26 @@ class Watch:
             return
         if self.w.kind == "schedule":  # a briefing is never repeated, even if the run fails
             store.set_watch_state(profile, self.w.name, new_state)
+        if self.run_failures:
+            prompt += ("\n\n(A previous attempt at these items failed partway. Check what was already done, "
+                       "e.g. tasks added, labels set or notes written, before acting, so nothing is done twice.)")
         result = await self.bot.run_watcher(self.w, prompt, quiet_errors=True)
-        if result.ok:
+        if result.ok or result.cancelled:  # the owner stopped it: don't run the same batch again
             self.run_failures = 0
             store.set_watch_state(profile, self.w.name, new_state)
             return
         self.run_failures += 1
         error = result.error or "error"
-        if self.run_failures == FAILS_BEFORE_NOTICE or self.w.kind == "schedule":
-            await self.bot.notify(f"⚠️ Watcher {self.w.name}: the assistant couldn't handle new items: {error}")
-        if self.run_failures >= RUN_FAILS_BEFORE_SKIP:
+        # Retry only failures that probably happened before any work was done (usage limit, network,
+        # login): a run that worked for a while may have already acted, and repeating it duplicates that.
+        quick = not result.timed_out and (result.duration_ms or 0) < QUICK_FAILURE_MS
+        if self.w.kind == "schedule" or not quick or self.run_failures >= RUN_FAILS_BEFORE_SKIP:
             store.set_watch_state(profile, self.w.name, new_state)
             self.run_failures = 0
-            await self.bot.notify(
-                f"⚠️ Watcher {self.w.name}: gave up on this batch after {RUN_FAILS_BEFORE_SKIP} failed runs. "
-                f"What was skipped is in chats/watch-{self.w.name}/."
-            )
+            what = "" if self.w.kind == "schedule" else f" Skipped this batch; it's in chats/watch-{self.w.name}/."
+            await self.bot.notify(f"⚠️ Watcher {self.w.name}: the run failed ({error}).{what}")
+        elif self.run_failures == FAILS_BEFORE_NOTICE:
+            await self.bot.notify(f"⚠️ Watcher {self.w.name}: the assistant keeps failing ({error}); will retry.")
 
     async def _failed(self, error: str) -> None:
         self.failures += 1

@@ -295,7 +295,7 @@ async def td_comment(s: Services, a: dict) -> Result:
 
 async def td_add_project(s: Services, a: dict) -> Result:
     (name,) = need(a, "name")
-    p = await s.todoist.add_project(name, a.get("parent"))
+    p = await s.todoist.add_project(name, a.get("project"))  # optional parent project (name or id)
     return f"Project created: {p['name']} [{p['id']}]"
 
 
@@ -376,9 +376,15 @@ def _describe_task(verb: str, suffix: str = "") -> Callable[[Services, dict], Aw
 
 
 async def describe_update(s: Services, a: dict) -> str:
-    changes = [f"{k} → “{clean(a[k], 200)}”" for k in ("content", "description", "due", "deadline", "priority", "labels")
-               if a.get(k) is not None]
-    return f"Change {await _task_title(s, a.get('id', '?'))}: " + "; ".join(changes)
+    lines = [f"Change {await _task_title(s, a.get('id', '?'))}:"]
+    for k in ("content", "due", "deadline", "priority", "labels"):
+        if a.get(k) is not None:
+            value = ", ".join(a[k]) if isinstance(a[k], list) else a[k]
+            lines.append(f"  {k} → “{clean(value)}”")
+    if a.get("description") is not None:
+        lines.append("  description →")
+        lines.append(clean_block(a["description"]))
+    return "\n".join(lines)
 
 
 async def describe_move(s: Services, a: dict) -> str:
@@ -568,6 +574,32 @@ async def describe_delete_label(s: Services, a: dict) -> str:
     return f"Delete the Gmail label “{clean(a.get('name'))}” (the emails keep existing)"
 
 
+async def shares_with_others(services: Services, o: dict) -> bool:
+    """Adding a task or section to a shared Todoist project shows it to (and may notify) other people,
+    so it needs approval like any other message."""
+    if o["op"] not in ("todoist.add", "todoist.add_section"):
+        return False
+    a = o["args"]
+    projects = {p["id"]: p for p in await services.todoist.projects()}
+    pid = None
+    if a.get("parent"):
+        pid = (await services.todoist.task(a["parent"])).get("project_id")
+    elif a.get("project"):
+        pid = await services.todoist.project_id(a["project"])
+    return bool(pid and projects.get(pid, {}).get("is_shared"))
+
+
+async def describe_add(s: Services, a: dict) -> str:
+    where = a.get("project") or (f"the project of task {a.get('parent')}" if a.get("parent") else "Inbox")
+    what = clean(a.get("content") or a.get("name", ""))
+    if not await shares_with_others(s, {"op": "todoist.add", "args": a}):
+        return f"Add “{what}” to “{clean(where)}”"
+    lines = [f"Add “{what}” to the SHARED project “{clean(where)}” (its members will see it)"]
+    if a.get("description"):
+        lines.append(clean_block(a["description"]))
+    return "\n".join(lines)
+
+
 OPS: dict[str, Op] = {op.name: op for op in [
     # Todoist: reading and adding are safe; changing existing tasks and commenting need approval.
     Op("todoist.tasks", False, td_tasks),
@@ -577,9 +609,9 @@ OPS: dict[str, Op] = {op.name: op for op in [
     Op("todoist.completed", False, td_completed),
     Op("todoist.ids", False, td_ids),
     Op("todoist.show", False, td_show),
-    Op("todoist.add", False, td_add),
+    Op("todoist.add", False, td_add, describe_add, "Add task"),
     Op("todoist.add_project", False, td_add_project),
-    Op("todoist.add_section", False, td_add_section),
+    Op("todoist.add_section", False, td_add_section, describe_add, "Add section"),
     Op("todoist.add_label", False, td_add_label),
     Op("todoist.comment", True, td_comment, describe_comment, "Comment"),
     Op("todoist.update", True, td_update, describe_update, "Change task"),
@@ -652,6 +684,13 @@ class Approvals:
         self.db = sqlite3.connect(str(self.path))
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(approvals)")}
+        for column, kind in (("nonce", "TEXT"), ("message_id", "INTEGER")):
+            if column not in have:  # databases created by older versions
+                self.db.execute(f"ALTER TABLE approvals ADD COLUMN {column} {kind}")
+        # Requests from before nonces existed can never be answered safely.
+        self.db.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND nonce IS NULL")
+        self.db.commit()
 
     def add(self, ops: list[dict], summary: str, reason: str | None) -> int:
         cur = self.db.execute(
@@ -757,15 +796,15 @@ async def execute(services: Services, ops: list[dict]) -> tuple[bool, str, dict]
 async def summarize(services: Services, ops: list[dict], policy: Policy) -> str:
     """The text the owner approves: a header counting every action, then each action in full.
     Raises if it wouldn't fit, rather than hiding anything."""
-    counts = Counter(OPS[o["op"]].label or o["op"] for o in ops if policy.critical(o["op"]))
+    counts = Counter(OPS[o["op"]].label or o["op"] for o in ops)
     header = f"{len(ops)} action(s): " + ", ".join(f"{n}× {label}" for label, n in counts.items())
     lines = [header]
     for o in ops:
         op = OPS[o["op"]]
         if op.describe:
             line = await op.describe(services, o["args"])
-        else:
-            line = f"{o['op']} " + clean(json.dumps(o["args"], ensure_ascii=False), 400)
+        else:  # shown in full; if that is too long, the size check below refuses the request
+            line = f"{o['op']} " + clean(json.dumps(o["args"], ensure_ascii=False))
         lines.append("• " + line)
     summary = "\n".join(lines)
     size = len(summary.encode("utf-16-le")) // 2  # how Telegram counts message length

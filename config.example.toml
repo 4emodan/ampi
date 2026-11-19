@@ -16,6 +16,10 @@ max_concurrent_runs = 2
 # A single run (one message, including long research) is stopped after this many seconds.
 run_timeout_seconds = 1800
 
+# Root-owned Claude Code settings passed to every run: blocks all reads and writes outside the
+# profile workspace (Claude's own login, the bot's config, other projects). Strongly recommended.
+claude_settings = "/home/assistant/app/deploy/claude-settings.json"
+
 # Helper services (docs/SETUP.md, sections 7-8). approvals = true shows Todoist/Gmail approval
 # requests to the first profile's owner as Approve/Reject buttons.
 # [tools]

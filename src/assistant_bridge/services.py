@@ -10,12 +10,16 @@ class ServiceError(Exception):
     pass
 
 
+class ServiceUnavailable(ServiceError):
+    """The request certainly wasn't delivered (the connection itself failed)."""
+
+
 async def ask(path: str, payload: dict, *, timeout: float = 300) -> dict:
     """Sends one JSON request and returns the reply. Raises ServiceError if the service is unreachable."""
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(path, limit=64 * 1024 * 1024), 10)
     except (OSError, asyncio.TimeoutError, AttributeError, NotImplementedError) as e:
-        raise ServiceError(f"service at {path} is not reachable ({type(e).__name__})") from e
+        raise ServiceUnavailable(f"service at {path} is not reachable ({type(e).__name__})") from e
     try:
         writer.write(json.dumps(payload).encode() + b"\n")
         await writer.drain()

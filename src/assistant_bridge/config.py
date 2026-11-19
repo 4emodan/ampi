@@ -98,6 +98,9 @@ class Config:
     run_timeout_seconds: int
     profiles: tuple[Profile, ...]
     tools: Tools = Tools()
+    # Root-owned Claude Code settings passed to every run (deploy/claude-settings.json: blocks reads and
+    # writes outside the workspace). None = not passed.
+    claude_settings: Path | None = None
 
 
 def _str_list(value: object, field: str) -> tuple[str, ...]:
@@ -195,6 +198,17 @@ def _parse_watchers(raw: object, where: str) -> tuple[Watcher, ...]:
         out.append(Watcher(name=name, kind=kind, query=query.strip(), every_minutes=float(every), at=at, days=days,
                            allowed_tools=tools))
     return tuple(out)
+
+
+def _settings_path(raw: object, resolve) -> Path | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw:
+        raise ConfigError("claude_settings must be a path")
+    path = resolve(raw)
+    if not path.is_file():
+        raise ConfigError(f"claude_settings: {path} not found")
+    return path
 
 
 def _parse_tools(raw: object) -> Tools:
@@ -315,4 +329,5 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
         run_timeout_seconds=_positive_int(raw.get("run_timeout_seconds", 1800), "run_timeout_seconds"),
         profiles=tuple(profiles),
         tools=tools,
+        claude_settings=_settings_path(raw.get("claude_settings"), resolve),
     )

@@ -235,7 +235,7 @@ def test_a_failed_run_is_retried_then_skipped_with_one_notice(setup):
         run(watch.tick())
     assert len(runner.calls) == RUN_FAILS_BEFORE_SKIP  # the same item was retried each time
     notices = [m["text"] for m in api.sent]
-    assert len(notices) == 2 and "Watcher inbox" in notices[0] and "gave up" in notices[1]
+    assert len(notices) == 2 and "keeps failing" in notices[0] and "Skipped this batch" in notices[1]
     run(watch.tick())
     assert len(runner.calls) == RUN_FAILS_BEFORE_SKIP  # skipped for good
 

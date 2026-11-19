@@ -29,6 +29,7 @@ class RunResult:
     cost_usd: float | None = None
     duration_ms: int | None = None
     timed_out: bool = False
+    cancelled: bool = False  # stopped by the owner (/cancel)
 
 
 def clean_env(environ: Mapping[str, str], secret_names: Iterable[str]) -> dict[str, str]:
@@ -54,13 +55,24 @@ DENIED_TOOLS = (
     "Read(~/config.toml.*)",
     "Read(~/.ssh/**)",
     "Read(~/data/**)",
+    # Inside the workspace: files that would give Claude new permissions, hooks, MCP servers or a
+    # rewritten persona on every later run.
+    "Edit(./.claude/**)",
+    "Edit(./.mcp.json)",
+    "Edit(./CLAUDE.md)",
+    "Edit(./CLAUDE.local.md)",
+    "Edit(./**/CLAUDE.md)",
+    "Edit(./**/CLAUDE.local.md)",
 )
 
 
 def scope_tools(allowed: Sequence[str]) -> list[str]:
     out: list[str] = []
     for tool in allowed:
-        tool = WORKSPACE_EDIT if tool in _EDIT_TOOLS else tool
+        base = tool.split("(", 1)[0]
+        # Any edit rule becomes "the workspace only"; a path rule like Edit(//**) is never passed on.
+        if base in _EDIT_TOOLS and not tool.startswith(("Edit(./", "Write(./")):
+            tool = WORKSPACE_EDIT
         if tool not in out:
             out.append(tool)
     return out
@@ -75,8 +87,11 @@ def build_args(
     allowed_tools: Sequence[str],
     append_system_prompt: str | None,
     extra_args: Sequence[str] = (),
+    settings_file: str | None = None,
 ) -> list[str]:
     args = [*command, "-p", "--output-format", "json", "--strict-mcp-config"]
+    if settings_file:  # root-owned; blocks all reads and writes outside the workspace (deploy/claude-settings.json)
+        args += ["--settings", settings_file]
     args += ["--resume", session_id] if resume else ["--session-id", session_id]
     if model:
         args += ["--model", model]
@@ -123,7 +138,9 @@ class ClaudeRunner:
         timeout_seconds: float,
         max_concurrent: int,
         env: Mapping[str, str] | None = None,
+        settings_file: str | None = None,
     ):
+        self._settings_file = settings_file
         self._command = tuple(command)
         self._timeout = timeout_seconds
         self._sem = asyncio.Semaphore(max_concurrent)
@@ -180,6 +197,7 @@ class ClaudeRunner:
                     allowed_tools=allowed_tools,
                     append_system_prompt=append_system_prompt,
                     extra_args=extra_args,
+                    settings_file=self._settings_file,
                 )
                 result = await self._exec(args, prompt, cwd)
                 if result.ok or attempt == 1 or not result.error:

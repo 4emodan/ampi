@@ -30,7 +30,9 @@ from typing import Any
 import httpx
 
 from .gmail import Gmail, GmailAuth
-from .ops import MAX_PENDING, OPS, Approvals, Policy, Services, clean, execute, prepare, summarize, validate
+from .ops import (
+    MAX_PENDING, OPS, Approvals, Policy, Services, clean, execute, prepare, shares_with_others, summarize, validate,
+)
 from .todoist import Todoist, ToolError
 
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
@@ -127,7 +129,12 @@ class Daemon:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     async def run(self, ops: list[dict], reason: Any) -> dict:
-        if any(self.policy.critical(o["op"]) for o in ops):
+        critical = False
+        for o in ops:
+            if self.policy.critical(o["op"]) or await shares_with_others(self.services, o):
+                critical = True
+                break
+        if critical:
             if self.approvals.pending_count() >= MAX_PENDING:
                 raise ToolError(f"{MAX_PENDING} requests are already waiting for the owner; wait for their answer")
             ops = await prepare(self.services, ops)

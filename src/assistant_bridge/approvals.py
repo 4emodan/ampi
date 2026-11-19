@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from . import chatlog
-from .services import ServiceError, ask
+from .services import ServiceError, ServiceUnavailable, ask
 from .telegram import TelegramError
 
 if TYPE_CHECKING:
@@ -90,9 +90,12 @@ class ApprovalRelay:
                 sent = await self.bot.api.send_buttons(self.bot.profile.owner_chat_id, text, buttons)
             except TelegramError as e:
                 log.warning("could not send approval request #%s: %s", approval_id, e)
-                if e.error_code is not None and 400 <= e.error_code < 500:
-                    self._sent.add(approval_id)  # e.g. the owner blocked the bot: don't retry every 3 s
-                continue
+                if e.error_code is not None and 400 <= e.error_code < 500 and e.error_code != 429:
+                    # Permanent (e.g. a bad request): don't retry every 3 s; tell the owner without buttons.
+                    self._sent.add(approval_id)
+                    await self.bot.notify(f"⚠️ Approval request #{approval_id} couldn't be shown ({e.description}); "
+                                          "it was not carried out.")
+                continue  # 429 / network: try again on the next tick
             self._sent.add(approval_id)
             notified = await self.ask(
                 self.socket, {"cmd": "approvals.notified", "id": approval_id, "message_id": sent.get("message_id")}
@@ -134,6 +137,11 @@ class ApprovalRelay:
                    "message_id": message.get("message_id")}
         try:
             resp = await self.ask(self.socket, payload, timeout=DECIDE_TIMEOUT)
+        except ServiceUnavailable:
+            # Nothing was sent, so nothing happened: keep the buttons so the owner can tap again.
+            await self.bot.notify(f"⚠️ The tools service isn't reachable right now; request #{approval_id} is "
+                                  "still waiting. Tap the button again in a minute.")
+            return
         except ServiceError as e:
             resp = {"ok": False, "error": f"no answer from the tools service ({e}); the outcome is unknown. "
                                           "Ask me to check `approvals` before trying again."}
