@@ -12,8 +12,8 @@ ExecStart=/home/ampitools/app/.venv/bin/ampi-tools serve
 # /run/ampi-tools/tools.sock: only ampitools and its group (the assistant) can reach it.
 RuntimeDirectory=ampi-tools
 RuntimeDirectoryMode=0750
-UMask=0007
-Restart=on-failure
+UMask=0077
+Restart=always
 RestartSec=10
 
 MemoryMax=300M
@@ -26,6 +26,17 @@ ReadWritePaths=/home/ampitools
 PrivateTmp=true
 NoNewPrivileges=true
 InaccessiblePaths=-/opt -/srv -/var/www
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+PrivateDevices=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

@@ -10,7 +10,7 @@ class ServiceError(Exception):
     pass
 
 
-async def ask(path: str, payload: dict, timeout: float = 300) -> dict:
+async def ask(path: str, payload: dict, *, timeout: float = 300) -> dict:
     """Sends one JSON request and returns the reply. Raises ServiceError if the service is unreachable."""
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(path, limit=64 * 1024 * 1024), 10)
@@ -25,6 +25,9 @@ async def ask(path: str, payload: dict, timeout: float = 300) -> dict:
     finally:
         writer.close()
     try:
-        return json.loads(data)
+        reply = json.loads(data)
     except ValueError as e:
         raise ServiceError(f"service at {path} sent a broken reply") from e
+    if not isinstance(reply, dict):
+        raise ServiceError(f"service at {path} sent a broken reply")
+    return reply

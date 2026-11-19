@@ -11,9 +11,9 @@ Setup: [docs/SETUP.md](docs/SETUP.md). Requirements: [REQUIREMENTS.md](REQUIREME
 
 ## Status: MVP
 
-Done: Telegram chat bridge, profiles, topics as conversations, groups (acts on everything you post or forward, e.g. a Clipboard group), attachments in and out, conversation logs shared across sessions (ask in one chat about another), read-only access to all your Telegram chats and their full history (optional `tg-reader`), per-conversation model, run log, systemd deployment with isolation.
+Done: Telegram chat bridge, profiles, topics as conversations, groups (acts on everything you post or forward, e.g. a Clipboard group), attachments in and out, conversation logs shared across sessions (ask in one chat about another), read-only access to all your Telegram chats and their full history (optional `tg-reader`), Todoist and Gmail with Telegram Approve/Reject buttons for anything critical (optional `ampi-tools`), watchers that act on new email/tasks/messages and scheduled briefings, per-conversation model, run log, systemd deployment with isolation.
 
-Not yet: scheduled tasks, email monitoring, Gmail/Calendar/Todoist/YouTube integrations, approval buttons for sending/deleting, voice transcription, streaming replies.
+Not yet: Google Calendar and YouTube integrations, voice transcription, streaming replies.
 
 ## Development
 

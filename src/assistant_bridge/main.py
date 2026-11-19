@@ -87,7 +87,24 @@ async def check(config: Config) -> int:
     return 0 if ok else 1
 
 
+def make_undumpable() -> bool:
+    """PR_SET_DUMPABLE=0: /proc/<pid>/environ, /mem etc. of this process become root-only, so the
+    claude runs (same Unix user) can't read the bot token from the bridge's environment or memory,
+    and can't impersonate the bridge to ampi-tools. Linux only; returns whether it worked."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(4, 0, 0, 0, 0) == 0  # PR_SET_DUMPABLE = 4
+    except (OSError, AttributeError):
+        return False
+
+
 async def serve(config: Config) -> None:
+    if not make_undumpable():
+        log.warning("could not make the process non-dumpable; the bot token is visible in /proc to the same user")
     store = Store(config.db_path)
     env = clean_env(os.environ, [p.bot_token_env for p in config.profiles])
     runner = ClaudeRunner(

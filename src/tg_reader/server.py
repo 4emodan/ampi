@@ -53,15 +53,16 @@ def _make_client():
 async def handle_connection(reader_obj: Reader, rd: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
     try:
         try:
-            request = json.loads(await rd.readline())  # ValueError if too long or not JSON
+            line = await asyncio.wait_for(rd.readline(), 10)
+            request = json.loads(line)  # ValueError if too long or not JSON
             if not isinstance(request, dict):
                 raise ValueError
-        except ValueError:
+        except (ValueError, asyncio.TimeoutError):
             response = {"ok": False, "error": "bad request"}
         else:
             log.info("request: %s", request.get("cmd"))
             response = await reader_obj.handle(request)
-        wr.write(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+        wr.write(json.dumps(response).encode() + b"\n")  # ASCII escapes: lone surrogates can't break it
         await wr.drain()
     except Exception:
         log.exception("connection failed")
@@ -87,10 +88,16 @@ async def _serve() -> None:
         sys.exit("Not logged in. Run `tg-reader login` as the tgreader user first.")
     me = await client.get_me()
     log.info("logged in as %s (id %s)", getattr(me, "first_name", "?"), me.id)
-    server = await serve_socket(Reader(client), socket_path())
+    deny = frozenset(int(x) for x in os.environ.get("TG_READER_DENY", "").replace(" ", "").split(",") if x)
+    server = await serve_socket(Reader(client, deny=deny), socket_path())
     log.info("listening on %s", socket_path())
     async with server:
-        await asyncio.gather(server.serve_forever(), client.disconnected)
+        serving = asyncio.ensure_future(server.serve_forever())
+        disconnected = asyncio.ensure_future(client.disconnected)
+        await asyncio.wait([serving, disconnected], return_when=asyncio.FIRST_COMPLETED)
+    # Telethon gave up reconnecting (or the server stopped): exit so systemd restarts us cleanly.
+    log.error("disconnected from Telegram; exiting")
+    sys.exit(1)
 
 
 async def _login() -> None:

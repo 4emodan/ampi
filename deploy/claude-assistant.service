@@ -8,7 +8,8 @@ Type=simple
 User=assistant
 Group=assistant
 WorkingDirectory=/home/assistant
-EnvironmentFile=/home/assistant/.config/claude-assistant/env
+# Bot tokens: root-only file, read by systemd before it drops to the assistant user.
+EnvironmentFile=/etc/claude-assistant/env
 Environment=PATH=/home/assistant/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/home/assistant/app/.venv/bin/claude-assistant --config /home/assistant/config.toml
 Restart=on-failure
@@ -31,7 +32,21 @@ ReadWritePaths=/home/assistant
 PrivateTmp=true
 NoNewPrivileges=true
 # Hide other projects that live outside /home (- = ignore if missing):
-InaccessiblePaths=-/opt -/srv -/var/www
+InaccessiblePaths=-/opt -/srv -/var/www -/etc/claude-assistant
+# Other users' processes are invisible, and no connections to local services (databases, APIs of
+# other projects on this server). Unix sockets (the helper daemons) still work.
+ProtectProc=invisible
+IPAddressDeny=localhost
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

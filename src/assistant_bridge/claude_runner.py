@@ -37,6 +37,35 @@ def clean_env(environ: Mapping[str, str], secret_names: Iterable[str]) -> dict[s
     return {k: v for k, v in environ.items() if k not in drop}
 
 
+# A bare "Edit"/"Write" rule would let Claude write anywhere the assistant user can (tested: in -p mode
+# it does). File edits are limited to the working directory (the profile workspace) instead.
+_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+WORKSPACE_EDIT = "Edit(./**)"
+
+# Reads Claude must never make, whatever the profile allows: secrets of the bridge, Claude's own login,
+# other processes' memory and environment. (Grep and Glob follow Read rules.)
+DENIED_TOOLS = (
+    "Read(//proc/**)",
+    "Read(//etc/claude-assistant/**)",
+    "Read(~/.config/**)",
+    "Read(~/.claude/**)",
+    "Read(~/.claude.json)",
+    "Read(~/config.toml)",
+    "Read(~/config.toml.*)",
+    "Read(~/.ssh/**)",
+    "Read(~/data/**)",
+)
+
+
+def scope_tools(allowed: Sequence[str]) -> list[str]:
+    out: list[str] = []
+    for tool in allowed:
+        tool = WORKSPACE_EDIT if tool in _EDIT_TOOLS else tool
+        if tool not in out:
+            out.append(tool)
+    return out
+
+
 def build_args(
     command: Sequence[str],
     *,
@@ -47,12 +76,13 @@ def build_args(
     append_system_prompt: str | None,
     extra_args: Sequence[str] = (),
 ) -> list[str]:
-    args = [*command, "-p", "--output-format", "json"]
+    args = [*command, "-p", "--output-format", "json", "--strict-mcp-config"]
     args += ["--resume", session_id] if resume else ["--session-id", session_id]
     if model:
         args += ["--model", model]
     if allowed_tools:
-        args += ["--allowedTools", ",".join(allowed_tools)]
+        args += ["--allowedTools", ",".join(scope_tools(allowed_tools))]
+    args += ["--disallowedTools", ",".join(DENIED_TOOLS)]
     if append_system_prompt:
         args += ["--append-system-prompt", append_system_prompt]
     args += list(extra_args)

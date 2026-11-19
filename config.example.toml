@@ -16,6 +16,13 @@ max_concurrent_runs = 2
 # A single run (one message, including long research) is stopped after this many seconds.
 run_timeout_seconds = 1800
 
+# Helper services (docs/SETUP.md, sections 7-8). approvals = true shows Todoist/Gmail approval
+# requests to the first profile's owner as Approve/Reject buttons.
+# [tools]
+# approvals = true
+# socket = "/run/ampi-tools/tools.sock"
+# tg_reader_socket = "/run/tg-reader/tg-reader.sock"
+
 # One [[profiles]] block per Telegram bot. Every profile is you; each gets its own
 # workspace (memory, notes, files, persona) and its own conversations.
 [[profiles]]
@@ -29,7 +36,8 @@ workspace = "profiles/personal"
 # Model alias or full name; omit to use Claude Code's default.
 model = "sonnet"
 # Tools Claude may use without asking. Anything else is denied (nobody can approve prompts).
-# With the Telegram reader (docs/SETUP.md, section 7) also add "Skill" and "Bash(tg-read:*)".
+# With the Telegram reader (docs/SETUP.md, section 7) also add "Skill" and "Bash(tg-read:*)";
+# with Todoist/Gmail (section 8) add "Bash(todoist:*)" and "Bash(gmail:*)".
 allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"]
 # Extra arguments passed to `claude` on every run (optional).
 extra_args = []
@@ -43,6 +51,23 @@ extra_args = []
 # name = "clipboard"
 # batch_seconds = 5       # messages forwarded together are handled in one run
 # fresh_session = true    # new context per batch (memory lives in notes files); false = one ongoing conversation
+
+# Time zone for scheduled watchers (default UTC).
+# timezone = "Europe/Athens"
+
+# Watchers: things the assistant checks on its own (docs/SETUP.md, section 9).
+# Instructions for each live in <workspace>/watchers/<name>.md.
+# [[profiles.watchers]]
+# name = "gmail-inbox"
+# kind = "gmail"            # gmail | todoist | telegram | schedule
+# query = "in:inbox"        # Gmail search, Todoist filter, or Telegram chat
+# every_minutes = 15
+#
+# [[profiles.watchers]]
+# name = "morning-briefing"
+# kind = "schedule"
+# at = ["08:00"]
+# days = ["mon", "tue", "wed", "thu", "fri"]
 
 # [[profiles]]
 # name = "work"

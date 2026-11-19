@@ -12,8 +12,8 @@ ExecStart=/home/tgreader/app/.venv/bin/tg-reader serve
 # /run/tg-reader/tg-reader.sock: only tgreader and the tgread group (the assistant) can reach it.
 RuntimeDirectory=tg-reader
 RuntimeDirectoryMode=0750
-UMask=0007
-Restart=on-failure
+UMask=0077
+Restart=always
 RestartSec=30
 
 MemoryMax=300M
@@ -27,6 +27,17 @@ ReadWritePaths=/home/tgreader
 PrivateTmp=true
 NoNewPrivileges=true
 InaccessiblePaths=-/opt -/srv -/var/www
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+PrivateDevices=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

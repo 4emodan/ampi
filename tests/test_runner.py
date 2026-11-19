@@ -32,10 +32,18 @@ def calls(log):
 
 def test_build_args_new_and_resume():
     new = build_args(["claude"], session_id="s", resume=False, model=None, allowed_tools=["Read"], append_system_prompt=None)
-    assert new == ["claude", "-p", "--output-format", "json", "--session-id", "s", "--allowedTools", "Read"]
+    assert new[:7] == ["claude", "-p", "--output-format", "json", "--strict-mcp-config", "--session-id", "s"]
+    assert new[7:9] == ["--allowedTools", "Read"]
+    assert new[9] == "--disallowedTools" and "Read(~/.claude/**)" in new[10] and "Read(//proc/**)" in new[10]
     resumed = build_args(["claude"], session_id="s", resume=True, model="opus", allowed_tools=[], append_system_prompt="x")
-    assert resumed[4:6] == ["--resume", "s"]
-    assert "--bare" not in resumed and ["--model", "opus"] == resumed[6:8]
+    assert resumed[5:7] == ["--resume", "s"]
+    assert "--bare" not in resumed and ["--model", "opus"] == resumed[7:9]
+
+
+def test_edits_are_limited_to_the_workspace():
+    args = build_args(["claude"], session_id="s", resume=False, model=None,
+                      allowed_tools=["Read", "Edit", "Write", "Bash(tg-read:*)"], append_system_prompt=None)
+    assert args[args.index("--allowedTools") + 1] == "Read,Edit(./**),Bash(tg-read:*)"
 
 
 def test_clean_env_drops_tokens_and_billing_vars():

@@ -40,6 +40,9 @@ src/assistant_bridge/   the bridge (Python 3.11+, only dependency httpx)
   claude_runner.py      runs `claude -p --output-format json` (--session-id / --resume), strips API-key env vars
   text.py               Markdown -> Telegram HTML, message splitting
   bot.py                one ProfileBot per Telegram bot: routing, commands, attachments, group batches
+  approvals.py          shows ampi-tools approval requests as Telegram buttons, sends back the answer
+  watchers.py           checks Gmail/Todoist/Telegram/the clock and starts Claude runs (watchers/<name>.md)
+  services.py           async client for the helper daemons' Unix sockets
   chatlog.py            logs every conversation to <workspace>/chats/ so any session can read the others
                         (the Bot API can't fetch chat history; these logs are the only history)
   main.py               entry point (`claude-assistant --config ... [--check]`)
@@ -47,10 +50,16 @@ src/tg_reader/          optional read-only access to the owner's Telegram accoun
   server.py             `tg-reader serve|login`: daemon as user `tgreader`, holds the session, Unix socket
   reader.py             the only allowed requests: list chats, read a chat, search (never send/delete)
   client.py             `tg-read`: stdlib-only client the assistant runs (skill: templates/skills/telegram)
+src/ampi_tools/         optional Todoist + Gmail with owner approval for critical actions
+  server.py             `ampi-tools serve|gmail-login|check`: daemon as user `ampitools`, holds the tokens
+  ops.py                every operation, which ones are critical, the approvals queue
+  todoist.py, gmail.py  API clients (httpx; Todoist API v1, Gmail REST with gmail.modify)
+  client.py             `todoist` / `gmail` commands the assistant runs (skills: templates/skills/)
 tests/                  pytest; fake claude CLI + fake Telegram API, no network
 deploy/                 install.sh, systemd unit (runs as user `assistant`, isolated);
-                        install-tg-reader.sh, tg-reader.service (user `tgreader`)
-templates/profile/      starter CLAUDE.md for a profile workspace
+                        install-tg-reader.sh, tg-reader.service (user `tgreader`);
+                        install-tools.sh, ampi-tools.service (user `ampitools`)
+templates/               starter CLAUDE.md, group/watcher instructions, skills
 docs/SETUP.md           server setup steps
 ```
 

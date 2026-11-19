@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -24,11 +25,12 @@ import sys
 import tomllib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from .gmail import Gmail, GmailAuth
-from .ops import OPS, Approvals, Policy, Services, execute, summarize, validate
+from .ops import MAX_PENDING, OPS, Approvals, Policy, Services, clean, execute, prepare, summarize, validate
 from .todoist import Todoist, ToolError
 
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
@@ -37,6 +39,16 @@ ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide"}
 log = logging.getLogger("ampi-tools")
 
 PidCheck = Callable[[int], Awaitable[bool]]
+
+
+def _int(v: Any) -> int:
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ToolError("bad id")
+    return v
+
+
+def _opt_int(v: Any) -> int | None:
+    return None if v is None else _int(v)
 
 
 def socket_path() -> str:
@@ -100,10 +112,13 @@ class Daemon:
             if cmd == "approvals.pending":
                 return {"ok": True, "items": self.approvals.unnotified()}
             if cmd == "approvals.notified":
-                self.approvals.mark_notified(int(request["id"]))
+                self.approvals.mark_notified(_int(request.get("id")), _opt_int(request.get("message_id")))
                 return {"ok": True}
             if cmd == "approvals.decide":
-                return await self.decide(int(request["id"]), bool(request.get("approve")))
+                return await self.decide(
+                    _int(request.get("id")), request.get("approve") is True,
+                    str(request.get("nonce") or ""), _opt_int(request.get("message_id")),
+                )
             raise ToolError(f"unknown command {cmd!r}")
         except ToolError as e:
             return {"ok": False, "error": str(e)}
@@ -111,9 +126,13 @@ class Daemon:
             log.exception("request failed")
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    async def run(self, ops: list[dict], reason: str | None) -> dict:
+    async def run(self, ops: list[dict], reason: Any) -> dict:
         if any(self.policy.critical(o["op"]) for o in ops):
-            summary = await summarize(self.services, ops)
+            if self.approvals.pending_count() >= MAX_PENDING:
+                raise ToolError(f"{MAX_PENDING} requests are already waiting for the owner; wait for their answer")
+            ops = await prepare(self.services, ops)
+            summary = await summarize(self.services, ops, self.policy)
+            reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
             approval_id = self.approvals.add(ops, summary, reason)
             log.info("approval #%s requested: %s", approval_id, [o["op"] for o in ops])
             return {
@@ -128,19 +147,28 @@ class Daemon:
         ok, text, extra = await execute(self.services, ops)
         return {"ok": ok, "text": text, **extra} if ok else {"ok": False, "error": text}
 
-    async def decide(self, approval_id: int, approve: bool) -> dict:
+    async def decide(self, approval_id: int, approve: bool, nonce: str, message_id: int | None) -> dict:
+        current = self.approvals.get(approval_id)
+        # The nonce is only ever given to the bridge (approvals.pending) and the button it sent; the
+        # message id is the one the bridge recorded for that button. A forged button fails both.
+        if current is None or not hmac.compare_digest(nonce, current.get("nonce") or ""):
+            raise ToolError("unknown or forged approval button")
+        if current.get("message_id") is not None and message_id != current["message_id"]:
+            raise ToolError("this button isn't the approval message that was sent for this request")
         item = self.approvals.claim(approval_id, "approved" if approve else "rejected")
         if item is None:
-            current = self.approvals.get(approval_id)
-            state = current["status"] if current else "unknown"
+            state = (self.approvals.get(approval_id) or {}).get("status", "unknown")
             return {"ok": True, "status": state, "text": f"Request #{approval_id} is already {state}."}
         if not approve:
             log.info("approval #%s rejected", approval_id)
             return {"ok": True, "status": "rejected", "text": "Rejected; nothing was done."}
-        ok, text, _ = await execute(self.services, json.loads(item["ops"]))
-        status = "done" if ok else "failed"
-        self.approvals.finish(approval_id, status, text)
-        log.info("approval #%s %s", approval_id, status)
+        ok, text, status = False, "interrupted", "failed"
+        try:
+            ok, text, _ = await execute(self.services, json.loads(item["ops"]))
+            status = "done" if ok else "failed"
+        finally:
+            self.approvals.finish(approval_id, status, text)
+            log.info("approval #%s %s", approval_id, status)
         return {"ok": True, "status": status, "text": text}
 
     def list_text(self) -> str:
@@ -156,14 +184,14 @@ class Daemon:
     async def connection(self, rd: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
         try:
             try:
-                request = json.loads(await rd.readline())
+                request = json.loads(await asyncio.wait_for(rd.readline(), 10))
                 if not isinstance(request, dict):
                     raise ValueError
-            except ValueError:
+            except (ValueError, asyncio.TimeoutError):
                 response = {"ok": False, "error": "bad request"}
             else:
                 response = await self.handle(request, peer_pid(wr))
-            wr.write(json.dumps(response, ensure_ascii=False).encode() + b"\n")
+            wr.write(json.dumps(response).encode() + b"\n")
             await wr.drain()
         except Exception:
             log.exception("connection failed")

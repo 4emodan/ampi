@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import html
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -27,6 +28,8 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 REDIRECT = "http://localhost:8765/"
 MAX_BODY = 20_000
+MAX_HTML = 300_000  # longer HTML is cut before parsing (the regexes would get slow)
+SAFE_PATH = re.compile(r"(/[A-Za-z0-9_-]{1,128})+")
 SYSTEM_LABELS = {
     "INBOX", "UNREAD", "STARRED", "IMPORTANT", "SPAM", "TRASH", "SENT", "DRAFT",
     "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS",
@@ -78,11 +81,12 @@ class GmailAuth:
         data = resp.json()
         if "refresh_token" not in data:
             raise ToolError(f"login failed: {data}")
-        old = os.umask(0o077)
-        try:
-            self.token_file.write_text(json.dumps({"refresh_token": data["refresh_token"]}))
-        finally:
-            os.umask(old)
+        tmp = self.token_file.with_name(self.token_file.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps({"refresh_token": data["refresh_token"]}))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.token_file)
 
     def configured(self) -> bool:
         return self.token_file.is_file()
@@ -101,7 +105,10 @@ class GmailAuth:
             }, timeout=30)
         except httpx.TransportError as e:
             raise ToolError(f"Google unreachable: {e!r}") from e
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            raise ToolError(f"Google sent an unexpected reply (HTTP {resp.status_code})") from None
         if "access_token" not in data:
             raise ToolError(f"Gmail login expired or was revoked ({data.get('error')}); run `ampi-tools gmail-login`")
         self._access = data["access_token"]
@@ -117,6 +124,8 @@ class Gmail:
         self._labels: tuple[float, list[dict]] | None = None
 
     async def _req(self, method: str, path: str, params: dict | None = None, body: Any = None) -> Any:
+        if not SAFE_PATH.fullmatch(path):  # ids are validated in ops.py too; this is the last line of defence
+            raise ToolError(f"refusing odd API path {path!r}")
         headers = {"Authorization": f"Bearer {await self.auth.token()}"}
         try:
             resp = await self._client.request(
@@ -128,7 +137,10 @@ class Gmail:
             raise ToolError(f"Gmail: not found ({path})")
         if resp.status_code >= 400:
             raise ToolError(f"Gmail error {resp.status_code}: {resp.text[:300]}")
-        return resp.json() if resp.content else None
+        try:
+            return resp.json() if resp.content else None
+        except ValueError:
+            raise ToolError(f"Gmail sent an unexpected reply (HTTP {resp.status_code})") from None
 
     # --- labels -----------------------------------------------------------------------
 
@@ -226,42 +238,56 @@ class Gmail:
         for mid in ids:
             await self._req("POST", f"/messages/{mid}/untrash")
 
-    async def _compose(self, to: str, subject: str, body: str, cc: str | None, reply_to: str | None) -> dict:
-        msg = EmailMessage()
-        thread_id = None
+    async def resolve_mail(self, fields: dict) -> dict:
+        """Turns {to?, cc?, subject?, body, reply_to?} into the exact fields that will be sent:
+        recipients, subject and threading headers are fixed here, so what the owner approves is what goes out."""
+        out = {k: fields.get(k) or "" for k in ("to", "cc", "subject", "body")}
+        out.update(thread_id="", in_reply_to="", references="")
+        reply_to = fields.get("reply_to")
         if reply_to:
             orig = await self._req("GET", f"/messages/{reply_to}", {
                 "format": "metadata", "metadataHeaders": ["Message-ID", "References", "Subject", "From", "Reply-To"],
             })
             h = headers(orig)
-            thread_id = orig.get("threadId")
+            out["thread_id"] = orig.get("threadId") or ""
             if h.get("message-id"):
-                msg["In-Reply-To"] = h["message-id"]
-                msg["References"] = (h.get("references", "") + " " + h["message-id"]).strip()
-            if not subject:
+                out["in_reply_to"] = h["message-id"]
+                out["references"] = (h.get("references", "") + " " + h["message-id"]).strip()
+            if not out["subject"]:
                 s = h.get("subject", "")
-                subject = s if s.lower().startswith("re:") else f"Re: {s}"
-            if not to:
-                to = h.get("reply-to") or h.get("from", "")
-        if not to:
+                out["subject"] = s if s.lower().startswith("re:") else f"Re: {s}"
+            if not out["to"]:
+                out["to"] = h.get("reply-to") or h.get("from", "")
+        if not recipients(out["to"]):
             raise ToolError("who to? (--to)")
-        msg["To"] = to
-        if cc:
-            msg["Cc"] = cc
-        msg["Subject"] = subject or ""
-        msg.set_content(body)
-        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        out: dict = {"raw": raw}
-        if thread_id:
-            out["threadId"] = thread_id
         return out
 
-    async def draft(self, to: str, subject: str, body: str, cc: str | None = None, reply_to: str | None = None) -> dict:
-        message = await self._compose(to, subject, body, cc, reply_to)
+    @staticmethod
+    def compose(f: dict) -> dict:
+        msg = EmailMessage()
+        try:
+            msg["To"] = f["to"]
+            if f.get("cc"):
+                msg["Cc"] = f["cc"]
+            msg["Subject"] = f.get("subject") or ""
+            if f.get("in_reply_to"):
+                msg["In-Reply-To"] = f["in_reply_to"]
+                msg["References"] = f.get("references") or f["in_reply_to"]
+            msg.set_content(f["body"])
+        except (ValueError, TypeError) as e:
+            raise ToolError(f"can't build that email: {e}") from None
+        out: dict = {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode()}
+        if f.get("thread_id"):
+            out["threadId"] = f["thread_id"]
+        return out
+
+    async def draft(self, fields: dict) -> dict:
+        message = self.compose(await self.resolve_mail(fields))
         return await self._req("POST", "/drafts", body={"message": message})
 
-    async def send(self, to: str, subject: str, body: str, cc: str | None = None, reply_to: str | None = None) -> dict:
-        return await self._req("POST", "/messages/send", body=await self._compose(to, subject, body, cc, reply_to))
+    async def send_resolved(self, resolved: dict) -> dict:
+        """Sends exactly the fields fixed by resolve_mail when the owner was asked."""
+        return await self._req("POST", "/messages/send", body=self.compose(resolved))
 
     async def get_draft(self, draft_id: str) -> dict:
         return await self._req("GET", f"/drafts/{draft_id}", {"format": "full"})
@@ -309,12 +335,49 @@ def _b64(data: str) -> str:
     return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", errors="replace")
 
 
+class _TextExtractor(HTMLParser):
+    """Linear-time HTML to text (regexes over hostile HTML can take minutes)."""
+
+    BLOCK = {"p", "div", "tr", "li", "br", "h1", "h2", "h3", "h4", "h5", "h6", "table", "ul", "ol"}
+    SKIP = {"script", "style", "head", "title"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self.skip = 0
+        self.href: list[str | None] = []
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in self.SKIP:
+            self.skip += 1
+        elif tag == "a":
+            self.href.append(dict(attrs).get("href"))
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self.SKIP:
+            self.skip = max(0, self.skip - 1)
+        elif tag == "a" and self.href:
+            href = self.href.pop()
+            if href and href.startswith(("http://", "https://")) and not self.skip:
+                self.out.append(f" ({href})")
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self.skip:
+            self.out.append(data)
+
+
 def html_to_text(s: str) -> str:
-    s = re.sub(r"(?is)<(script|style|head).*?</\1>", "", s)
-    s = re.sub(r"(?is)<a\s[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", r"\2 (\1)", s)
-    s = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>|</h\d>|</li>", "\n", s)
-    s = re.sub(r"<[^>]+>", "", s)
-    s = html.unescape(s)
+    parser = _TextExtractor()
+    try:
+        parser.feed(s[:MAX_HTML])
+        parser.close()
+    except Exception:  # malformed HTML: keep what was parsed
+        pass
+    s = "".join(parser.out)
     s = re.sub(r"[ \t ]+", " ", s)
     return re.sub(r"\n\s*\n+", "\n\n", s).strip()
 

@@ -33,14 +33,16 @@ Open the login link it prints, sign in with your Claude account, then type `/exi
 
 ## 4. Configure
 
-- `/home/assistant/.config/claude-assistant/env`: one line per bot, e.g. `TG_TOKEN_PERSONAL=123:ABC…`
+All three are root-owned, so the assistant can't read the tokens or change its own config or persona. Edit them as root.
+
+- `/etc/claude-assistant/env`: one line per bot, e.g. `TG_TOKEN_PERSONAL=123:ABC…`
 - `/home/assistant/config.toml`: set `owner_ids` to your Telegram user ID; add a `[[profiles]]` block per extra bot.
 - `/home/assistant/profiles/<name>/CLAUDE.md`: the profile's persona and rules (a template is created for `personal`).
 
 Check it:
 
 ```bash
-sudo -iu assistant bash -c 'set -a; . ~/.config/claude-assistant/env; ~/app/.venv/bin/claude-assistant --config ~/config.toml --check'
+sudo bash /home/assistant/app/deploy/check.sh
 ```
 
 ## 5. Start
@@ -87,11 +89,62 @@ The login session could do anything your account can, so it is kept away from th
 
 To revoke it: Telegram → Settings → Devices → **Ampi reader (read-only)** → Terminate session, and `systemctl disable --now tg-reader`.
 
+## 8. Todoist and Gmail (optional)
+
+`ampi-tools` lets the assistant read and organize your Todoist and Gmail. The tokens live with a separate `ampitools` user that the assistant can't see. The assistant gets `todoist` and `gmail` commands (and skills explaining them).
+
+**Approvals.** Reading, adding tasks, labelling, archiving and drafting happen directly. Critical actions are only queued: sending email, trashing, deleting, and changing, moving or completing existing Todoist tasks. You get a Telegram message with **✅ Approve / ❌ Reject** buttons, and the result appears under it. Only the bridge process can answer those requests, so the assistant can't approve its own. Change the policy in `/home/ampitools/config.toml` (root-owned): for example, let it move Todoist tasks without asking. Sending, trashing and deleting always ask.
+
+1. `sudo bash deploy/install-tools.sh`
+2. **Todoist:** Todoist → Settings → Integrations → Developer → copy the API token into `TODOIST_TOKEN=` in `/home/ampitools/env`.
+3. **Gmail** (once, about 5 minutes):
+   1. At <https://console.cloud.google.com/>, create a project (any name). Under **APIs & Services → Library**, enable the **Gmail API**.
+   2. **OAuth consent screen** (Google Auth Platform): user type **External**, app name e.g. "Ampi", your email as the support and developer contact. Under **Audience**, add your Gmail address as a test user, then click **Publish app**. In "Testing" mode, Google expires the login after 7 days. Publishing doesn't need verification for your own use: you just click through an "unverified app" warning once.
+   3. **Clients → Create client → Desktop app**. Copy the client ID and secret into `GMAIL_CLIENT_ID=` and `GMAIL_CLIENT_SECRET=` in `/home/ampitools/env`.
+   4. Connect your account. This prints a link: open it, allow access, and paste back the `http://localhost:8765/?...` address that the browser ends up on (the page itself won't load):
+      ```bash
+      sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools gmail-login'
+      ```
+   The scope is `gmail.modify`: read, label, draft, send and trash. Permanent deletion isn't possible with it. To revoke: <https://myaccount.google.com/permissions>.
+4. `systemctl restart ampi-tools`, then check:
+   `sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools check'`
+5. In `config.toml`, add `"Bash(todoist:*)"` and `"Bash(gmail:*)"` to `allowed_tools`, add a `[tools]` section with `approvals = true` (see `config.example.toml`), and `systemctl restart claude-assistant`.
+
+## 9. Watchers and briefings (optional)
+
+Watchers let the assistant act without being asked. They check Gmail, Todoist, a Telegram chat, or the clock, and start Claude with instructions from `<workspace>/watchers/<name>.md`. Starter instructions are installed by `install-tools.sh` (from `templates/watchers/`). Ask the assistant to change them, or edit them yourself.
+
+```toml
+[[profiles]]
+timezone = "Europe/Athens"
+
+[[profiles.watchers]]
+name = "gmail-inbox"        # instructions: watchers/gmail-inbox.md
+kind = "gmail"              # gmail | todoist | telegram | schedule
+query = "in:inbox"          # Gmail search / Todoist filter / Telegram chat name, @username or id
+every_minutes = 15
+
+[[profiles.watchers]]
+name = "morning-briefing"
+kind = "schedule"
+at = ["08:00"]              # local times
+days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+```
+
+- The first check only records what already exists. Only items that arrive later are handled, so you won't get your whole backlog at once.
+- Each run is a fresh Claude session. The report goes to your private chat, starting with 🔔 and the watcher's name, and only if there's something worth saying. Runs are logged in `chats/watch-<name>/`, and reports also go to the main chat's log, so you can reply to them normally.
+- If a watcher keeps failing (e.g. Gmail isn't connected yet), you get one ⚠️ message, then nothing more until it works again.
+- `telegram` watchers need the reader from section 7 (e.g. a channel you repost things to).
+
 ## Isolation and limits
 
 - The service runs as `assistant`, sees no other home directories, and gets a read-only view of the rest of the filesystem.
 - If your other projects live outside `/home` (e.g. `/srv`, `/opt`), add them to `InaccessiblePaths=` (`/opt`, `/srv` and `/var/www` are already hidden) in `/etc/systemd/system/claude-assistant.service`, then `systemctl daemon-reload && systemctl restart claude-assistant`.
-- Memory is capped at 2 GB for the bridge plus all Claude runs; `max_concurrent_runs` in the config (default 2) limits parallel runs.
+- Memory is capped at 2 GB for the bridge plus all Claude runs; `max_concurrent_runs` in the config (default 2) limits parallel runs. Watcher runs take turns (one at a time), so they never use up every slot.
+- Other users' processes are hidden from it, and it can't connect to services on localhost (other projects' databases or APIs).
+- Claude may only edit files inside the profile workspace; a bare `Edit`/`Write` in `allowed_tools` is narrowed to `Edit(./**)`. Reading the bridge's secrets (`/proc`, `~/.config`, `~/.claude`, `config.toml`, `data/`) is always denied, and project MCP servers are ignored.
+- The bridge process is marked non-dumpable, so the `claude` runs it starts can't read its environment or memory.
+- The workspace's `.claude/` (skills, settings) and `CLAUDE.md` are root-owned, so Claude can't give itself new permissions or rewrite its persona.
 
 ## Updating
 

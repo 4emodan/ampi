@@ -34,10 +34,13 @@ def request(payload: dict, path: str | None = None, timeout: float = 300) -> dic
             return {"ok": False, "error": "the Telegram reader isn't running (service tg-reader on the server)"}
         except PermissionError:
             return {"ok": False, "error": f"no permission to use {path} (is this user in the tgread group?)"}
-        s.sendall(json.dumps(payload).encode() + b"\n")
-        chunks = []
-        while chunk := s.recv(65536):
-            chunks.append(chunk)
+        try:
+            s.sendall(json.dumps(payload).encode() + b"\n")
+            chunks = []
+            while chunk := s.recv(65536):
+                chunks.append(chunk)
+        except OSError as e:
+            return {"ok": False, "error": f"the Telegram reader didn't answer ({type(e).__name__})"}
     try:
         return json.loads(b"".join(chunks))
     except ValueError:
@@ -56,11 +59,20 @@ def deliver(
         return text
     if out is None:
         stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
-        target = save_dir / f"{stamp}-{_slug(label)}.md"
+        name = f"{stamp}-{_slug(label)}.md"
     else:
-        target = Path(out)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text + "\n", encoding="utf-8")
+        # Only a plain file name, saved under save_dir: never a path. The text comes from other people,
+        # so writing it anywhere (e.g. ~/.ssh/authorized_keys) would be a way around the permission rules.
+        name = out.removeprefix(f"{save_dir.as_posix()}/")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,80}", name) or ".." in name:
+            raise SystemExit(f"-o takes a plain file name (saved under {save_dir}/), not {out!r}")
+    save_dir.mkdir(exist_ok=True)
+    if save_dir.is_symlink() or not save_dir.is_dir():
+        raise SystemExit(f"{save_dir} must be a real folder")
+    target = save_dir / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(target, flags, 0o644), "w", encoding="utf-8") as f:
+        f.write(text + "\n")
     first_line = text.split("\n", 1)[0]
     return f"{first_line}\nSaved {len(text):,} characters to {target} — read it with the Read tool."
 
@@ -79,12 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--since", help="YYYY-MM-DD[THH:MM] UTC, inclusive")
     h.add_argument("--until", help="YYYY-MM-DD[THH:MM] UTC, inclusive for a bare date")
     h.add_argument("-s", "--search", help="only messages containing this")
-    h.add_argument("-o", "--out", help="save to this file instead of printing")
+    h.add_argument("--before-id", type=int, help="only messages older than this message id (paging)")
+    h.add_argument("-o", "--out", help="save under ./telegram/ with this file name instead of printing")
 
     s = sub.add_parser("search", help="search all chats")
     s.add_argument("query")
     s.add_argument("-n", "--limit", type=int, default=50)
-    s.add_argument("-o", "--out", help="save to this file instead of printing")
+    s.add_argument("-o", "--out", help="save under ./telegram/ with this file name instead of printing")
     return p
 
 

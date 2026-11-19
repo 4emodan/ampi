@@ -28,29 +28,50 @@ def request(payload: dict, path: str | None = None, timeout: float = 300) -> dic
             return {"ok": False, "error": "the tools service isn't running (ampi-tools on the server)"}
         except PermissionError:
             return {"ok": False, "error": f"no permission to use {path}"}
-        s.sendall(json.dumps(payload).encode() + b"\n")
-        chunks = []
-        while chunk := s.recv(65536):
-            chunks.append(chunk)
+        try:
+            s.sendall(json.dumps(payload).encode() + b"\n")
+            chunks = []
+            while chunk := s.recv(65536):
+                chunks.append(chunk)
+        except OSError as e:
+            return {"ok": False, "error": f"the tools service didn't answer ({type(e).__name__})"}
     try:
-        return json.loads(b"".join(chunks))
+        reply = json.loads(b"".join(chunks))
     except ValueError:
         return {"ok": False, "error": "the tools service sent a broken reply"}
+    return reply if isinstance(reply, dict) else {"ok": False, "error": "the tools service sent a broken reply"}
+
+
+def workspace_file(name: str, max_bytes: int = 200_000) -> str:
+    """Reads a file the assistant wrote in its workspace (the current directory) and nothing else:
+    no absolute paths, no `..`, no symlinks, no hidden files, so these commands can't be used to read secrets."""
+    root = Path.cwd().resolve()
+    p = Path(name)
+    if p.is_absolute() or ".." in p.parts or any(part.startswith(".") for part in p.parts):
+        raise SystemExit(f"{name!r}: use a file in your working directory (relative path, no '..' or hidden files)")
+    full = root / p
+    if full.is_symlink() or not full.resolve().is_relative_to(root) or not full.is_file():
+        raise SystemExit(f"{name!r} is not a regular file in your working directory")
+    if full.stat().st_size > max_bytes:
+        raise SystemExit(f"{name!r} is too big")
+    return full.read_text(encoding="utf-8")
 
 
 def _body(args: argparse.Namespace) -> str | None:
     if getattr(args, "body_file", None):
-        return Path(args.body_file).read_text(encoding="utf-8")
+        return workspace_file(args.body_file)
     return getattr(args, "body", None)
 
 
 def _load_plan(path: str, prefix: str) -> list[dict]:
     try:
-        plan = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+        plan = json.loads(workspace_file(path))
+    except ValueError as e:
         raise SystemExit(f"can't read plan {path}: {e}")
     if isinstance(plan, dict):
         plan = plan.get("ops", [])
+    if not isinstance(plan, list) or not all(isinstance(i, dict) for i in plan):
+        raise SystemExit("a plan is a JSON list of {\"op\": ..., ...} objects")
     ops = []
     for item in plan:
         name = item.get("op", "")

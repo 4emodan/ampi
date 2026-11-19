@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -9,6 +10,7 @@ import httpx
 
 BASE = "https://api.todoist.com/api/v1"
 PAGE = 200
+SAFE_PATH = re.compile(r"(/[A-Za-z0-9_-]{1,128})+")
 
 
 class ToolError(Exception):
@@ -39,6 +41,8 @@ class Todoist:
         self._cache: dict[str, tuple[float, Any]] = {}
 
     async def _req(self, method: str, path: str, params: dict | None = None, body: dict | None = None) -> Any:
+        if not SAFE_PATH.fullmatch(path):  # ids are validated in ops.py too; this is the last line of defence
+            raise ToolError(f"refusing odd API path {path!r}")
         params = {k: v for k, v in (params or {}).items() if v is not None}
         try:
             resp = await self._client.request(
@@ -54,7 +58,10 @@ class Todoist:
             raise ToolError(f"Todoist error {resp.status_code}: {resp.text[:300]}")
         if resp.status_code == 204 or not resp.content:
             return None
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError:
+            raise ToolError(f"Todoist sent an unexpected reply (HTTP {resp.status_code})") from None
 
     async def _all(self, path: str, params: dict | None = None, limit: int = 1000) -> list[dict]:
         out: list[dict] = []
@@ -120,11 +127,17 @@ class Todoist:
     async def comments(self, task_id: str) -> list[dict]:
         return await self._all("/comments", {"task_id": task_id}, 100)
 
-    async def completed(self, since: str, until: str, limit: int = 200) -> list[dict]:
-        data = await self._req(
-            "GET", "/tasks/completed/by_completion_date", {"since": since, "until": until, "limit": PAGE}
-        )
-        return (data or {}).get("items", [])[:limit]
+    async def completed(self, since: str, until: str, limit: int = 500) -> list[dict]:
+        out: list[dict] = []
+        cursor = None
+        while len(out) < limit:
+            data = await self._req("GET", "/tasks/completed/by_completion_date",
+                                   {"since": since, "until": until, "limit": PAGE, "cursor": cursor}) or {}
+            out += data.get("items", [])
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
+        return out[:limit]
 
     # --- writing ----------------------------------------------------------------------
 

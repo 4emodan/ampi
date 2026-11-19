@@ -25,7 +25,6 @@ Filters use Todoist syntax: `today | overdue`, `7 days`, `#Inbox`, `##Work` (wit
 ```
 todoist add "Call the bank" [-p Project] [-s Section] [--due "fri 10am"] [--deadline 2026-12-01]
             [--priority p1..p4] [-l label -l label2] [-d "description"] [--parent TASK_ID]
-todoist comment TASK_ID "text"
 todoist new-project NAME [--parent PROJECT]     todoist new-section PROJECT NAME     todoist new-label NAME
 ```
 
@@ -35,12 +34,13 @@ todoist new-project NAME [--parent PROJECT]     todoist new-section PROJECT NAME
 todoist update ID [--content ..] [--due ..|none] [--deadline ..] [--priority ..] [-l ..|--no-labels] [-d ..]
 todoist move ID [ID ...] -p PROJECT [-s SECTION]
 todoist complete ID [ID ...]      todoist reopen ID      todoist delete ID [ID ...]
+todoist comment TASK_ID "text"   (collaborators in shared projects may be notified)
 todoist apply plan.json           many changes as ONE approval request
 todoist approvals                 recent requests and what happened
 ```
 
 These don't run right away. The owner gets Approve/Reject buttons in Telegram and sees the result
-there. Add `-m "why"` before the subcommand (`todoist -m "inbox triage" move ...`) so the owner knows
+there. One request must fit on one screen (split big plans), and at most 10 can wait at once. Add `-m "why"` before the subcommand (`todoist -m "inbox triage" move ...`) so the owner knows
 why. Don't repeat a request or look for another way to do it.
 
 **Batch your changes.** When organizing, don't send twenty separate requests. Write a plan file in

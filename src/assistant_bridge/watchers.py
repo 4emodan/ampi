@@ -1,13 +1,19 @@
 """Watchers: the bridge checks Gmail, Todoist, Telegram chats or the clock on its own, and lets Claude
 act on what's new (instructions in <workspace>/watchers/<name>.md).
 
-The first check only records what already exists, so a new watcher doesn't flood you with the backlog.
+- The first check (and the first after the query changes) only records what already exists, so a new
+  watcher doesn't flood the owner with the backlog.
+- New items count as handled only after Claude's run succeeded; a failing run is retried on the next
+  check, and after several failures in a row the owner is told once and the batch is skipped.
+- Content from outside (emails, messages) is wrapped in a block with a random tag, and the watcher
+  prompt tells Claude it is data, not instructions.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
@@ -19,11 +25,17 @@ if TYPE_CHECKING:
     from .bot import ProfileBot
 
 log = logging.getLogger(__name__)
-Ask = Callable[[str, dict], Awaitable[dict]]
+Ask = Callable[..., Awaitable[dict]]
 SEEN_MAX = 2000
 MAX_ITEMS = 50  # per run; the rest are handled on the next check
 FAILS_BEFORE_NOTICE = 3
+RUN_FAILS_BEFORE_SKIP = 5
 LATE_LIMIT = timedelta(hours=3)  # a scheduled run missed by more than this (server down) is skipped
+
+
+def untrusted(text: str) -> str:
+    tag = f"untrusted-{secrets.token_hex(4)}"
+    return f"<{tag}>\n{text.replace(tag, '')}\n</{tag}>"
 
 
 class Watch:
@@ -41,10 +53,16 @@ class Watch:
         self.ask = ask_fn
         self.clock = clock
         self.failures = 0
+        self.run_failures = 0
 
     @property
     def interval(self) -> float:
         return 30.0 if self.w.kind == "schedule" else self.w.every_minutes * 60
+
+    @property
+    def source(self) -> str:
+        """What the state belongs to; if the config changes, the state starts over."""
+        return f"{self.w.kind}:{self.w.query}"
 
     async def run_forever(self) -> None:
         await asyncio.sleep(5)  # let the bot connect first
@@ -58,6 +76,8 @@ class Watch:
     async def tick(self) -> None:
         store, profile = self.bot.store, self.bot.profile.name
         state = store.get_watch_state(profile, self.w.name)
+        if state is not None and state.get("source") != self.source:
+            state = None  # the watcher now looks at something else: start from a fresh baseline
         try:
             prompt, new_state = await self.check(state)
         except ServiceError as e:
@@ -66,9 +86,28 @@ class Watch:
         if self.failures >= FAILS_BEFORE_NOTICE:
             await self.bot.notify(f"✅ Watcher {self.w.name} works again.")
         self.failures = 0
-        store.set_watch_state(profile, self.w.name, new_state)
-        if prompt:
-            await self.bot.run_watcher(self.w, prompt)
+        new_state["source"] = self.source
+        if not prompt:
+            store.set_watch_state(profile, self.w.name, new_state)
+            return
+        if self.w.kind == "schedule":  # a briefing is never repeated, even if the run fails
+            store.set_watch_state(profile, self.w.name, new_state)
+        result = await self.bot.run_watcher(self.w, prompt, quiet_errors=True)
+        if result.ok:
+            self.run_failures = 0
+            store.set_watch_state(profile, self.w.name, new_state)
+            return
+        self.run_failures += 1
+        error = result.error or "error"
+        if self.run_failures == FAILS_BEFORE_NOTICE or self.w.kind == "schedule":
+            await self.bot.notify(f"⚠️ Watcher {self.w.name}: the assistant couldn't handle new items: {error}")
+        if self.run_failures >= RUN_FAILS_BEFORE_SKIP:
+            store.set_watch_state(profile, self.w.name, new_state)
+            self.run_failures = 0
+            await self.bot.notify(
+                f"⚠️ Watcher {self.w.name}: gave up on this batch after {RUN_FAILS_BEFORE_SKIP} failed runs. "
+                f"What was skipped is in chats/watch-{self.w.name}/."
+            )
 
     async def _failed(self, error: str) -> None:
         self.failures += 1
@@ -96,34 +135,38 @@ class Watch:
         kind = self.w.kind
         args = {"query": self.w.query, "limit": 200} if kind == "gmail" else {"filter": self.w.query, "limit": 500}
         resp = await self._tool(self.tools.socket, {"cmd": "run", "ops": [{"op": f"{kind}.ids", "args": args}]})
-        ids: list[str] = resp.get("ids", [])
+        ids = [i for i in resp.get("ids", []) if isinstance(i, str)]
         if state is None:
             return None, {"seen": ids[:SEEN_MAX]}
         seen = set(state.get("seen", []))
         new = [i for i in ids if i not in seen][:MAX_ITEMS]
         if not new:
-            return None, state
+            return None, dict(state)
         show = {"ids": new} if kind == "gmail" else {"ids": new, "filter": self.w.query}
         listing = await self._tool(self.tools.socket, {"cmd": "run", "ops": [{"op": f"{kind}.show", "args": show}]})
         merged = (new + [i for i in state.get("seen", []) if i not in new])[:SEEN_MAX]
         what = "email(s)" if kind == "gmail" else "task(s)"
         prompt = (
             f'Watcher "{self.w.name}": {len(new)} new {what} in {kind} matching `{self.w.query}`:\n\n'
-            f"{listing.get('text', '')}"
+            + untrusted(listing.get("text", ""))
         )
         return prompt, {"seen": merged}
 
-    # --- Telegram: messages after the last seen id ---------------------------------------
+    # --- Telegram: messages after the last seen id, oldest first -------------------------
 
     async def _telegram(self, state: dict | None) -> tuple[str | None, dict]:
         after = state.get("last_id") if state else None
-        resp = await self._tool(self.tools.tg_reader_socket, {"cmd": "since", "chat": self.w.query, "after_id": after})
-        new_state = {"last_id": resp.get("last_id", after)}
+        # Once known, the chat is followed by its id, so renaming it (or a new chat with a similar
+        # name) can't switch the watcher to another chat.
+        chat = (state or {}).get("peer_id") or self.w.query
+        resp = await self._tool(self.tools.tg_reader_socket, {"cmd": "since", "chat": chat, "after_id": after})
+        new_state = {"last_id": resp.get("last_id", after), "peer_id": resp.get("peer_id") or (state or {}).get("peer_id")}
         if after is None or not resp.get("count"):
             return None, new_state
+        more = "\n(More new messages follow in the next run.)" if resp.get("more") else ""
         prompt = (
             f'Watcher "{self.w.name}": {resp["count"]} new message(s) in the Telegram chat '
-            f"\"{resp.get('chat', self.w.query)}\":\n\n{resp.get('text', '')}"
+            f"\"{resp.get('chat', self.w.query)}\", oldest first:\n\n" + untrusted(resp.get("text", "")) + more
         )
         return prompt, new_state
 
@@ -143,7 +186,7 @@ class Watch:
                 if slot <= now:
                     due = slot
         if due is None:
-            return None, state or {}
+            return None, dict(state or {})
         key = due.strftime("%Y-%m-%d %H:%M")
         if state is None or state.get("last", "") >= key:
             return None, {"last": max(key, (state or {}).get("last", ""))}

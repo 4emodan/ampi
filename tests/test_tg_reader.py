@@ -39,13 +39,19 @@ class FakeClient:
         for d in self.dialogs[:limit]:
             yield d
 
-    async def iter_messages(self, entity, limit=None, offset_date=None, search=None, min_id=0):
+    def __getattr__(self, name):
+        # Read-only by construction: any other Telethon method (send_message, delete_messages,
+        # send_read_acknowledge, ...) fails the test.
+        raise AssertionError(f"the reader must not call client.{name}")
+
+    async def iter_messages(self, entity, limit=None, offset_date=None, search=None, min_id=0, offset_id=0,
+                            reverse=False):
         self.calls.append(dict(entity=entity, limit=limit, offset_date=offset_date, search=search))
         pool = [m for msgs in self.messages.values() for m in msgs] if entity is None else \
             list(self.messages.get(getattr(entity, "id", entity), []))
         count = 0
-        for m in sorted(pool, key=lambda m: m.date, reverse=True):  # newest first, like Telegram
-            if m.id <= min_id:
+        for m in sorted(pool, key=lambda m: m.date, reverse=not reverse):  # newest first, like Telegram
+            if m.id <= min_id or (offset_id and m.id >= offset_id):
                 continue
             if offset_date and m.date >= offset_date:
                 continue
@@ -83,8 +89,8 @@ def test_chats_lists_kinds_and_filters(reader):
 
 
 def test_resolve_by_exact_name_beats_partial(reader):
-    entity, name = run(reader.resolve("clipboard"))
-    assert entity is CLIP
+    entity, name, peer_id = run(reader.resolve("clipboard"))
+    assert entity is CLIP and peer_id == -1009876543210
 
 
 def test_resolve_ambiguous_lists_ids(reader):
@@ -96,6 +102,9 @@ def test_resolve_by_id_and_username(reader):
     assert run(reader.resolve("11"))[0] is ANNA
     assert run(reader.resolve("@newsch"))[0] is NEWS
     assert run(reader.resolve("me"))[0] == "me"
+    assert run(reader.resolve("-1009876543210"))[0] is CLIP
+    for bad in ("@", "@x", "9876543210"):  # empty/short usernames, unmarked channel id
+        assert not run(reader.handle({"cmd": "history", "chat": bad}))["ok"]
 
 
 def test_history_newest_n_printed_oldest_first(reader):
@@ -199,7 +208,88 @@ def test_json_payload_shape():
 
 def test_since_reports_only_newer_messages(reader):
     base = run(reader.handle({"cmd": "since", "chat": "Clipboard"}))
-    assert base == {"ok": True, "text": "", "count": 0, "last_id": 5, "chat": "Clipboard"}
-    new = run(reader.handle({"cmd": "since", "chat": "Clipboard", "after_id": 3}))
-    assert new["count"] == 2 and new["last_id"] == 5
+    assert base == {"ok": True, "text": "", "count": 0, "last_id": 5, "chat": "Clipboard",
+                    "peer_id": -1009876543210, "more": False}
+    new = run(reader.handle({"cmd": "since", "chat": -1009876543210, "after_id": 3}))
+    assert new["count"] == 2 and new["last_id"] == 5 and not new["more"]
     assert new["text"].index("item 4") < new["text"].index("item 5") and "item 3" not in new["text"]
+
+
+def test_since_in_a_burst_takes_the_oldest_first_and_loses_nothing(reader):
+    out = run(reader.since("Clipboard", after_id=0, limit=2))
+    assert out["more"] and out["last_id"] == 2 and "item 1" in out["text"] and "item 3" not in out["text"]
+    out = run(reader.since("Clipboard", after_id=out["last_id"], limit=2))
+    assert out["last_id"] == 4 and "item 3" in out["text"]
+
+
+def test_paging_hint_uses_message_ids(reader):
+    text = run(reader.history("Clipboard", limit=2))
+    assert "--before-id 4" in text
+    older = run(reader.history("Clipboard", limit=2, before_id=4))
+    assert "item 2" in older and "item 3" in older and "item 4" not in older
+
+
+def test_requests_are_rate_limited_and_flood_waits_respected(reader):
+    now = [1000.0]
+    reader.clock = lambda: now[0]
+    for _ in range(20):
+        assert run(reader.handle({"cmd": "chats"}))["ok"]
+    res = run(reader.handle({"cmd": "chats"}))
+    assert not res["ok"] and "too many" in res["error"]
+    now[0] += 61
+
+    class FloodWait(Exception):
+        seconds = 120
+
+    async def flood(*a, **k):
+        raise FloodWait("wait")
+        yield  # pragma: no cover
+
+    reader.client.iter_messages = flood
+    assert not run(reader.handle({"cmd": "history", "chat": "Anna"}))["ok"]
+    res = run(reader.handle({"cmd": "chats"}))
+    assert not res["ok"] and "slow down" in res["error"]
+
+
+def test_dialogs_are_cached(reader):
+    calls = []
+    original = reader.client.iter_dialogs
+
+    def counting(limit=None):
+        calls.append(limit)
+        return original(limit)
+
+    reader.client.iter_dialogs = counting
+    run(reader.handle({"cmd": "chats"}))
+    run(reader.handle({"cmd": "history", "chat": "Anna"}))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("bad", [
+    {"cmd": "history", "chat": 5}, {"cmd": "history", "chat": "Anna", "search": {"x": 1}},
+    {"cmd": "since", "chat": "Anna", "after_id": -1}, {"cmd": "since", "chat": "Anna", "after_id": "5"},
+    {"cmd": "history", "chat": "Anna", "before_id": True}, {"cmd": "chats", "limit": "lots"},
+])
+def test_bad_field_types_are_errors(reader, bad):
+    assert run(reader.handle(bad))["ok"] is False
+
+
+@pytest.mark.parametrize("out", ["../x.md", "/home/assistant/.ssh/authorized_keys", "~/.bashrc", "sub/x.md", ".hidden"])
+def test_client_never_writes_outside_its_folder(tmp_path, monkeypatch, out):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        client.deliver("x", out, "x")
+    assert client.deliver("x", "notes.md", "x").endswith("read it with the Read tool.")
+    assert (tmp_path / "telegram" / "notes.md").is_file()
+
+
+def test_login_code_chat_is_never_readable():
+    service = NS(id=777000, first_name="Telegram", last_name=None, username=None, bot=False)
+    d = dialog(service, "Telegram", is_user=True)
+    code = message(1, "Login code: 12345", chat=None, sender=service)
+    code.chat_id = 777000
+    r = Reader(FakeClient([d], {777000: [code]}))
+    assert "Telegram" not in run(r.chats())
+    assert not run(r.handle({"cmd": "history", "chat": "Telegram"}))["ok"]
+    assert not run(r.handle({"cmd": "history", "chat": "777000"}))["ok"]
+    assert "12345" not in run(r.search("Login code"))

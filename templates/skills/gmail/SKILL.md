@@ -30,7 +30,8 @@ gmail draft --to a@b.c --subject "..." --body-file mail/draft.txt     (or --repl
 ```
 
 Drafts are safe: they appear in the owner's Gmail Drafts. Write longer bodies to a file in the
-workspace first and pass it with `--body-file`.
+workspace first and pass it with `--body-file` (a relative path inside the workspace; plan files too).
+Labels: TRASH, SPAM, SENT and DRAFT can't be added or removed with `label`; use `trash`.
 
 ## Sending and deleting (the owner approves each request)
 
@@ -43,7 +44,9 @@ gmail apply plan.json             many operations as ONE request
 gmail approvals                   recent requests and what happened
 ```
 
-These wait for the owner's Approve/Reject in Telegram. Add `-m "why"` before the subcommand. Don't
+These wait for the owner's Approve/Reject in Telegram, which shows them in full: an email to send
+may be at most 3000 characters (longer: save a draft and tell the owner), and one request must fit
+on one screen (otherwise split it). At most 10 requests can wait at once. Add `-m "why"` before the subcommand. Don't
 repeat a request or look for another way. Never send anything the owner hasn't asked for; for replies
 you think are needed, prepare a draft and tell them.
 

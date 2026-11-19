@@ -50,6 +50,9 @@ class Watcher:
     every_minutes: float  # how often to check (not for schedule)
     at: tuple[str, ...] = ()  # schedule: local times "HH:MM"
     days: tuple[str, ...] = DAYS  # schedule: weekdays
+    # Tools for this watcher's runs (None = the profile's). Watchers read untrusted email and messages,
+    # so a narrower set (e.g. without WebFetch) limits what injected text could make Claude do.
+    allowed_tools: tuple[str, ...] | None = None
 
     def instructions_path(self, workspace: Path) -> Path:
         return workspace / "watchers" / f"{self.name}.md"
@@ -105,6 +108,20 @@ def _str_list(value: object, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+# Flags that would bypass the subscription login or the permission rules the bridge sets.
+FORBIDDEN_FLAGS = (
+    "--bare", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode",
+    "--add-dir", "--settings", "--setting-sources", "--mcp-config", "--allowedTools", "--allowed-tools",
+    "--disallowedTools", "--disallowed-tools", "--plugin-dir",
+)
+
+
+def _check_flags(args: tuple[str, ...], field: str) -> None:
+    for a in args:
+        if a.split("=", 1)[0] in FORBIDDEN_FLAGS:
+            raise ConfigError(f"{field} must not contain {a.split('=', 1)[0]} (the bridge controls permissions)")
+
+
 def _positive_int(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ConfigError(f"{field} must be a positive integer")
@@ -131,6 +148,8 @@ def _parse_groups(raw: object, where: str) -> tuple[Group, ...]:
         fresh = g.get("fresh_session", True)
         if not isinstance(fresh, bool):
             raise ConfigError(f"{gw}: fresh_session must be true or false")
+        if name.startswith("watch-") or name == "private":
+            raise ConfigError(f"{gw}: group names can't be 'private' or start with 'watch-' (used for logs)")
         if any(x.chat_id == chat_id or x.name == name for x in groups):
             raise ConfigError(f"{gw}: duplicate group chat_id or name")
         groups.append(Group(chat_id=chat_id, name=name, batch_seconds=float(batch), fresh_session=fresh))
@@ -157,6 +176,10 @@ def _parse_watchers(raw: object, where: str) -> tuple[Watcher, ...]:
         every = w.get("every_minutes", 10)
         if not isinstance(every, (int, float)) or isinstance(every, bool) or not 1 <= every <= 1440:
             raise ConfigError(f"{ww}: every_minutes must be between 1 and 1440")
+        if kind != "schedule" and ("at" in w or "days" in w):
+            raise ConfigError(f"{ww}: at/days only apply to kind = \"schedule\"")
+        tools = w.get("allowed_tools")
+        tools = None if tools is None else _str_list(tools, f"{ww}.allowed_tools")
         at = _str_list(w.get("at", []), f"{ww}.at")
         if kind == "schedule":
             if not at:
@@ -169,7 +192,8 @@ def _parse_watchers(raw: object, where: str) -> tuple[Watcher, ...]:
             raise ConfigError(f"{ww}: days must be from {', '.join(DAYS)}")
         if any(x.name == name for x in out):
             raise ConfigError(f"{ww}: duplicate watcher name")
-        out.append(Watcher(name=name, kind=kind, query=query.strip(), every_minutes=float(every), at=at, days=days))
+        out.append(Watcher(name=name, kind=kind, query=query.strip(), every_minutes=float(every), at=at, days=days,
+                           allowed_tools=tools))
     return tuple(out)
 
 
@@ -208,8 +232,7 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
     claude_command = _str_list(raw.get("claude_command", ["claude"]), "claude_command")
     if not claude_command:
         raise ConfigError("claude_command must not be empty")
-    if "--bare" in claude_command:
-        raise ConfigError("claude_command must not contain --bare (it bypasses the subscription login)")
+    _check_flags(claude_command, "claude_command")
 
     profiles_raw = raw.get("profiles")
     if not isinstance(profiles_raw, list) or not profiles_raw:
@@ -253,8 +276,7 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
             raise ConfigError(f"{where}: model must be a string")
 
         extra_args = _str_list(p.get("extra_args", []), f"{where}.extra_args")
-        if "--bare" in extra_args:
-            raise ConfigError(f"{where}: extra_args must not contain --bare")
+        _check_flags(extra_args, f"{where}: extra_args")
 
         groups = _parse_groups(p.get("groups", []), where)
         watchers = _parse_watchers(p.get("watchers", []), where)
@@ -282,11 +304,15 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
             )
         )
 
+    tools = _parse_tools(raw.get("tools"))
+    if tools.approvals and len({o for p in profiles for o in p.owner_ids}) != 1:
+        raise ConfigError("[tools] approvals = true needs exactly one owner across all profiles")
+
     return Config(
         claude_command=claude_command,
         db_path=resolve(raw.get("db_path", "data/bridge.sqlite3")),
         max_concurrent_runs=_positive_int(raw.get("max_concurrent_runs", 2), "max_concurrent_runs"),
         run_timeout_seconds=_positive_int(raw.get("run_timeout_seconds", 1800), "run_timeout_seconds"),
         profiles=tuple(profiles),
-        tools=_parse_tools(raw.get("tools")),
+        tools=tools,
     )

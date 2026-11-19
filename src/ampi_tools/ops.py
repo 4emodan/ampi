@@ -1,26 +1,39 @@
 """Every action the assistant can take in Todoist and Gmail, and which ones need the owner's approval.
 
-An operation is {"op": name, "args": {...}}. Critical operations (sending, trashing/deleting,
-changing existing Todoist tasks) are queued in Approvals and only run after the owner taps
-Approve in Telegram. The policy can be adjusted in /home/ampitools/config.toml (never by the assistant).
+An operation is {"op": name, "args": {...}}. Arguments are checked against a strict schema (ids can't
+smuggle in API paths). Critical operations (sending, trashing/deleting, changing existing Todoist tasks,
+commenting) are *prepared* first: names are resolved to ids and email recipients/threads are fixed, so
+the summary the owner approves describes exactly what will run. They are then queued in Approvals and
+only run after the owner taps Approve in Telegram. The policy can be adjusted in
+/home/ampitools/config.toml (never by the assistant).
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import re
+import secrets
 import sqlite3
 import time
+import unicodedata
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
-from .gmail import Gmail, headers
+from .gmail import Gmail, format_full, headers
 from .todoist import Todoist, ToolError, api_priority
 
+log = logging.getLogger(__name__)
 Result = str | dict
 APPROVAL_TTL = 3 * 24 * 3600
+MAX_SUMMARY = 3300  # what fits in one Telegram message with the header; longer requests are refused
+MAX_MAIL_BODY = 3000  # longer emails can't be shown in full for approval: draft them instead
+MAX_PENDING = 10
 
 
 @dataclass
@@ -47,6 +60,105 @@ class Op:
     critical: bool
     run: Callable[[Services, dict], Awaitable[Result]]
     describe: Callable[[Services, dict], Awaitable[str]] | None = None
+    label: str = ""  # short name for the summary header, e.g. "Send email"
+
+
+# --- argument schema --------------------------------------------------------------------
+
+ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _id(v: Any) -> str:
+    if not isinstance(v, str) or not ID_RE.fullmatch(v):
+        raise ToolError(f"bad id {v!r}")
+    return v
+
+
+def _ids(v: Any) -> list[str]:
+    if not isinstance(v, list) or not 1 <= len(v) <= 500:
+        raise ToolError("ids must be a list of 1-500 ids")
+    return [_id(x) for x in v]
+
+
+def _text(limit: int, oneline: bool) -> Callable[[Any], str]:
+    def check(v: Any) -> str:
+        if not isinstance(v, str) or len(v) > limit:
+            raise ToolError(f"text too long or not text (max {limit} characters)")
+        if oneline and ("\n" in v or "\r" in v):
+            raise ToolError("this field can't contain line breaks")
+        return v
+
+    return check
+
+
+def _strs(item_limit: int, count: int) -> Callable[[Any], list[str]]:
+    def check(v: Any) -> list[str]:
+        if not isinstance(v, list) or len(v) > count:
+            raise ToolError(f"expected a list of at most {count} names")
+        return [_text(item_limit, True)(x) for x in v]
+
+    return check
+
+
+def _int(lo: int, hi: int) -> Callable[[Any], int]:
+    def check(v: Any) -> int:
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ToolError("expected a number")
+        return max(lo, min(hi, v))
+
+    return check
+
+
+def _priority(v: Any) -> str:
+    api_priority(v)  # raises if invalid
+    return str(v)
+
+
+def _date(v: Any) -> str:
+    if not isinstance(v, str) or not DATE_RE.fullmatch(v):
+        raise ToolError("dates must be YYYY-MM-DD")
+    return v
+
+
+SHORT, LONG = _text(300, True), _text(20_000, False)
+FIELDS: dict[str, Callable[[Any], Any]] = {
+    "id": _id, "ids": _ids, "reply_to": _id, "parent": _id,
+    "content": _text(500, True), "description": _text(16_000, False), "text": _text(15_000, False),
+    "due": _text(100, True), "deadline": _date, "priority": _priority, "labels": _strs(60, 30),
+    "project": SHORT, "section": SHORT, "name": _text(120, True),
+    "query": SHORT, "filter": SHORT, "since": SHORT, "until": SHORT, "limit": _int(1, 1000),
+    "to": _text(2000, True), "cc": _text(2000, True), "subject": _text(500, True), "body": _text(100_000, False),
+    "add": _strs(100, 20), "remove": _strs(100, 20),
+}
+# Filled in by prepare(); only the daemon sets these, never the caller.
+INTERNAL = {"project_id", "section_id", "where", "resolved", "message_id"}
+
+
+def validate(ops: Any) -> list[dict]:
+    if not isinstance(ops, list) or not ops:
+        raise ToolError("no operations")
+    if len(ops) > 100:
+        raise ToolError("at most 100 operations per request")
+    out = []
+    for o in ops:
+        if not isinstance(o, dict) or o.get("op") not in OPS:
+            raise ToolError(f"unknown operation {o.get('op') if isinstance(o, dict) else o!r}")
+        raw = o.get("args") or {}
+        if not isinstance(raw, dict):
+            raise ToolError(f"{o['op']}: args must be an object")
+        args = {}
+        for key, value in raw.items():
+            if value is None:
+                continue
+            if key not in FIELDS:
+                raise ToolError(f"{o['op']}: unknown argument {key!r}")
+            try:
+                args[key] = FIELDS[key](value)
+            except ToolError as e:
+                raise ToolError(f"{o['op']} {key}: {e}") from None
+        out.append({"op": o["op"], "args": args})
+    return out
 
 
 def need(args: dict, *keys: str) -> list[Any]:
@@ -58,16 +170,35 @@ def need(args: dict, *keys: str) -> list[Any]:
 
 def id_list(args: dict) -> list[str]:
     ids = args.get("ids") or ([args["id"]] if args.get("id") else [])
-    if not ids or not all(isinstance(i, str) and i for i in ids):
+    if not ids:
         raise ToolError("which message ids?")
     return ids
+
+
+_INVISIBLE = {"Cc", "Cf", "Zl", "Zp"}  # control, format (bidi, zero-width), line/paragraph separators
+
+
+def clean(s: Any, limit: int | None = None) -> str:
+    """For text shown in an approval: one line, no control/bidi/zero-width characters."""
+    s = "".join(" " if unicodedata.category(ch) in _INVISIBLE else ch for ch in str(s))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if limit is None or len(s) <= limit else s[:limit] + "…"
+
+
+def clean_block(s: str) -> str:
+    """Multi-line text for an approval, every line marked so it can't pose as part of the summary."""
+    lines = []
+    for line in s.splitlines() or [""]:
+        line = "".join(" " if unicodedata.category(ch) in _INVISIBLE else ch for ch in line).rstrip()
+        lines.append(f"│ {line}")
+    return "\n".join(lines)
 
 
 # --- Todoist ----------------------------------------------------------------------------
 
 
 async def td_tasks(s: Services, a: dict) -> Result:
-    tasks = await s.todoist.tasks(a.get("filter"), a.get("project"), int(a.get("limit") or 200))
+    tasks = await s.todoist.tasks(a.get("filter"), a.get("project"), a.get("limit", 200))
     if not tasks:
         return "No tasks."
     lines = await s.todoist.describe(tasks)
@@ -91,7 +222,8 @@ async def td_projects(s: Services, a: dict) -> Result:
     lines = []
     for p in projects:
         indent = "  " if p.get("parent_id") else ""
-        lines.append(f"{indent}- {p['name']} [{p['id']}]" + (" (Inbox)" if p.get("inbox_project") else ""))
+        flags = (" (Inbox)" if p.get("inbox_project") else "") + (" (shared)" if p.get("is_shared") else "")
+        lines.append(f"{indent}- {p['name']} [{p['id']}]{flags}")
         for sec in (x for x in sections if x["project_id"] == p["id"]):
             lines.append(f"{indent}    § {sec['name']} [{sec['id']}]")
     return "\n".join(lines) or "No projects."
@@ -116,26 +248,23 @@ async def td_completed(s: Services, a: dict) -> Result:
 
 
 async def td_ids(s: Services, a: dict) -> Result:
-    tasks = await s.todoist.tasks(a.get("filter"), a.get("project"), int(a.get("limit") or 500))
+    tasks = await s.todoist.tasks(a.get("filter"), a.get("project"), a.get("limit", 500))
     return {"ids": [t["id"] for t in tasks], "text": ""}
 
 
 async def td_show(s: Services, a: dict) -> Result:
     ids = set(a.get("ids") or [])
-    tasks = [t for t in await s.todoist.tasks(a.get("filter"), a.get("project"), 500) if t["id"] in ids]
+    tasks = [t for t in await s.todoist.tasks(a.get("filter"), a.get("project"), 1000) if t["id"] in ids]
     return "\n".join(await s.todoist.describe(tasks))
 
 
-async def _task_fields(s: Services, a: dict) -> dict:
+def _task_fields(a: dict) -> dict:
     out: dict[str, Any] = {}
     for key in ("content", "description"):
         if a.get(key) is not None:
             out[key] = a[key]
     if a.get("due"):
-        if a["due"] in ("none", "no date", "remove"):
-            out["due_string"] = "no date"
-        else:
-            out["due_string"] = a["due"]
+        out["due_string"] = "no date" if a["due"] in ("none", "no date", "remove") else a["due"]
     if a.get("deadline"):
         out["deadline_date"] = a["deadline"]
     if a.get("priority") is not None:
@@ -146,8 +275,8 @@ async def _task_fields(s: Services, a: dict) -> dict:
 
 
 async def td_add(s: Services, a: dict) -> Result:
-    (content,) = need(a, "content")
-    fields = await _task_fields(s, a)
+    need(a, "content")
+    fields = _task_fields(a)
     if a.get("project"):
         fields["project_id"] = await s.todoist.project_id(a["project"])
         if a.get("section"):
@@ -184,7 +313,7 @@ async def td_add_label(s: Services, a: dict) -> Result:
 
 async def td_update(s: Services, a: dict) -> Result:
     (tid,) = need(a, "id")
-    fields = await _task_fields(s, a)
+    fields = _task_fields(a)
     if not fields:
         raise ToolError("nothing to change")
     await s.todoist.update_task(tid, **fields)
@@ -192,13 +321,24 @@ async def td_update(s: Services, a: dict) -> Result:
 
 
 async def td_move(s: Services, a: dict) -> Result:
-    tid, project = need(a, "id", "project")
+    (tid,) = need(a, "id")
+    target = await _move_target(s, a)
+    await s.todoist.move_task(tid, **{k: v for k, v in target.items() if k in ("project_id", "section_id")})
+    return f"Moved {tid} to {target['where']}."
+
+
+async def _move_target(s: Services, a: dict) -> dict:
+    """Resolved once (prepare) and stored, so a project created later with the same name can't change it."""
+    if a.get("project_id"):
+        return {k: a[k] for k in ("project_id", "section_id", "where") if a.get(k)}
+    (project,) = need(a, "project")
     pid = await s.todoist.project_id(project)
-    target = {"project_id": pid}
+    names = {p["id"]: p["name"] for p in await s.todoist.projects()}
+    out = {"project_id": pid, "where": names.get(pid, pid)}
     if a.get("section"):
-        target = {"section_id": await s.todoist.section_id(pid, a["section"])}
-    await s.todoist.move_task(tid, **target)
-    return f"Moved {tid}."
+        out = {"section_id": await s.todoist.section_id(pid, a["section"]),
+               "where": f"{names.get(pid, pid)} / {a['section']}"}
+    return out
 
 
 async def td_complete(s: Services, a: dict) -> Result:
@@ -225,33 +365,42 @@ async def _task_title(s: Services, tid: str) -> str:
     except ToolError:
         return f"task {tid} (not found)"
     projects = {p["id"]: p["name"] for p in await s.todoist.projects()}
-    return f"“{t.get('content', '')}” ({projects.get(t.get('project_id'), '?')})"
+    return f"“{clean(t.get('content', ''), 150)}” ({clean(projects.get(t.get('project_id'), '?'))})"
 
 
-def _describe_task(verb: str) -> Callable[[Services, dict], Awaitable[str]]:
+def _describe_task(verb: str, suffix: str = "") -> Callable[[Services, dict], Awaitable[str]]:
     async def describe(s: Services, a: dict) -> str:
-        return f"{verb} {await _task_title(s, a.get('id', '?'))}"
+        return f"{verb} {await _task_title(s, a.get('id', '?'))}{suffix}"
 
     return describe
 
 
 async def describe_update(s: Services, a: dict) -> str:
-    changes = [f"{k} → {a[k]!r}" for k in ("content", "description", "due", "deadline", "priority", "labels")
+    changes = [f"{k} → “{clean(a[k], 200)}”" for k in ("content", "description", "due", "deadline", "priority", "labels")
                if a.get(k) is not None]
     return f"Change {await _task_title(s, a.get('id', '?'))}: " + "; ".join(changes)
 
 
 async def describe_move(s: Services, a: dict) -> str:
-    where = a.get("project", "?") + (f" / {a['section']}" if a.get("section") else "")
-    return f"Move {await _task_title(s, a.get('id', '?'))} to {where}"
+    return f"Move {await _task_title(s, a.get('id', '?'))} to {clean(a.get('where') or a.get('project', '?'))}"
+
+
+async def describe_comment(s: Services, a: dict) -> str:
+    return f"Comment on {await _task_title(s, a.get('id', '?'))} (collaborators may be notified):\n" + \
+        clean_block(a.get("text", ""))
 
 
 # --- Gmail ------------------------------------------------------------------------------
 
+# System labels the safe `label` op may add or remove. TRASH/SPAM (=deleting), SENT and DRAFT are not here.
+SAFE_SYSTEM_LABELS = {"INBOX", "UNREAD", "STARRED", "IMPORTANT", "CATEGORY_PERSONAL", "CATEGORY_SOCIAL",
+                      "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS"}
+BLOCKED_LABELS = {"TRASH", "SPAM", "SENT", "DRAFT", "CHAT"}
+
 
 async def gm_search(s: Services, a: dict) -> Result:
     (query,) = need(a, "query")
-    ids = await s.gmail.search_ids(query, int(a.get("limit") or 20))
+    ids = await s.gmail.search_ids(query, min(a.get("limit", 20), 200))
     if not ids:
         return f"No emails match {query!r}."
     return f"{len(ids)} emails (newest first):\n" + "\n".join(await s.gmail.summaries(ids))
@@ -276,7 +425,7 @@ async def gm_labels(s: Services, a: dict) -> Result:
 
 
 async def gm_drafts(s: Services, a: dict) -> Result:
-    drafts = await s.gmail.drafts(int(a.get("limit") or 20))
+    drafts = await s.gmail.drafts(min(a.get("limit", 20), 100))
     if not drafts:
         return "No drafts."
     summaries = await s.gmail.summaries([d["message"]["id"] for d in drafts])
@@ -285,11 +434,18 @@ async def gm_drafts(s: Services, a: dict) -> Result:
 
 async def gm_ids(s: Services, a: dict) -> Result:
     (query,) = need(a, "query")
-    return {"ids": await s.gmail.search_ids(query, int(a.get("limit") or 100)), "text": ""}
+    return {"ids": await s.gmail.search_ids(query, min(a.get("limit", 100), 500)), "text": ""}
 
 
 async def gm_show(s: Services, a: dict) -> Result:
-    return "\n".join(await s.gmail.summaries(id_list(a)))
+    return "\n".join(await s.gmail.summaries(id_list(a)[:100]))
+
+
+def _check_safe_labels(names: list[str]) -> None:
+    for n in names:
+        up = n.upper()
+        if up in BLOCKED_LABELS or (up.startswith("CATEGORY_") and up not in SAFE_SYSTEM_LABELS):
+            raise ToolError(f"label {n!r} can't be set this way (use `gmail trash`, which asks the owner)")
 
 
 async def gm_label(s: Services, a: dict) -> Result:
@@ -297,6 +453,7 @@ async def gm_label(s: Services, a: dict) -> Result:
     add, remove = list(a.get("add") or []), list(a.get("remove") or [])
     if not add and not remove:
         raise ToolError("add or remove which labels?")
+    _check_safe_labels(add + remove)
     await s.gmail.modify(ids, add, remove)
     return f"{len(ids)} email(s): " + "; ".join(
         x for x in (f"added {', '.join(add)}" if add else "", f"removed {', '.join(remove)}" if remove else "") if x
@@ -318,27 +475,33 @@ async def gm_untrash(s: Services, a: dict) -> Result:
     return f"Restored {len(ids)} email(s) from the trash."
 
 
-def _mail_args(a: dict) -> tuple[str, str, str, str | None, str | None]:
-    body = a.get("body")
-    if not body:
+def _mail_fields(a: dict) -> dict:
+    if not a.get("body"):
         raise ToolError("the email needs a body")
     if not a.get("to") and not a.get("reply_to"):
         raise ToolError("who to? (--to, or --reply-to a message)")
-    return a.get("to") or "", a.get("subject") or "", body, a.get("cc"), a.get("reply_to")
+    return {k: a.get(k) for k in ("to", "cc", "subject", "body", "reply_to")}
 
 
 async def gm_draft(s: Services, a: dict) -> Result:
-    d = await s.gmail.draft(*_mail_args(a))
+    d = await s.gmail.draft(_mail_fields(a))
     return f"Draft saved (id {d['id']}). The owner can review it in Gmail; sending needs their approval."
 
 
 async def gm_send(s: Services, a: dict) -> Result:
-    sent = await s.gmail.send(*_mail_args(a))
+    resolved = a.get("resolved")
+    if not isinstance(resolved, dict):  # only possible if the policy lets sends run without approval
+        resolved = await s.gmail.resolve_mail(_mail_fields(a))
+    sent = await s.gmail.send_resolved(resolved)
     return f"Sent (message {sent.get('id')})."
 
 
 async def gm_send_draft(s: Services, a: dict) -> Result:
     (did,) = need(a, "id")
+    if a.get("message_id"):
+        current = await s.gmail.get_draft(did)
+        if current.get("message", {}).get("id") != a["message_id"]:
+            raise ToolError("the draft was changed after it was approved; not sent")
     sent = await s.gmail.send_draft(did)
     return f"Draft sent (message {sent.get('id')})."
 
@@ -351,50 +514,62 @@ async def gm_trash(s: Services, a: dict) -> Result:
 
 async def gm_delete_label(s: Services, a: dict) -> Result:
     (name,) = need(a, "name")
+    _check_safe_labels([name])
     await s.gmail.delete_label(name)
     return f"Deleted label {name} (the emails stay)."
 
 
+def _addresses(value: str) -> str:
+    """Shows each recipient as display name plus the real address, so "Boss" <x@evil> is visible."""
+    pairs = getaddresses([value or ""])
+    return ", ".join(f"{clean(n)} <{clean(a)}>" if n else f"<{clean(a)}>" for n, a in pairs if a) or "(nobody)"
+
+
 async def describe_send(s: Services, a: dict) -> str:
-    to = a.get("to") or "(reply to the sender)"
-    head = f"Send an email to {to}" + (f", cc {a['cc']}" if a.get("cc") else "")
-    if a.get("reply_to"):
-        try:
-            orig = await s.gmail.metadata([a["reply_to"]])
-            h = headers(orig[0])
-            head += f", replying to “{h.get('subject', '')}” from {h.get('from', '?')}"
-        except ToolError:
-            head += f", replying to message {a['reply_to']}"
-    subject = a.get("subject") or "(Re: original subject)"
-    return f"{head}\nSubject: {subject}\n\n{(a.get('body') or '')[:2500]}"
+    r = a.get("resolved") or {}
+    lines = [f"Send an email to {_addresses(r.get('to', ''))}"]
+    if r.get("cc"):
+        lines.append(f"Cc: {_addresses(r['cc'])}")
+    lines.append(f"Subject: “{clean(r.get('subject', ''), 300)}”")
+    if r.get("thread_id"):
+        lines.append("(a reply in an existing conversation)")
+    body = r.get("body", "")
+    lines.append(f"Body ({len(body)} characters, shown in full):")
+    lines.append(clean_block(body))
+    return "\n".join(lines)
 
 
 async def describe_send_draft(s: Services, a: dict) -> str:
-    try:
-        d = await s.gmail.get_draft(a.get("id", ""))
-    except ToolError:
-        return f"Send draft {a.get('id')}"
-    from .gmail import format_full
-
-    return "Send this draft:\n" + format_full(d["message"], await s.gmail.label_names())[:3000]
+    d = await s.gmail.get_draft(a.get("id", ""))
+    msg = d.get("message", {})
+    h = headers(msg)
+    full = format_full(msg, await s.gmail.label_names())
+    body = full.split("\n\n", 1)[1] if "\n\n" in full else ""
+    lines = [f"Send draft {a.get('id')} to {_addresses(h.get('to', ''))}"]
+    for key in ("cc", "bcc"):
+        if h.get(key):
+            lines.append(f"{key.capitalize()}: {_addresses(h[key])}")
+    lines.append(f"Subject: “{clean(h.get('subject', ''), 300)}”")
+    lines.append(f"Body ({len(body)} characters):")
+    lines.append(clean_block(body))
+    return "\n".join(lines)
 
 
 async def describe_trash(s: Services, a: dict) -> str:
     ids = id_list(a)
     try:
-        lines = [line.split("\n")[0] for line in await s.gmail.summaries(ids[:30])]
+        lines = [clean(line.split("\n")[0], 160) for line in await s.gmail.summaries(ids)]
     except ToolError:
-        lines = [f"- {i}" for i in ids[:30]]
-    more = f"\n…and {len(ids) - 30} more" if len(ids) > 30 else ""
-    return f"Move {len(ids)} email(s) to the trash:\n" + "\n".join(lines) + more
+        lines = [f"- {i}" for i in ids]
+    return f"Move {len(ids)} email(s) to the trash:\n" + "\n".join(f"  {line}" for line in lines)
 
 
 async def describe_delete_label(s: Services, a: dict) -> str:
-    return f"Delete the Gmail label “{a.get('name')}” (emails keep existing)"
+    return f"Delete the Gmail label “{clean(a.get('name'))}” (the emails keep existing)"
 
 
 OPS: dict[str, Op] = {op.name: op for op in [
-    # Todoist: reading and adding are safe; changing existing tasks needs approval.
+    # Todoist: reading and adding are safe; changing existing tasks and commenting need approval.
     Op("todoist.tasks", False, td_tasks),
     Op("todoist.task", False, td_task),
     Op("todoist.projects", False, td_projects),
@@ -403,15 +578,15 @@ OPS: dict[str, Op] = {op.name: op for op in [
     Op("todoist.ids", False, td_ids),
     Op("todoist.show", False, td_show),
     Op("todoist.add", False, td_add),
-    Op("todoist.comment", False, td_comment),
     Op("todoist.add_project", False, td_add_project),
     Op("todoist.add_section", False, td_add_section),
     Op("todoist.add_label", False, td_add_label),
-    Op("todoist.update", True, td_update, describe_update),
-    Op("todoist.move", True, td_move, describe_move),
-    Op("todoist.complete", True, td_complete, _describe_task("Complete")),
-    Op("todoist.reopen", True, td_reopen, _describe_task("Reopen")),
-    Op("todoist.delete", True, td_delete, _describe_task("Delete")),
+    Op("todoist.comment", True, td_comment, describe_comment, "Comment"),
+    Op("todoist.update", True, td_update, describe_update, "Change task"),
+    Op("todoist.move", True, td_move, describe_move, "Move task"),
+    Op("todoist.complete", True, td_complete, _describe_task("Complete"), "Complete task"),
+    Op("todoist.reopen", True, td_reopen, _describe_task("Reopen"), "Reopen task"),
+    Op("todoist.delete", True, td_delete, _describe_task("Delete", " and its subtasks"), "DELETE task"),
     # Gmail: reading, labelling, archiving and drafting are safe; sending and trashing need approval.
     Op("gmail.search", False, gm_search),
     Op("gmail.read", False, gm_read),
@@ -428,14 +603,14 @@ OPS: dict[str, Op] = {op.name: op for op in [
     Op("gmail.unstar", False, _gm_labels_op([], ["STARRED"], "Unstarred")),
     Op("gmail.untrash", False, gm_untrash),
     Op("gmail.draft", False, gm_draft),
-    Op("gmail.send", True, gm_send, describe_send),
-    Op("gmail.send_draft", True, gm_send_draft, describe_send_draft),
-    Op("gmail.trash", True, gm_trash, describe_trash),
-    Op("gmail.delete_label", True, gm_delete_label, describe_delete_label),
+    Op("gmail.send", True, gm_send, describe_send, "SEND email"),
+    Op("gmail.send_draft", True, gm_send_draft, describe_send_draft, "SEND draft"),
+    Op("gmail.trash", True, gm_trash, describe_trash, "Trash emails"),
+    Op("gmail.delete_label", True, gm_delete_label, describe_delete_label, "Delete label"),
 ]}
 
 # Never runnable without approval, whatever the config says.
-ALWAYS_CRITICAL = frozenset({"gmail.send", "gmail.send_draft", "gmail.trash", "todoist.delete"})
+ALWAYS_CRITICAL = frozenset({"gmail.send", "gmail.send_draft", "gmail.trash", "todoist.delete", "todoist.comment"})
 
 
 @dataclass(frozen=True)
@@ -461,7 +636,9 @@ CREATE TABLE IF NOT EXISTS approvals (
     status TEXT NOT NULL DEFAULT 'pending',
     notified INTEGER NOT NULL DEFAULT 0,
     result TEXT,
-    decided REAL
+    decided REAL,
+    nonce TEXT,
+    message_id INTEGER
 );
 """
 
@@ -478,8 +655,8 @@ class Approvals:
 
     def add(self, ops: list[dict], summary: str, reason: str | None) -> int:
         cur = self.db.execute(
-            "INSERT INTO approvals (created, ops, summary, reason) VALUES (?, ?, ?, ?)",
-            (time.time(), json.dumps(ops), summary, reason),
+            "INSERT INTO approvals (created, ops, summary, reason, nonce) VALUES (?, ?, ?, ?, ?)",
+            (time.time(), json.dumps(ops), summary, reason, secrets.token_hex(8)),
         )
         self.db.commit()
         return int(cur.lastrowid)
@@ -491,13 +668,19 @@ class Approvals:
         )
         self.db.commit()
 
+    def pending_count(self) -> int:
+        self.expire()
+        return self.db.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
+
     def unnotified(self) -> list[dict]:
         self.expire()
-        rows = self.db.execute("SELECT * FROM approvals WHERE status='pending' AND notified=0 ORDER BY id")
+        rows = self.db.execute(
+            "SELECT id, summary, reason, nonce, created FROM approvals WHERE status='pending' AND notified=0 ORDER BY id"
+        )
         return [dict(r) for r in rows]
 
-    def mark_notified(self, approval_id: int) -> None:
-        self.db.execute("UPDATE approvals SET notified=1 WHERE id=?", (approval_id,))
+    def mark_notified(self, approval_id: int, message_id: int | None) -> None:
+        self.db.execute("UPDATE approvals SET notified=1, message_id=? WHERE id=?", (message_id, approval_id))
         self.db.commit()
 
     def get(self, approval_id: int) -> dict | None:
@@ -526,19 +709,25 @@ class Approvals:
 # --- running ----------------------------------------------------------------------------
 
 
-def validate(ops: Any) -> list[dict]:
-    if not isinstance(ops, list) or not ops:
-        raise ToolError("no operations")
-    if len(ops) > 200:
-        raise ToolError("at most 200 operations per request")
+async def prepare(services: Services, ops: list[dict]) -> list[dict]:
+    """Fixes everything a critical request depends on before the owner sees it."""
     out = []
     for o in ops:
-        if not isinstance(o, dict) or o.get("op") not in OPS:
-            raise ToolError(f"unknown operation {o.get('op') if isinstance(o, dict) else o!r}")
-        args = o.get("args") or {}
-        if not isinstance(args, dict):
-            raise ToolError(f"{o['op']}: args must be an object")
-        out.append({"op": o["op"], "args": args})
+        a = dict(o["args"])
+        if o["op"] == "todoist.move":
+            a.update(await _move_target(services, a))
+        elif o["op"] == "gmail.send":
+            resolved = await services.gmail.resolve_mail(_mail_fields(a))
+            if len(resolved["body"]) > MAX_MAIL_BODY:
+                raise ToolError(
+                    f"that email is too long to show for approval ({len(resolved['body'])} characters, max "
+                    f"{MAX_MAIL_BODY}); save it as a draft (`gmail draft`) and tell the owner to send it from Gmail"
+                )
+            a = {"resolved": resolved}
+        elif o["op"] == "gmail.send_draft":
+            d = await services.gmail.get_draft(a.get("id", ""))
+            a["message_id"] = d.get("message", {}).get("id")
+        out.append({"op": o["op"], "args": a})
     return out
 
 
@@ -549,10 +738,13 @@ async def execute(services: Services, ops: list[dict]) -> tuple[bool, str, dict]
     for i, o in enumerate(ops):
         try:
             result = await OPS[o["op"]].run(services, o["args"])
-        except ToolError as e:
-            texts.append(f"✗ {o['op']}: {e}")
+        except Exception as e:
+            msg = str(e) if isinstance(e, ToolError) else f"{type(e).__name__}: {e}"
+            if not isinstance(e, ToolError):
+                log.exception("%s failed", o["op"])
+            texts.append(f"✗ {o['op']}: {msg}")
             if len(ops) > 1:
-                texts.append(f"(stopped; {len(ops) - i - 1} later step(s) not run)")
+                texts.append(f"(step {i + 1} of {len(ops)} failed; {i} done before it, {len(ops) - i - 1} not run)")
             return False, "\n".join(texts), extra
         if isinstance(result, dict):
             extra.update({k: v for k, v in result.items() if k != "text"})
@@ -562,13 +754,24 @@ async def execute(services: Services, ops: list[dict]) -> tuple[bool, str, dict]
     return True, "\n".join(texts), extra
 
 
-async def summarize(services: Services, ops: list[dict]) -> str:
-    lines = []
+async def summarize(services: Services, ops: list[dict], policy: Policy) -> str:
+    """The text the owner approves: a header counting every action, then each action in full.
+    Raises if it wouldn't fit, rather than hiding anything."""
+    counts = Counter(OPS[o["op"]].label or o["op"] for o in ops if policy.critical(o["op"]))
+    header = f"{len(ops)} action(s): " + ", ".join(f"{n}× {label}" for label, n in counts.items())
+    lines = [header]
     for o in ops:
         op = OPS[o["op"]]
-        try:
-            line = await op.describe(services, o["args"]) if op.describe else None
-        except ToolError:
-            line = None
-        lines.append("• " + (line or f"{o['op']} {json.dumps(o['args'], ensure_ascii=False)[:300]}"))
-    return "\n".join(lines)
+        if op.describe:
+            line = await op.describe(services, o["args"])
+        else:
+            line = f"{o['op']} " + clean(json.dumps(o["args"], ensure_ascii=False), 400)
+        lines.append("• " + line)
+    summary = "\n".join(lines)
+    size = len(summary.encode("utf-16-le")) // 2  # how Telegram counts message length
+    if size > MAX_SUMMARY:
+        raise ToolError(
+            f"this request is too big to show the owner in one message ({size} characters, max "
+            f"{MAX_SUMMARY}); split it into smaller requests"
+        )
+    return summary

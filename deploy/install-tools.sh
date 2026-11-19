@@ -6,6 +6,7 @@
 # gets the `todoist` and `gmail` commands, which send requests to the daemon over a Unix socket.
 # Critical requests wait for your Approve/Reject in Telegram.
 set -euo pipefail
+shopt -s nullglob
 
 TOOLS_USER=ampitools
 TOOLS_HOME=/home/$TOOLS_USER

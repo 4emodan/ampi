@@ -6,6 +6,7 @@
 # anything. It lives in /home/tgreader, which the assistant can't see. The assistant only gets the
 # `tg-read` command, which talks to the reader over a Unix socket that answers read-only requests.
 set -euo pipefail
+shopt -s nullglob
 
 READER_USER=tgreader
 READER_GROUP=tgread

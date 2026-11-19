@@ -19,12 +19,13 @@ tg-read chats [-n 50] [-q NAME]
     Chats, most recent first: name · person/bot/group/channel · id · @username · unread · last date.
     -q filters by part of the name.
 
-tg-read history CHAT [-n 100] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [-s TEXT] [-o FILE]
+tg-read history CHAT [-n 100] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [-s TEXT] [--before-id ID] [-o NAME]
     The newest N messages of one chat, printed oldest first.
     CHAT: name or part of it, @username, numeric id (from `chats`), or "me" (Saved Messages).
-    --since/--until (UTC, inclusive) pick a time range; -s keeps only messages containing TEXT.
+    --since/--until (UTC, inclusive) pick a time range; -s keeps only messages containing TEXT;
+    --before-id pages back to older messages. -o saves to telegram/NAME instead of printing.
 
-tg-read search TEXT [-n 50] [-o FILE]
+tg-read search TEXT [-n 50] [-o NAME]
     Search all chats at once, newest first; each hit names its chat.
 ```
 
@@ -46,7 +47,9 @@ printed: read that file with the Read tool (in parts with offset/limit if it is 
 ## Tips
 
 - If a name matches several chats, tg-read lists them with ids; run again with the id.
-- When a limit is reached it says so; page back with `--until <date of the oldest message>`.
+- When a limit is reached it says so and gives the `--before-id` to page further back.
+- Requests are rate-limited (about 20 a minute) to protect the owner's account: fetch more per
+  request rather than many small ones. Telegram's login-code chat is never readable.
 - For a summary of a busy group, fetch a time range (`--since`) rather than guessing a count.
 - The chats/ logs in the workspace also contain your own replies to the owner; tg-read shows the
   chats as they are in Telegram (your messages there appear under your bot's name).
