@@ -6,5 +6,6 @@ set -a
 . /etc/claude-assistant/env
 set +a
 vars=$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' /etc/claude-assistant/env | tr -d '=' | paste -sd, -)
-exec sudo -u assistant -H --preserve-env="$vars" \
+export PATH=/home/assistant/.local/bin:/usr/local/bin:/usr/bin:/bin
+exec sudo -u assistant -H --preserve-env="$vars,PATH" \
   /home/assistant/app/.venv/bin/claude-assistant --config /home/assistant/config.toml --check

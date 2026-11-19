@@ -2,6 +2,8 @@
 Description=Telegram reader for Claude Assistant (read-only access to the owner's account)
 After=network-online.target
 Wants=network-online.target
+# Only once you've logged in (tg-reader login); otherwise it would restart forever.
+ConditionPathExists=/home/tgreader/tg-reader.session
 
 [Service]
 Type=simple

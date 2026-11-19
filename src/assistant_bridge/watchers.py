@@ -124,6 +124,8 @@ class Watch:
     async def _failed(self, error: str) -> None:
         self.failures += 1
         log.warning("[%s] watcher %s: %s", self.bot.profile.name, self.w.name, error)
+        if "isn't set up yet" in error:
+            return  # an account not connected yet isn't news; the watcher starts working once it is
         if self.failures == FAILS_BEFORE_NOTICE:
             await self.bot.notify(f"⚠️ Watcher {self.w.name} can't check {self.w.kind}: {error}")
 
