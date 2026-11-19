@@ -103,6 +103,9 @@ def make_undumpable() -> bool:
 
 
 async def serve(config: Config) -> None:
+    if config.claude_settings is None:
+        log.warning("claude_settings is not set: Claude runs can read files outside their workspace "
+                    "(set claude_settings = \"/home/assistant/app/deploy/claude-settings.json\")")
     if not make_undumpable():
         log.warning("could not make the process non-dumpable; the bot token is visible in /proc to the same user")
     store = Store(config.db_path)

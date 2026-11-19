@@ -288,7 +288,7 @@ def test_unknown_ops_and_missing_services_are_errors(tmp_path):
 def test_validation_clamps_limits_and_cleans_text():
     (op,) = validate([{"op": "gmail.search", "args": {"query": "x", "limit": 10**9}}])
     assert op["args"]["limit"] == 1000
-    assert clean("a‮b​c\nd") == "a b c d"
+    assert clean("a‮b​c\nd") == "abc d"
 
 
 # --- Gmail formatting ---------------------------------------------------------------------

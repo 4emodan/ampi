@@ -452,8 +452,17 @@ def normalize_text(s: str) -> str:
     """What's approved must be what's sent: no invisible or look-alike characters to hide data in."""
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     s = _SPACES.sub(" ", s)
+    s = IGNORABLE.sub("", s)
     s = "".join(ch for ch in s if ch == "\n" or unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Co", "Cs"))
     return "\n".join(line.rstrip() for line in s.split("\n")).strip("\n")
+
+
+# Characters that render as nothing but aren't in the control/format categories (variation selectors,
+# fillers, tag characters, ...): they could hide data inside text the owner approves.
+IGNORABLE = re.compile(
+    "[­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮⁠-⁯"
+    "ㅤ︀-️﻿ﾠ\U0001d173-\U0001d17a\U000e0000-\U000e0fff]"
+)
 
 
 def sender_address(value: str) -> str:

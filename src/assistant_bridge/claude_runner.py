@@ -71,7 +71,7 @@ def scope_tools(allowed: Sequence[str]) -> list[str]:
     for tool in allowed:
         base = tool.split("(", 1)[0]
         # Any edit rule becomes "the workspace only"; a path rule like Edit(//**) is never passed on.
-        if base in _EDIT_TOOLS and not tool.startswith(("Edit(./", "Write(./")):
+        if base in _EDIT_TOOLS and (not tool.startswith(("Edit(./", "Write(./")) or ".." in tool):
             tool = WORKSPACE_EDIT
         if tool not in out:
             out.append(tool)

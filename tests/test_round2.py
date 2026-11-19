@@ -180,7 +180,7 @@ def test_slow_failures_are_not_repeated(setup):
     bot.run_watcher = slow_fail
     run(watch.tick())
     run(watch.tick())
-    assert len(calls) == 1 and "Skipped this batch" in api.sent[0]["text"]
+    assert len(calls) == 1 and "Skipped those items" in api.sent[0]["text"]
 
 
 def test_retried_runs_are_told_to_check_what_was_done(setup):
@@ -248,3 +248,44 @@ def test_tg_read_never_writes_claude_md(tmp_path, monkeypatch):
     for name in ("CLAUDE.md", "claude.local.md"):
         with pytest.raises(SystemExit):
             client.deliver("x", name, "x")
+
+
+# --- after round 3 --------------------------------------------------------------------------
+
+
+def test_invisible_characters_cant_smuggle_data():
+    from ampi_tools.ops import clean_block
+
+    smuggled = "Hi" + "︀" * 16 + "\U000e0101" + " there" + "ㅤᅟ͏" + "x"
+    assert normalize_text(smuggled) == "Hi therex"
+    assert clean_block(smuggled) == "│ Hi therex"
+
+
+def test_username_watchers_keep_using_the_name(setup):
+    from assistant_bridge.config import Tools
+    from assistant_bridge.watchers import Watch
+
+    bot, _, _, _ = setup()
+    t = FakeTools()
+    t.tg = {"count": 0, "last_id": 10, "text": "", "chat": "@publicnews", "peer_id": -1009000}
+    w = Watcher(name="news", kind="telegram", query="@publicnews", every_minutes=5)
+    watch = Watch(bot, w, Tools(), t)
+    run(watch.tick())
+    run(watch.tick())
+    assert [p["chat"] for _, p in t.requests] == ["@publicnews", "@publicnews"]
+
+
+def test_a_broken_assistant_is_reported_once_across_batches(setup):
+    bot, api, _, _ = setup()
+    t = FakeTools()
+    watch = gmail_watch(bot, t)
+    run(watch.tick())
+
+    async def quick_fail(w, prompt, quiet_errors=False):
+        return RunResult(ok=False, text="", error="usage limit", duration_ms=500)
+
+    bot.run_watcher = quick_fail
+    for i in range(12):  # new items keep arriving while the assistant is broken
+        t.ids = [f"x{i}"] + t.ids
+        run(watch.tick())
+    assert len(api.sent) == 1

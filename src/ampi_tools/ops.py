@@ -25,7 +25,7 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
-from .gmail import Gmail, format_full, headers
+from .gmail import IGNORABLE, Gmail, format_full, headers
 from .todoist import Todoist, ToolError, api_priority
 
 log = logging.getLogger(__name__)
@@ -180,7 +180,8 @@ _INVISIBLE = {"Cc", "Cf", "Zl", "Zp"}  # control, format (bidi, zero-width), lin
 
 def clean(s: Any, limit: int | None = None) -> str:
     """For text shown in an approval: one line, no control/bidi/zero-width characters."""
-    s = "".join(" " if unicodedata.category(ch) in _INVISIBLE else ch for ch in str(s))
+    s = IGNORABLE.sub("", str(s))
+    s = "".join(" " if unicodedata.category(ch) in _INVISIBLE else ch for ch in s)
     s = re.sub(r"\s+", " ", s).strip()
     return s if limit is None or len(s) <= limit else s[:limit] + "…"
 
@@ -188,7 +189,7 @@ def clean(s: Any, limit: int | None = None) -> str:
 def clean_block(s: str) -> str:
     """Multi-line text for an approval, every line marked so it can't pose as part of the summary."""
     lines = []
-    for line in s.splitlines() or [""]:
+    for line in IGNORABLE.sub("", s).splitlines() or [""]:
         line = "".join(" " if unicodedata.category(ch) in _INVISIBLE else ch for ch in line).rstrip()
         lines.append(f"│ {line}")
     return "\n".join(lines)
@@ -586,7 +587,8 @@ async def shares_with_others(services: Services, o: dict) -> bool:
         pid = (await services.todoist.task(a["parent"])).get("project_id")
     elif a.get("project"):
         pid = await services.todoist.project_id(a["project"])
-    return bool(pid and projects.get(pid, {}).get("is_shared"))
+    p = projects.get(pid, {}) if pid else {}
+    return bool(p.get("is_shared") or p.get("workspace_id"))  # team workspace projects are visible to members
 
 
 async def describe_add(s: Services, a: dict) -> str:

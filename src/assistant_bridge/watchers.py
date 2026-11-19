@@ -55,6 +55,7 @@ class Watch:
         self.clock = clock
         self.failures = 0
         self.run_failures = 0
+        self.streak_noticed = False
 
     @property
     def interval(self) -> float:
@@ -98,7 +99,10 @@ class Watch:
                        "e.g. tasks added, labels set or notes written, before acting, so nothing is done twice.)")
         result = await self.bot.run_watcher(self.w, prompt, quiet_errors=True)
         if result.ok or result.cancelled:  # the owner stopped it: don't run the same batch again
+            if self.streak_noticed and result.ok:
+                await self.bot.notify(f"✅ Watcher {self.w.name} works again.")
             self.run_failures = 0
+            self.streak_noticed = False
             store.set_watch_state(profile, self.w.name, new_state)
             return
         self.run_failures += 1
@@ -106,13 +110,16 @@ class Watch:
         # Retry only failures that probably happened before any work was done (usage limit, network,
         # login): a run that worked for a while may have already acted, and repeating it duplicates that.
         quick = not result.timed_out and (result.duration_ms or 0) < QUICK_FAILURE_MS
-        if self.w.kind == "schedule" or not quick or self.run_failures >= RUN_FAILS_BEFORE_SKIP:
+        skip = self.w.kind == "schedule" or not quick or self.run_failures >= RUN_FAILS_BEFORE_SKIP
+        # While the assistant keeps failing, the owner hears about it once, not on every batch.
+        if not self.streak_noticed and (skip or self.run_failures >= FAILS_BEFORE_NOTICE):
+            self.streak_noticed = True
+            what = f" Skipped those items (they're in chats/watch-{self.w.name}/)." if skip and self.w.kind != "schedule" else ""
+            await self.bot.notify(f"⚠️ Watcher {self.w.name}: the assistant's run failed ({error}).{what} "
+                                  "No more notices until it works again.")
+        if skip:
             store.set_watch_state(profile, self.w.name, new_state)
             self.run_failures = 0
-            what = "" if self.w.kind == "schedule" else f" Skipped this batch; it's in chats/watch-{self.w.name}/."
-            await self.bot.notify(f"⚠️ Watcher {self.w.name}: the run failed ({error}).{what}")
-        elif self.run_failures == FAILS_BEFORE_NOTICE:
-            await self.bot.notify(f"⚠️ Watcher {self.w.name}: the assistant keeps failing ({error}); will retry.")
 
     async def _failed(self, error: str) -> None:
         self.failures += 1
@@ -163,7 +170,9 @@ class Watch:
         after = state.get("last_id") if state else None
         # Once known, the chat is followed by its id, so renaming it (or a new chat with a similar
         # name) can't switch the watcher to another chat.
-        chat = (state or {}).get("peer_id") or self.w.query
+        # (A public @username stays the key: such chats aren't in the chat list, so their id can't be
+        # looked up there; the reader caches the username, so repeating it costs nothing.)
+        chat = self.w.query if self.w.query.startswith("@") else (state or {}).get("peer_id") or self.w.query
         resp = await self._tool(self.tools.tg_reader_socket, {"cmd": "since", "chat": chat, "after_id": after})
         new_state = {"last_id": resp.get("last_id", after), "peer_id": resp.get("peer_id") or (state or {}).get("peer_id")}
         if after is None or not resp.get("count"):

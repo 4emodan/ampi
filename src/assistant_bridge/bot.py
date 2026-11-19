@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 import zlib
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -350,6 +351,7 @@ class ProfileBot:
             chatlog.append(log_dir, "Watcher", prompt)
             started_at = now_iso()
             self._running[key] = asyncio.current_task()  # type: ignore[assignment]
+            clock_start = time.monotonic()
             try:
                 result = await self.runner.run_turn(
                     prompt,
@@ -371,6 +373,8 @@ class ProfileBot:
                 result = RunResult(ok=False, text="", error="stopped by /cancel", cancelled=True)
             finally:
                 self._running.pop(key, None)
+            # Wall-clock time (a crashed run reports no duration of its own); used to decide on retries.
+            result = replace(result, duration_ms=int((time.monotonic() - clock_start) * 1000))
             if result.ok or result.text:
                 self.store.mark_started(self.profile.name, *key, conv.session_id)
             self._record(conv, started_at, result, prompt)
