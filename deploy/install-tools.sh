@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Installs or updates ampi-tools (Todoist + Gmail with approvals) next to the assistant.
+# Run as root from a checkout, after deploy/install.sh:  sudo bash deploy/install-tools.sh
+#
+# The tokens live with a separate `ampitools` user whose home the assistant can't see. The assistant
+# gets the `todoist` and `gmail` commands, which send requests to the daemon over a Unix socket.
+# Critical requests wait for your Approve/Reject in Telegram.
+set -euo pipefail
+
+TOOLS_USER=ampitools
+TOOLS_HOME=/home/$TOOLS_USER
+APP_USER=assistant
+APP_HOME=/home/$APP_USER
+SRC_DIR=$(cd "$(dirname "$0")/.." && pwd)
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Run as root: sudo bash deploy/install-tools.sh" >&2
+  exit 1
+fi
+
+echo "==> User $TOOLS_USER"
+getent group "$TOOLS_USER" >/dev/null || groupadd --system "$TOOLS_USER"
+if ! id "$TOOLS_USER" >/dev/null 2>&1; then
+  useradd --create-home --home-dir "$TOOLS_HOME" --gid "$TOOLS_USER" --shell /usr/sbin/nologin "$TOOLS_USER"
+fi
+chmod 700 "$TOOLS_HOME"
+usermod -aG "$TOOLS_USER" "$APP_USER"   # lets the assistant connect to the socket
+
+echo "==> Code -> $TOOLS_HOME/app"
+rsync -a --delete \
+  --exclude .git --exclude .venv --exclude __pycache__ --exclude .pytest_cache --exclude data \
+  --exclude profiles --exclude config.toml --exclude '*.env' --exclude tests \
+  "$SRC_DIR"/ "$TOOLS_HOME/app"/
+chown -R "$TOOLS_USER:$TOOLS_USER" "$TOOLS_HOME/app"
+sudo -u "$TOOLS_USER" -H bash -c "cd ~/app && { test -x .venv/bin/pip || python3 -m venv .venv; } \
+  && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q ."
+
+if [[ ! -f $TOOLS_HOME/env ]]; then
+  install -o "$TOOLS_USER" -g "$TOOLS_USER" -m 600 "$SRC_DIR/deploy/ampi-tools.env.example" "$TOOLS_HOME/env"
+  echo "    created $TOOLS_HOME/env (add TODOIST_TOKEN, GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET)"
+fi
+if [[ ! -f $TOOLS_HOME/config.toml ]]; then
+  # Owned by root: the policy is yours, not something the tools user (or the assistant) can change.
+  install -o root -g "$TOOLS_USER" -m 640 "$SRC_DIR/deploy/ampi-tools.config.example.toml" "$TOOLS_HOME/config.toml"
+fi
+
+echo "==> todoist and gmail commands for $APP_USER"
+install -d -o "$APP_USER" -g "$APP_USER" "$APP_HOME/.local/bin"
+for cmd in todoist gmail; do
+  ln -sfn "$APP_HOME/app/.venv/bin/$cmd" "$APP_HOME/.local/bin/$cmd"
+done
+
+echo "==> Skills and watcher instructions in each profile workspace"
+for ws in "$APP_HOME"/profiles/*/; do
+  for skill in todoist gmail telegram; do
+    install -d -m 755 "$ws.claude/skills/$skill"
+    install -m 644 "$SRC_DIR/templates/skills/$skill/SKILL.md" "$ws.claude/skills/$skill/SKILL.md"
+  done
+  # Root-owned, so Claude can't rewrite its own skills, settings or hooks.
+  chown -R root:root "$ws.claude"
+  chmod -R go-w "$ws.claude"
+  install -d -o "$APP_USER" -g "$APP_USER" "$ws/watchers"
+  for f in "$SRC_DIR"/templates/watchers/*.md; do
+    target="$ws/watchers/$(basename "$f")"
+    [[ -f $target ]] || install -o "$APP_USER" -g "$APP_USER" -m 644 "$f" "$target"
+  done
+done
+
+echo "==> systemd service"
+install -m 644 "$SRC_DIR/deploy/ampi-tools.service" /etc/systemd/system/ampi-tools.service
+systemctl daemon-reload
+systemctl enable ampi-tools >/dev/null 2>&1 || true
+systemctl restart ampi-tools
+# Group membership only applies to new processes.
+systemctl is-active --quiet claude-assistant && systemctl restart claude-assistant
+
+cat <<EOF
+
+Done. To connect your accounts (see docs/SETUP.md, section 8):
+  1. Todoist token and Gmail OAuth client:   nano $TOOLS_HOME/env
+  2. Connect Gmail (you approve in a browser): sudo -u $TOOLS_USER -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools gmail-login'
+  3. systemctl restart ampi-tools
+  4. Check:  sudo -u $TOOLS_USER -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools check'
+  5. In $APP_HOME/config.toml: [tools] approvals = true, and add "Bash(todoist:*)" and "Bash(gmail:*)"
+     to allowed_tools; then systemctl restart claude-assistant
+EOF

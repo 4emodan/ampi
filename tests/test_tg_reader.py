@@ -39,12 +39,14 @@ class FakeClient:
         for d in self.dialogs[:limit]:
             yield d
 
-    async def iter_messages(self, entity, limit=None, offset_date=None, search=None):
+    async def iter_messages(self, entity, limit=None, offset_date=None, search=None, min_id=0):
         self.calls.append(dict(entity=entity, limit=limit, offset_date=offset_date, search=search))
         pool = [m for msgs in self.messages.values() for m in msgs] if entity is None else \
             list(self.messages.get(getattr(entity, "id", entity), []))
         count = 0
         for m in sorted(pool, key=lambda m: m.date, reverse=True):  # newest first, like Telegram
+            if m.id <= min_id:
+                continue
             if offset_date and m.date >= offset_date:
                 continue
             if search and search.lower() not in (m.message or "").lower():
@@ -182,7 +184,7 @@ def test_client_reports_missing_daemon(tmp_path):
 def test_bridge_prompt_mentions_skill_when_installed(tmp_path):
     from assistant_bridge.bot import TELEGRAM_SKILL, _conversations_prompt
 
-    profile = NS(workspace=tmp_path, groups=())
+    profile = NS(workspace=tmp_path, groups=(), watchers=())
     assert "Telegram doesn't let you fetch" in _conversations_prompt(profile)
     (tmp_path / TELEGRAM_SKILL).parent.mkdir(parents=True)
     (tmp_path / TELEGRAM_SKILL).write_text("x")
@@ -193,3 +195,11 @@ def test_json_payload_shape():
     args = client.build_parser().parse_args(["history", "Clipboard", "-n", "5"])
     payload = {k: v for k, v in vars(args).items() if k != "out" and v is not None}
     assert json.loads(json.dumps(payload)) == {"cmd": "history", "chat": "Clipboard", "limit": 5}
+
+
+def test_since_reports_only_newer_messages(reader):
+    base = run(reader.handle({"cmd": "since", "chat": "Clipboard"}))
+    assert base == {"ok": True, "text": "", "count": 0, "last_id": 5, "chat": "Clipboard"}
+    new = run(reader.handle({"cmd": "since", "chat": "Clipboard", "after_id": 3}))
+    assert new["count"] == 2 and new["last_id"] == 5
+    assert new["text"].index("item 4") < new["text"].index("item 5") and "item 3" not in new["text"]

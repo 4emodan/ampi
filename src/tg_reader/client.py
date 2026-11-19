@@ -48,13 +48,15 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "chat"
 
 
-def deliver(text: str, out: str | None, label: str, now: datetime | None = None) -> str:
+def deliver(
+    text: str, out: str | None, label: str, now: datetime | None = None, save_dir: Path = SAVE_DIR
+) -> str:
     """Returns what to print: the text itself, or where it was saved."""
     if out is None and len(text) <= PRINT_LIMIT:
         return text
     if out is None:
         stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
-        target = SAVE_DIR / f"{stamp}-{_slug(label)}.md"
+        target = save_dir / f"{stamp}-{_slug(label)}.md"
     else:
         target = Path(out)
     target.parent.mkdir(parents=True, exist_ok=True)

@@ -47,9 +47,10 @@ ln -sfn "$APP_HOME/app/.venv/bin/tg-read" "$APP_HOME/.local/bin/tg-read"
 
 echo "==> telegram skill in each profile workspace"
 for ws in "$APP_HOME"/profiles/*/; do
-  install -d -o "$APP_USER" -g "$APP_USER" "$ws.claude" "$ws.claude/skills" "$ws.claude/skills/telegram"
-  install -o "$APP_USER" -g "$APP_USER" -m 644 "$SRC_DIR/templates/skills/telegram/SKILL.md" \
-    "$ws.claude/skills/telegram/SKILL.md"
+  # Root-owned, so Claude can't rewrite its own skills, settings or hooks.
+  install -d -m 755 "$ws.claude" "$ws.claude/skills" "$ws.claude/skills/telegram"
+  install -m 644 "$SRC_DIR/templates/skills/telegram/SKILL.md" "$ws.claude/skills/telegram/SKILL.md"
+  chown -R root:root "$ws.claude"
 done
 
 echo "==> systemd service"

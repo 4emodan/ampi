@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -34,6 +35,12 @@ CREATE TABLE IF NOT EXISTS runs (
     duration_ms    INTEGER,
     error          TEXT,
     prompt_preview TEXT
+);
+CREATE TABLE IF NOT EXISTS watch_state (
+    profile TEXT NOT NULL,
+    name    TEXT NOT NULL,
+    state   TEXT NOT NULL,
+    PRIMARY KEY (profile, name)
 );
 CREATE TABLE IF NOT EXISTS offsets (
     profile TEXT PRIMARY KEY,
@@ -176,6 +183,18 @@ class Store:
             (profile, chat_id, thread_id),
         ).fetchone()
         return RunStats(runs=row["n"], failed=row["failed"], cost_usd=row["cost"])
+
+    def get_watch_state(self, profile: str, name: str) -> dict | None:
+        row = self._db.execute("SELECT state FROM watch_state WHERE profile=? AND name=?", (profile, name)).fetchone()
+        return json.loads(row["state"]) if row else None
+
+    def set_watch_state(self, profile: str, name: str, state: dict) -> None:
+        self._db.execute(
+            "INSERT INTO watch_state (profile, name, state) VALUES (?, ?, ?)"
+            " ON CONFLICT(profile, name) DO UPDATE SET state=excluded.state",
+            (profile, name, json.dumps(state)),
+        )
+        self._db.commit()
 
     def get_offset(self, profile: str) -> int | None:
         row = self._db.execute("SELECT next_update_id FROM offsets WHERE profile=?", (profile,)).fetchone()

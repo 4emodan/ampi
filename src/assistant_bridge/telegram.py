@@ -81,7 +81,7 @@ class TelegramAPI:
     async def get_updates(self, offset: int | None, timeout: int = 50) -> list[dict]:
         return await self.call(
             "getUpdates",
-            {"offset": offset, "timeout": timeout, "allowed_updates": ["message"]},
+            {"offset": offset, "timeout": timeout, "allowed_updates": ["message", "callback_query"]},
             timeout=timeout + 15,
             attempts=1,
         )
@@ -102,6 +102,29 @@ class TelegramAPI:
                 "link_preview_options": {"is_disabled": True},
             },
         )
+
+    async def send_buttons(self, chat_id: int, text: str, buttons: list[list[dict]]) -> dict:
+        """Plain-text message with an inline keyboard (rows of {"text", "callback_data"})."""
+        return await self.call(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "reply_markup": {"inline_keyboard": buttons},
+                "link_preview_options": {"is_disabled": True},
+            },
+        )
+
+    async def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
+        """Replaces a message's text and removes its buttons."""
+        await self.call(
+            "editMessageText",
+            {"chat_id": chat_id, "message_id": message_id, "text": text,
+             "link_preview_options": {"is_disabled": True}},
+        )
+
+    async def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
+        await self.call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text}, attempts=1)
 
     async def send_chat_action(self, chat_id: int, action: str, thread_id: int | None = None) -> None:
         await self.call(

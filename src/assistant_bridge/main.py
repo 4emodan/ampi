@@ -13,7 +13,9 @@ import sys
 
 import httpx
 
+from .approvals import ApprovalRelay
 from .bot import ProfileBot
+from .watchers import Watch
 from .claude_runner import BILLING_ENV_VARS, ClaudeRunner, clean_env
 from .config import Config, ConfigError, load_config
 from .store import Store
@@ -106,6 +108,14 @@ async def serve(config: Config) -> None:
             p.workspace.mkdir(parents=True, exist_ok=True)
             bots.append(ProfileBot(p, TelegramAPI(p.bot_token, client), store, runner))
         pollers = [asyncio.create_task(b.poll_forever(), name=f"poll-{b.profile.name}") for b in bots]
+        if config.tools.approvals:
+            # Approval requests go to the first profile's owner chat (one relay, so no duplicates).
+            bots[0].approvals = ApprovalRelay(bots[0], config.tools.socket)
+            pollers.append(asyncio.create_task(bots[0].approvals.run_forever(), name="approvals"))
+        for b in bots:
+            for w in b.profile.watchers:
+                watch = Watch(b, w, config.tools)
+                pollers.append(asyncio.create_task(watch.run_forever(), name=f"watch-{b.profile.name}-{w.name}"))
         stopper = asyncio.create_task(stop.wait())
         log.info("running %d profile(s): %s", len(bots), ", ".join(p.name for p in config.profiles))
         done, _ = await asyncio.wait([stopper, *pollers], return_when=asyncio.FIRST_COMPLETED)

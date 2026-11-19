@@ -37,6 +37,9 @@ rsync -a --delete \
   "$SRC_DIR"/ "$APP_DIR"/
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 sudo -u "$APP_USER" -H bash -lc "cd '$APP_DIR' && ~/.local/bin/uv sync --no-dev -q"
+# Read-only for the assistant from here on: Claude must not be able to change the code it runs under.
+chown -R root:"$APP_USER" "$APP_DIR"
+chmod -R go-w "$APP_DIR"
 
 echo "==> Config"
 if [[ ! -f $HOME_DIR/config.toml ]]; then

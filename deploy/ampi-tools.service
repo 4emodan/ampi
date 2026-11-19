@@ -1,0 +1,31 @@
+[Unit]
+Description=Todoist and Gmail for Claude Assistant (holds the tokens, asks the owner before critical actions)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ampitools
+Group=ampitools
+EnvironmentFile=/home/ampitools/env
+ExecStart=/home/ampitools/app/.venv/bin/ampi-tools serve
+# /run/ampi-tools/tools.sock: only ampitools and its group (the assistant) can reach it.
+RuntimeDirectory=ampi-tools
+RuntimeDirectoryMode=0750
+UMask=0007
+Restart=on-failure
+RestartSec=10
+
+MemoryMax=300M
+CPUQuota=50%
+TasksMax=32
+ProtectHome=tmpfs
+BindPaths=/home/ampitools
+ProtectSystem=strict
+ReadWritePaths=/home/ampitools
+PrivateTmp=true
+NoNewPrivileges=true
+InaccessiblePaths=-/opt -/srv -/var/www
+
+[Install]
+WantedBy=multi-user.target

@@ -168,6 +168,8 @@ class Reader:
                 )
             elif cmd == "search":
                 text = await self.search(request.get("query") or "", request.get("limit"))
+            elif cmd == "since":
+                return {"ok": True, **await self.since(request.get("chat") or "", request.get("after_id"))}
             else:
                 raise UserError(f"unknown command {cmd!r}")
             return {"ok": True, "text": text}
@@ -271,6 +273,18 @@ class Reader:
             )
         body += [format_message(m) for m in messages]
         return "\n\n".join(body)
+
+    async def since(self, chat: str, after_id: Any = None, limit: int = 200) -> dict:
+        """New messages after `after_id` (for watchers). Without after_id, only reports the newest id."""
+        entity, name = await self.resolve(chat)
+        if after_id is None:
+            newest = [m async for m in self.client.iter_messages(entity, limit=1)]
+            return {"text": "", "count": 0, "last_id": newest[0].id if newest else 0, "chat": name}
+        messages = [m async for m in self.client.iter_messages(entity, min_id=int(after_id), limit=limit)]
+        messages.reverse()
+        last_id = max([int(after_id)] + [m.id for m in messages])
+        text = "\n\n".join(format_message(m) for m in messages)
+        return {"text": text, "count": len(messages), "last_id": last_id, "chat": name}
 
     async def search(self, query: str, limit: Any = None) -> str:
         if not query.strip():

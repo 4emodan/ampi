@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import logging
 import re
+import zlib
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -13,7 +15,7 @@ from typing import Any, Protocol
 from . import chatlog
 from .chatlog import CHATS_DIR
 from .claude_runner import ClaudeRunner, RunResult
-from .config import Group, Profile
+from .config import Group, Profile, Watcher
 from .store import Conversation, Store, now_iso
 from .telegram import TelegramError
 from .text import markdown_to_html, split_markdown
@@ -79,6 +81,12 @@ def _conversations_prompt(profile: Profile) -> str:
             f"- {CHATS_DIR}/{g.name}/ – the Telegram group \"{g.name}\", where you act on everything the owner "
             f"posts or forwards (your instructions there: groups/{g.name}.md)"
         )
+    for w in profile.watchers:
+        lines.append(
+            f"- {CHATS_DIR}/watch-{w.name}/ – runs of your watcher \"{w.name}\" ({w.kind}"
+            + (f": {w.query}" if w.query else "")
+            + f"; instructions: watchers/{w.name}.md). Its reports to the owner are also in the main chat log."
+        )
     example = profile.groups[0].name if profile.groups else "the other chat"
     if (profile.workspace / TELEGRAM_SKILL).is_file():
         history = (
@@ -131,6 +139,7 @@ class ProfileBot:
         self._pending: dict[Key, list[dict]] = {}  # group messages waiting to be handled as one batch
         self._flush_timers: dict[Key, asyncio.Task] = {}
         self.username: str | None = None
+        self.approvals: Any = None  # ApprovalRelay, set by main when [tools] approvals = true
 
     # --- polling --------------------------------------------------------------------
 
@@ -154,6 +163,9 @@ class ProfileBot:
                 message = update.get("message")
                 if message:
                     self._spawn(self.handle_message(message))
+                callback = update.get("callback_query")
+                if callback and self.approvals is not None and (callback.get("data") or "").startswith("ap:"):
+                    self._spawn(self.approvals.handle_callback(callback))
 
     def _spawn(self, coro: Any) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -304,6 +316,66 @@ class ProfileBot:
             if reply and reply != NO_REPLY:
                 chatlog.append(log_dir, "Assistant", reply)
             await self._deliver(chat_id, thread_id, result, quiet_ok=group is not None)
+
+    # --- watchers (see watchers.py) ------------------------------------------------------
+
+    async def notify(self, text: str) -> None:
+        """A short plain message to the owner's private chat."""
+        try:
+            await self._send_text(self.profile.owner_chat_id, 0, text, markdown=False)
+        except TelegramError as e:
+            log.warning("[%s] could not notify the owner: %s", self.profile.name, e)
+
+    async def run_watcher(self, watcher: Watcher, prompt: str) -> None:
+        """One Claude run for a watcher event, in its own fresh session; the reply goes to the owner."""
+        chat_id = self.profile.owner_chat_id
+        key = (chat_id, watcher_thread_id(watcher.name))
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            conv = self.store.reset_session(self.profile.name, *key)
+            log_dir = chatlog.conversation_dir(self.profile.workspace, chat_id, 0, f"watch-{watcher.name}", None)
+            chatlog.append(log_dir, "Watcher", prompt)
+            started_at = now_iso()
+            result = await self.runner.run_turn(
+                prompt,
+                cwd=self.profile.workspace,
+                session_id=conv.session_id,
+                started=False,
+                model=self.profile.model,
+                allowed_tools=self.profile.allowed_tools,
+                append_system_prompt=self.system_prompt + "\n\n" + self._watcher_prompt(watcher),
+                extra_args=self.profile.extra_args,
+            )
+            if result.ok or result.text:
+                self.store.mark_started(self.profile.name, *key, conv.session_id)
+            self._record(conv, started_at, result, prompt)
+            reply = (result.text or "").strip()
+            if result.ok and reply == NO_REPLY:
+                return
+            shown = reply if result.ok else (reply + "\n\n" if reply else "") + f"⚠️ {result.error or 'error'}"
+            chatlog.append(log_dir, "Assistant", shown)
+            main_dir = chatlog.conversation_dir(self.profile.workspace, chat_id, 0, None, None)
+            chatlog.append(main_dir, f"Assistant (watcher {watcher.name})", shown)
+            prefixed = replace(result, text=f"🔔 **{watcher.name}**\n\n{reply}" if reply else reply)
+            await self._deliver(chat_id, 0, prefixed)
+
+    def _watcher_prompt(self, watcher: Watcher) -> str:
+        path = watcher.instructions_path(self.profile.workspace)
+        rel = path.relative_to(self.profile.workspace).as_posix()
+        try:
+            instructions = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            instructions = ""
+        if not instructions:
+            instructions = f"(No instructions yet: {rel} is missing.) Tell the owner briefly what is new."
+        return (
+            f'This run was started by your watcher "{watcher.name}" ({watcher.kind}), not by a message from '
+            "the owner. Your reply is sent to the owner's private chat as a notification, so make it short "
+            "and worth reading. Changes that need approval (sending, deleting, changing Todoist tasks) "
+            "become Approve/Reject buttons for the owner; batch them into one request. Your instructions "
+            f"for this watcher (from {rel}; edit that file when the owner asks you to change them):\n\n"
+            f"{instructions}\n\n"
+            f"If there is nothing worth telling the owner, reply with exactly {NO_REPLY} and nothing else."
+        )
 
     def _group_prompt(self, group: Group, title: str) -> str:
         path = group.instructions_path(self.profile.workspace)
@@ -538,6 +610,11 @@ class ProfileBot:
         if stats.cost_usd:
             lines.append(f"Estimated API-equivalent cost: ${stats.cost_usd:.2f} (covered by your plan)")
         await self._send_text(chat_id, thread_id, "\n".join(lines), markdown=False)
+
+
+def watcher_thread_id(name: str) -> int:
+    """A stable negative pseudo-topic id for a watcher's conversation (real topic ids are positive)."""
+    return -1 - zlib.crc32(name.encode()) % 1_000_000_000
 
 
 def _join_items(items: list[str]) -> str:

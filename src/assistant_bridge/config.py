@@ -7,7 +7,9 @@ import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timezone, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_ALLOWED_TOOLS = ("Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -30,6 +32,38 @@ class Group:
         return workspace / "groups" / f"{self.name}.md"
 
 
+def zone(name: str) -> tzinfo:
+    return timezone.utc if name == "UTC" else ZoneInfo(name)
+
+
+WATCHER_KINDS =("gmail", "todoist", "telegram", "schedule")
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+@dataclass(frozen=True)
+class Watcher:
+    """Something the bridge checks on its own and lets Claude act on (see watchers.py)."""
+
+    name: str  # instructions live in <workspace>/watchers/<name>.md
+    kind: str  # gmail | todoist | telegram | schedule
+    query: str  # gmail search, Todoist filter, or Telegram chat (name, @username or id)
+    every_minutes: float  # how often to check (not for schedule)
+    at: tuple[str, ...] = ()  # schedule: local times "HH:MM"
+    days: tuple[str, ...] = DAYS  # schedule: weekdays
+
+    def instructions_path(self, workspace: Path) -> Path:
+        return workspace / "watchers" / f"{self.name}.md"
+
+
+@dataclass(frozen=True)
+class Tools:
+    """Sockets of the optional helper services (Todoist/Gmail with approvals, Telegram reader)."""
+
+    socket: str = "/run/ampi-tools/tools.sock"
+    tg_reader_socket: str = "/run/tg-reader/tg-reader.sock"
+    approvals: bool = False  # relay approval requests from ampi-tools to the owner
+
+
 @dataclass(frozen=True)
 class Profile:
     name: str
@@ -41,6 +75,13 @@ class Profile:
     allowed_tools: tuple[str, ...]
     extra_args: tuple[str, ...]
     groups: tuple[Group, ...] = ()
+    watchers: tuple[Watcher, ...] = ()
+    timezone: str = "UTC"
+
+    @property
+    def owner_chat_id(self) -> int:
+        """The owner's private chat with the bot (same number as their user ID)."""
+        return min(self.owner_ids)
 
     def group(self, chat_id: int) -> Group | None:
         return next((g for g in self.groups if g.chat_id == chat_id), None)
@@ -53,6 +94,7 @@ class Config:
     max_concurrent_runs: int
     run_timeout_seconds: int
     profiles: tuple[Profile, ...]
+    tools: Tools = Tools()
 
 
 def _str_list(value: object, field: str) -> tuple[str, ...]:
@@ -93,6 +135,58 @@ def _parse_groups(raw: object, where: str) -> tuple[Group, ...]:
             raise ConfigError(f"{gw}: duplicate group chat_id or name")
         groups.append(Group(chat_id=chat_id, name=name, batch_seconds=float(batch), fresh_session=fresh))
     return tuple(groups)
+
+
+def _parse_watchers(raw: object, where: str) -> tuple[Watcher, ...]:
+    if not isinstance(raw, list):
+        raise ConfigError(f"{where}: watchers must be a list of [[profiles.watchers]] tables")
+    out: list[Watcher] = []
+    for j, w in enumerate(raw):
+        ww = f"{where} watchers[{j}]"
+        if not isinstance(w, dict):
+            raise ConfigError(f"{ww} must be a table")
+        name = w.get("name")
+        if not isinstance(name, str) or not _NAME_RE.match(name):
+            raise ConfigError(f"{ww}: name must be lowercase letters, digits, '-' or '_'")
+        kind = w.get("kind")
+        if kind not in WATCHER_KINDS:
+            raise ConfigError(f"{ww}: kind must be one of {', '.join(WATCHER_KINDS)}")
+        query = w.get("query", "")
+        if not isinstance(query, str) or (kind != "schedule" and not query.strip()):
+            raise ConfigError(f"{ww}: query is required (gmail search, Todoist filter or Telegram chat)")
+        every = w.get("every_minutes", 10)
+        if not isinstance(every, (int, float)) or isinstance(every, bool) or not 1 <= every <= 1440:
+            raise ConfigError(f"{ww}: every_minutes must be between 1 and 1440")
+        at = _str_list(w.get("at", []), f"{ww}.at")
+        if kind == "schedule":
+            if not at:
+                raise ConfigError(f"{ww}: a schedule needs at = [\"HH:MM\", ...]")
+            for t in at:
+                if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", t):
+                    raise ConfigError(f"{ww}: bad time {t!r} (use HH:MM, 24-hour)")
+        days = tuple(d.lower()[:3] for d in _str_list(w.get("days", list(DAYS)), f"{ww}.days"))
+        if not days or any(d not in DAYS for d in days):
+            raise ConfigError(f"{ww}: days must be from {', '.join(DAYS)}")
+        if any(x.name == name for x in out):
+            raise ConfigError(f"{ww}: duplicate watcher name")
+        out.append(Watcher(name=name, kind=kind, query=query.strip(), every_minutes=float(every), at=at, days=days))
+    return tuple(out)
+
+
+def _parse_tools(raw: object) -> Tools:
+    if raw is None:
+        return Tools()
+    if not isinstance(raw, dict):
+        raise ConfigError("[tools] must be a table")
+    approvals = raw.get("approvals", False)
+    if not isinstance(approvals, bool):
+        raise ConfigError("tools.approvals must be true or false")
+    defaults = Tools()
+    sock = raw.get("socket", defaults.socket)
+    tg = raw.get("tg_reader_socket", defaults.tg_reader_socket)
+    if not isinstance(sock, str) or not isinstance(tg, str):
+        raise ConfigError("tools sockets must be paths")
+    return Tools(socket=sock, tg_reader_socket=tg, approvals=approvals)
 
 
 def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None = None) -> Config:
@@ -163,6 +257,12 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
             raise ConfigError(f"{where}: extra_args must not contain --bare")
 
         groups = _parse_groups(p.get("groups", []), where)
+        watchers = _parse_watchers(p.get("watchers", []), where)
+        tz = p.get("timezone", "UTC")
+        try:
+            zone(tz)
+        except (ZoneInfoNotFoundError, ValueError, TypeError):
+            raise ConfigError(f"{where}: unknown timezone {tz!r} (e.g. \"Europe/Athens\")") from None
 
         profiles.append(
             Profile(
@@ -177,6 +277,8 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
                 ),
                 extra_args=extra_args,
                 groups=groups,
+                watchers=watchers,
+                timezone=tz,
             )
         )
 
@@ -186,4 +288,5 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
         max_concurrent_runs=_positive_int(raw.get("max_concurrent_runs", 2), "max_concurrent_runs"),
         run_timeout_seconds=_positive_int(raw.get("run_timeout_seconds", 1800), "run_timeout_seconds"),
         profiles=tuple(profiles),
+        tools=_parse_tools(raw.get("tools")),
     )
