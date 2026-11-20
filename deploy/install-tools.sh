@@ -45,15 +45,15 @@ if [[ ! -f $TOOLS_HOME/config.toml ]]; then
   install -o root -g "$TOOLS_USER" -m 640 "$SRC_DIR/deploy/ampi-tools.config.example.toml" "$TOOLS_HOME/config.toml"
 fi
 
-echo "==> todoist, gmail and youtube commands for $APP_USER"
+echo "==> todoist, gmail, youtube, threads and instagram commands for $APP_USER"
 install -d -o "$APP_USER" -g "$APP_USER" "$APP_HOME/.local/bin"
-for cmd in todoist gmail youtube; do
+for cmd in todoist gmail youtube threads instagram; do
   ln -sfn "$APP_HOME/app/.venv/bin/$cmd" "$APP_HOME/.local/bin/$cmd"
 done
 
 echo "==> Skills and watcher instructions in each profile workspace"
 for ws in "$APP_HOME"/profiles/*/; do
-  for skill in todoist gmail telegram youtube; do
+  for skill in todoist gmail telegram youtube threads instagram; do
     install -d -m 755 "$ws.claude/skills/$skill"
     install -m 644 "$SRC_DIR/templates/skills/$skill/SKILL.md" "$ws.claude/skills/$skill/SKILL.md"
   done

@@ -36,7 +36,7 @@ def zone(name: str) -> tzinfo:
     return timezone.utc if name == "UTC" else ZoneInfo(name)
 
 
-WATCHER_KINDS = ("gmail", "todoist", "telegram", "youtube", "schedule")
+WATCHER_KINDS = ("gmail", "todoist", "telegram", "youtube", "threads", "instagram", "schedule")
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .gmail import IGNORABLE, Gmail, format_full, headers
+from .meta import redact
 from .todoist import Todoist, ToolError, api_priority
 from . import youtube as ytmod
 from .youtube import (
@@ -46,6 +47,8 @@ class Services:
     todoist_client: Todoist | None = None
     gmail_client: Gmail | None = None
     youtube_client: YouTube | None = None
+    threads_client: Any = None  # meta.MetaClient
+    instagram_client: Any = None
 
     @property
     def todoist(self) -> Todoist:
@@ -1055,7 +1058,8 @@ async def describe_unsubscribe(s: Services, a: dict) -> str:
     return "Unsubscribe from the YouTube channel " + _channel_line(a.get("resolved") or {})
 
 
-YOUTUBE_PREPARE = {
+# Critical ops that resolve their target before the owner sees them; ops_social adds its own.
+PREPARE: dict[str, Callable[[Services, dict], Awaitable[dict]]] = {
     "youtube.add": _prepare_add, "youtube.remove": _prepare_remove,
     "youtube.subscribe": _prepare_subscribe, "youtube.unsubscribe": _prepare_unsubscribe,
 }
@@ -1295,8 +1299,8 @@ async def prepare(services: Services, ops: list[dict]) -> list[dict]:
             a["message_id"] = d.get("message", {}).get("id")
         elif o["op"] == "youtube.add" and "resolved" in a:
             pass  # resolved by pre_resolve() in this same request; callers can't set `resolved`
-        elif o["op"] in YOUTUBE_PREPARE:
-            a = {"resolved": await YOUTUBE_PREPARE[o["op"]](services, a)}
+        elif o["op"] in PREPARE:
+            a = {"resolved": await PREPARE[o["op"]](services, a)}
         out.append({"op": o["op"], "args": a})
     return out
 
@@ -1309,7 +1313,7 @@ async def execute(services: Services, ops: list[dict]) -> tuple[bool, str, dict]
         try:
             result = await OPS[o["op"]].run(services, o["args"])
         except Exception as e:
-            msg = str(e) if isinstance(e, ToolError) else f"{type(e).__name__}: {e}"
+            msg = redact(str(e) if isinstance(e, ToolError) else f"{type(e).__name__}: {e}")
             if not isinstance(e, ToolError):
                 log.exception("%s failed", o["op"])
             texts.append(f"✗ {o['op']}: {msg}")
@@ -1345,3 +1349,7 @@ async def summarize(services: Services, ops: list[dict], policy: Policy) -> str:
             f"{MAX_SUMMARY}); split it into smaller requests"
         )
     return summary
+
+
+# Threads and Instagram register their operations here (they use the helpers above).
+from . import ops_social  # noqa: E402,F401

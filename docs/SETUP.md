@@ -143,6 +143,42 @@ Adding to a public or unlisted playlist, removing from playlists, subscribing an
 3,000 lookups, and 1,000 for watchers (`/home/ampitools/youtube-quota.json`). Requests to youtube.com itself
 (feeds, oEmbed) are rate-limited and pause for 30 minutes if YouTube starts refusing them.
 
+## 8c. Threads and Instagram (optional)
+
+Meta's official APIs only give an app **your own posts and the replies/comments under them** (plus stats).
+No feed, no other people's posts, no search, no DMs, and Instagram only for **professional** (Creator or
+Business) accounts: personal Instagram accounts have no API. Posting, replying, deleting and hiding always
+come to you as Approve/Reject buttons first.
+
+1. At <https://developers.facebook.com/apps> create an app ("Other" → **Business** type is fine for both).
+   - **Threads:** add the use case "Access the Threads API". Under its settings add the permissions
+     `threads_basic, threads_read_replies, threads_manage_insights` (and `threads_content_publish,
+     threads_manage_replies, threads_delete` if you want posting), put `https://localhost:8765/` in
+     **Redirect callback URLs**, then **App roles → Roles → Add people → Threads Tester** with your Threads
+     username, and accept it in Threads → Settings → Account → **Website permissions**. Copy the *Threads app
+     ID and secret* into `THREADS_APP_ID=` / `THREADS_APP_SECRET=` in `/home/ampitools/env`.
+   - **Instagram:** add the product "Instagram" → **API setup with Instagram login**. Add your Instagram account
+     as an **Instagram tester** (App roles) and accept it in Instagram → Settings → **Apps and websites** →
+     Tester invites. Set the redirect URL `https://localhost:8765/` under **Business login settings**. Copy the
+     *Instagram app ID and secret* into `INSTAGRAM_APP_ID=` / `INSTAGRAM_APP_SECRET=`.
+   - If Meta refuses a localhost redirect, use an https address on a domain you own instead (the page doesn't
+     have to exist) and set it as `META_REDIRECT_URI=` in the env file too.
+   - Recommended: in the app's **Advanced settings**, turn on **Require app secret**.
+2. Log in (prints a link; after allowing access, paste back the address the browser ends up on):
+   ```bash
+   sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools threads-login'      # add --write to allow posting
+   sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools instagram-login'
+   ```
+3. `systemctl restart ampi-tools`, `ampi-tools check` (as in section 8), add `"Bash(threads:*)"` and/or
+   `"Bash(instagram:*)"` to `allowed_tools` in `config.toml`, and `systemctl restart claude-assistant`.
+
+Logins last 60 days and are renewed automatically while the server runs. If your Threads profile is
+**private**, Meta ends the permissions 90 days after login anyway: the assistant tells you a week before.
+Optional watchers (section 9): `kind = "threads"` (`query = "replies"`) and `kind = "instagram"`
+(`query = "comments"`), with `allowed_tools = ["Read", "Bash(threads:*)"]` / `["Read", "Bash(instagram:*)"]`;
+instructions in `watchers/social-replies.md`. More than 30 new items at once, or more than 24 runs a day,
+become a one-line notice instead of a Claude run.
+
 ## 9. Watchers and briefings (optional)
 
 Watchers let the assistant act without being asked. They check Gmail, Todoist, a Telegram chat, YouTube channels, or the clock, and start Claude with instructions from `<workspace>/watchers/<name>.md`. Starter instructions are installed by `install-tools.sh` (from `templates/watchers/`). Ask the assistant to change them, or edit them yourself.
@@ -153,7 +189,7 @@ timezone = "Europe/Athens"
 
 [[profiles.watchers]]
 name = "gmail-inbox"        # instructions: watchers/gmail-inbox.md
-kind = "gmail"              # gmail | todoist | telegram | youtube | schedule
+kind = "gmail"              # gmail | todoist | telegram | youtube | threads | instagram | schedule
 query = "in:inbox"          # Gmail search / Todoist filter / Telegram chat name, @username or id
 every_minutes = 15
 

@@ -37,12 +37,14 @@ from .ops import (
     validate,
 )
 from .todoist import Todoist, ToolError
+from . import ops_social
+from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact
 from .youtube import SCOPE_READ, SCOPE_WRITE, YouTube
 
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
 MAX_REQUEST = 1024 * 1024
 ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide"}
-WATCHER_ONLY = {"youtube.ids", "youtube.show"}
+WATCHER_ONLY = {"youtube.ids", "youtube.show"} | ops_social.WATCHER_ONLY
 log = logging.getLogger("ampi-tools")
 
 PidCheck = Callable[[int], Awaitable[bool]]
@@ -132,10 +134,10 @@ class Daemon:
                 )
             raise ToolError(f"unknown command {cmd!r}")
         except ToolError as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": redact(e)}
         except Exception as e:  # never let one request take the daemon down
             log.exception("request failed")
-            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            return {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
 
     async def run(self, ops: list[dict], reason: Any, origin: Any = None) -> dict:
         ops = await pre_resolve(self.services, ops)
@@ -243,6 +245,28 @@ def youtube_auth(client: httpx.AsyncClient, home: Path, scope: str = SCOPE_READ)
                       login_command="youtube-login")
 
 
+def meta_auth(service: MetaService, client: httpx.AsyncClient, home: Path) -> MetaAuth | None:
+    prefix = service.name.upper()
+    app_id = os.environ.get(f"{prefix}_APP_ID", "").strip()
+    secret = os.environ.get(f"{prefix}_APP_SECRET", "").strip()
+    if not (app_id and secret):
+        return None
+    redirect = os.environ.get("META_REDIRECT_URI", "").strip() or "https://localhost:8765/"
+    return MetaAuth(service, app_id, secret, home / f"{service.name.lower()}-token.json", client, redirect)
+
+
+async def refresh_meta_tokens(services: Services) -> None:
+    """Long-lived Meta tokens die after 60 days unless refreshed, used or not."""
+    while True:
+        for c in (services.threads_client, services.instagram_client):
+            if c is not None:
+                try:
+                    await c.auth.refresh_if_due()
+                except Exception:
+                    log.exception("token refresh failed")
+        await asyncio.sleep(6 * 3600)
+
+
 def build_services(client: httpx.AsyncClient, home: Path) -> Services:
     services = Services()
     token = os.environ.get("TODOIST_TOKEN", "").strip()
@@ -251,6 +275,10 @@ def build_services(client: httpx.AsyncClient, home: Path) -> Services:
     cid, secret = os.environ.get("GMAIL_CLIENT_ID", "").strip(), os.environ.get("GMAIL_CLIENT_SECRET", "").strip()
     if cid and secret:
         services.gmail_client = Gmail(GmailAuth(cid, secret, home / "gmail-token.json", client), client)
+    for service, attr in ((THREADS, "threads_client"), (INSTAGRAM, "instagram_client")):
+        auth = meta_auth(service, client, home)
+        if auth is not None:
+            setattr(services, attr, MetaClient(service, auth, client))
     # RSS feeds and oEmbed work without any credentials, so YouTube is always there.
     services.youtube_client = YouTube(client, youtube_auth(client, home),
                                       os.environ.get("YOUTUBE_API_KEY", "").strip() or None, home=home)
@@ -265,6 +293,7 @@ async def _serve(home: Path) -> None:
                  "on" if services.gmail_client and services.gmail_client.auth.configured() else "off",
                  services.youtube.status())
         daemon = Daemon(services, Approvals(home / "approvals.sqlite3"), policy, systemd_main_pid_check(unit))
+        refresher = asyncio.create_task(refresh_meta_tokens(services))  # noqa: F841 (runs for the daemon's life)
         server = await serve_socket(daemon, socket_path())
         log.info("listening on %s", socket_path())
         async with server:
@@ -335,6 +364,28 @@ async def _my_channel(yt: YouTube) -> str:
     return f"“{items[0].get('snippet', {}).get('title', '?')}” [{items[0].get('id')}]"
 
 
+async def _meta_login(home: Path, service: MetaService, write: bool) -> None:
+    async with httpx.AsyncClient() as client:
+        auth = meta_auth(service, client, home)
+        if auth is None:
+            prefix = service.name.upper()
+            sys.exit(f"Set {prefix}_APP_ID and {prefix}_APP_SECRET in ~/env first (docs/SETUP.md, section 8c).")
+        if auth.configured():
+            print(f"This replaces the current {service.name} login (@{auth.user['username']}).\n")
+        url, state = auth.login_url(write)
+        access = "read, and post/reply/delete with your approval" if write or not service.write_scopes else "read-only"
+        print(f"1. Open this link in a browser where you're signed in to {service.name}, and allow access ({access}):\n")
+        print(url)
+        print(f"\n2. The browser then goes to {auth.redirect}..., which doesn't load. That's expected.")
+        print("   Copy the whole address from the address bar and paste it here.\n")
+        redirected = input("Address: ")
+        try:
+            data = await auth.finish_login(redirected, state, write)
+        except ToolError as e:
+            sys.exit(f"Failed: {redact(e)}")
+        print(f"Connected @{data['username']}. Now: systemctl restart ampi-tools")
+
+
 async def _check(home: Path) -> None:
     async with httpx.AsyncClient() as client:
         services = build_services(client, home)
@@ -358,17 +409,32 @@ async def _check(home: Path) -> None:
             except ToolError as e:
                 api = f", API failed: {e}"
         print(f"YouTube: {yt.status()}; {feeds}{api}; {quota}")
+        for name, c in (("Threads", services.threads_client), ("Instagram", services.instagram_client)):
+            if c is None:
+                print(f"{name}: not set up")
+                continue
+            try:
+                me = await c.call("GET", "/me", {"fields": "username"})
+                print(f"{name}: OK (@{me.get('username')}) {c.auth.expiry_note()}".rstrip())
+            except ToolError as e:
+                print(f"{name}: {redact(e)}")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="ampi-tools", description="Todoist, Gmail and YouTube for the assistant")
-    parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "check"])
+    parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "threads-login",
+                                            "instagram-login", "check"])
     parser.add_argument("--write", action="store_true", help="youtube-login: also allow changes (playlists, "
                         "subscriptions), each critical one still approved by you in Telegram")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     home = Path(os.environ.get("AMPI_TOOLS_HOME") or Path.home())
+    for handler in logging.getLogger().handlers:  # tokens never reach the journal, tracebacks included
+        handler.setFormatter(RedactingFormatter("%(levelname)s %(message)s"))
+    if args.command in ("threads-login", "instagram-login"):
+        asyncio.run(_meta_login(home, THREADS if args.command == "threads-login" else INSTAGRAM, args.write))
+        return
     if args.command == "youtube-login":
         asyncio.run(_youtube_login(home, args.write))
         return

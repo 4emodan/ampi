@@ -50,12 +50,14 @@ src/tg_reader/          optional read-only access to the owner's Telegram accoun
   server.py             `tg-reader serve|login`: daemon as user `tgreader`, holds the session, Unix socket
   reader.py             the only allowed requests: list chats, read a chat, search (never send/delete)
   client.py             `tg-read`: stdlib-only client the assistant runs (skill: templates/skills/telegram)
-src/ampi_tools/         optional Todoist, Gmail and YouTube with owner approval for critical actions
+src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram with owner approval for critical actions
   server.py             `ampi-tools serve|gmail-login|youtube-login|check`: daemon as user `ampitools`, holds the tokens
   ops.py                every operation, which ones are critical, the approvals queue
   todoist.py, gmail.py  API clients (httpx; Todoist API v1, Gmail REST with gmail.modify)
   youtube.py            YouTube Data API v3 + public RSS/oEmbed (no transcripts: blocked from the server);
                         rate limiter and daily quota budgets
+  meta.py, ops_social.py Threads + Instagram (Meta's official APIs: own posts and replies/comments only);
+                        token refresh, secret redaction, checks on published text
   client.py             `todoist` / `gmail` / `youtube` commands the assistant runs (skills: templates/skills/)
 tests/                  pytest; fake claude CLI + fake Telegram API, no network
 deploy/                 install.sh, systemd unit (runs as user `assistant`, isolated);

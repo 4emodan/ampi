@@ -5,7 +5,9 @@
 #   todoist.update, todoist.move, todoist.complete, todoist.reopen, todoist.delete,
 #   gmail.send, gmail.send_draft, gmail.trash, gmail.delete_label,
 #   youtube.remove, youtube.subscribe, youtube.unsubscribe (always ask),
-#   youtube.add to a playlist that isn't private (always asks)
+#   youtube.add to a playlist that isn't private (always asks),
+#   threads.publish, threads.delete, instagram.reply, instagram.delete_comment (always ask),
+#   threads.hide/unhide, instagram.hide/unhide
 # gmail.send, gmail.send_draft, gmail.trash and todoist.delete always ask, whatever is set here.
 
 # Critical operations to allow without asking, e.g. once you trust its inbox triage:

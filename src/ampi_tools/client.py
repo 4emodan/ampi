@@ -1,4 +1,4 @@
-"""`todoist`, `gmail` and `youtube`: the assistant's commands (standard library only).
+"""`todoist`, `gmail`, `youtube`, `threads` and `instagram`: the assistant's commands (standard library only).
 
 They send operations to the ampi-tools daemon, which holds the tokens. Critical operations come back
 as "waiting for the owner's approval" instead of running.
@@ -322,6 +322,105 @@ def youtube_ops(a: argparse.Namespace) -> list[dict]:
     raise SystemExit(f"unknown command {c}")
 
 
+# --- threads and instagram ----------------------------------------------------------------
+
+
+def _text(args: argparse.Namespace) -> str | None:
+    if getattr(args, "text_file", None):
+        return workspace_file(args.text_file, 20_000)
+    return getattr(args, "text", None)
+
+
+def _op(name: str, **args: object) -> list[dict]:
+    return [{"op": name, "args": {k: v for k, v in args.items() if v not in (None, False, [])}}]
+
+
+def threads_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="threads", description="The owner's Threads account.")
+    p.add_argument("-m", "--reason", help="why (shown to the owner with approval requests)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("profile")
+    s = sub.add_parser("posts", help="the owner's posts")
+    s.add_argument("-n", "--limit", type=int, default=20)
+    s.add_argument("--days", type=int)
+    sub.add_parser("post", help="one post or reply (id or threads.com link), with stats").add_argument("target")
+    s = sub.add_parser("replies", help="replies under one of the owner's posts")
+    s.add_argument("target")
+    s.add_argument("-n", "--limit", type=int, default=50)
+    sub.add_parser("insights", help="account stats").add_argument("--days", type=int, default=7)
+    s = sub.add_parser("publish", help="post publicly (needs approval)")
+    s.add_argument("text", nargs="?")
+    s.add_argument("--text-file", help="read the text from this file in the workspace")
+    s.add_argument("--reply-to", help="a post or reply (id or link) under the owner's posts")
+    for name in ("delete", "hide", "unhide"):
+        sub.add_parser(name, help="needs approval").add_argument("target")
+    sub.add_parser("apply", help="run a JSON plan of operations as one request").add_argument("file")
+    sub.add_parser("approvals", help="recent approval requests and their outcome")
+    return p
+
+
+def threads_ops(a: argparse.Namespace) -> list[dict]:
+    c = a.cmd
+    if c == "profile":
+        return _op("threads.profile")
+    if c == "posts":
+        return _op("threads.posts", limit=a.limit, days=a.days)
+    if c in ("post", "delete", "hide", "unhide"):
+        return _op(f"threads.{c}", target=a.target)
+    if c == "replies":
+        return _op("threads.replies", target=a.target, limit=a.limit)
+    if c == "insights":
+        return _op("threads.insights", days=a.days)
+    if c == "publish":
+        return _op("threads.publish", text=_text(a), target=a.reply_to)
+    if c == "apply":
+        return _load_plan(a.file, "threads")
+    raise SystemExit(f"unknown command {c}")
+
+
+def instagram_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="instagram", description="The owner's Instagram (professional account).")
+    p.add_argument("-m", "--reason", help="why (shown to the owner with approval requests)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("profile")
+    sub.add_parser("media", help="the owner's posts").add_argument("-n", "--limit", type=int, default=20)
+    sub.add_parser("post", help="one of the owner's posts (id or instagram.com link)").add_argument("target")
+    s = sub.add_parser("comments", help="comments on one of the owner's posts")
+    s.add_argument("target")
+    s.add_argument("-n", "--limit", type=int, default=50)
+    sub.add_parser("insights", help="account stats").add_argument("--days", type=int, default=7)
+    s = sub.add_parser("reply", help="reply to a comment (needs approval)")
+    s.add_argument("comment")
+    s.add_argument("text", nargs="?")
+    s.add_argument("--text-file")
+    for name in ("delete-comment", "hide", "unhide"):
+        sub.add_parser(name, help="needs approval").add_argument("comment")
+    sub.add_parser("apply", help="run a JSON plan of operations as one request").add_argument("file")
+    sub.add_parser("approvals", help="recent approval requests and their outcome")
+    return p
+
+
+def instagram_ops(a: argparse.Namespace) -> list[dict]:
+    c = a.cmd
+    if c in ("profile",):
+        return _op("instagram.profile")
+    if c == "media":
+        return _op("instagram.media", limit=a.limit)
+    if c == "post":
+        return _op("instagram.post", target=a.target)
+    if c == "comments":
+        return _op("instagram.comments", target=a.target, limit=a.limit)
+    if c == "insights":
+        return _op("instagram.insights", days=a.days)
+    if c == "reply":
+        return _op("instagram.reply", target=a.comment, text=_text(a))
+    if c in ("delete-comment", "hide", "unhide"):
+        return _op(f"instagram.{c.replace('-', '_')}", target=a.comment)
+    if c == "apply":
+        return _load_plan(a.file, "instagram")
+    raise SystemExit(f"unknown command {c}")
+
+
 def _main(prog: str, parser: argparse.ArgumentParser, to_ops, argv: list[str] | None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "approvals":
@@ -346,3 +445,11 @@ def gmail_main(argv: list[str] | None = None) -> int:
 
 def youtube_main(argv: list[str] | None = None) -> int:
     return _main("youtube", youtube_parser(), youtube_ops, argv)
+
+
+def threads_main(argv: list[str] | None = None) -> int:
+    return _main("threads", threads_parser(), threads_ops, argv)
+
+
+def instagram_main(argv: list[str] | None = None) -> int:
+    return _main("instagram", instagram_parser(), instagram_ops, argv)

@@ -32,6 +32,9 @@ FAILS_BEFORE_NOTICE = 3
 RUN_FAILS_BEFORE_SKIP = 5
 QUICK_FAILURE_MS = 60_000  # a run that failed faster than this most likely did nothing yet
 LATE_LIMIT = timedelta(hours=3)  # a scheduled run missed by more than this (server down) is skipped
+SOCIAL = {"threads": "replies", "instagram": "comments"}  # watcher kinds where strangers write the items
+SOCIAL_FLOOD = 30
+SOCIAL_RUNS_PER_DAY = 24
 
 
 def untrusted(text: str) -> str:
@@ -182,24 +185,43 @@ class Watch:
 
     async def _listing(self, state: dict | None) -> tuple[str | None, dict]:
         kind = self.w.kind
-        args = {"query": self.w.query, "limit": 200} if kind == "gmail" else {"filter": self.w.query, "limit": 500}
+        social = kind in SOCIAL
+        if kind == "gmail":
+            args = {"query": self.w.query, "limit": 200}
+        elif social:
+            args = {"query": self.w.query}
+        else:
+            args = {"filter": self.w.query, "limit": 500}
         resp = await self._tool(self.tools.socket, {"cmd": "run", "ops": [{"op": f"{kind}.ids", "args": args}]})
         ids = [i for i in resp.get("ids", []) if isinstance(i, str)]
         if state is None:
             return None, {"seen": ids[:SEEN_MAX]}
         seen = set(state.get("seen", []))
-        new = [i for i in ids if i not in seen][:MAX_ITEMS]
+        fresh = list(dict.fromkeys(i for i in ids if i not in seen))
+        new = fresh[:MAX_ITEMS]
         if not new:
             return None, dict(state)
-        show = {"ids": new} if kind == "gmail" else {"ids": new, "filter": self.w.query}
+        what = {"gmail": "email(s)", "todoist": "task(s)"}.get(kind) or SOCIAL[kind]
+        if social:
+            # Anyone can write replies and comments: a flood (or a busy day) mustn't turn into many Claude runs.
+            today = self.clock().strftime("%Y-%m-%d")
+            runs = state.get("runs", {}) if state.get("runs", {}).get("day") == today else {"day": today, "n": 0}
+            if len(fresh) > SOCIAL_FLOOD or runs["n"] >= SOCIAL_RUNS_PER_DAY:
+                merged = (fresh + [i for i in state.get("seen", []) if i not in fresh])[:SEEN_MAX]
+                why = "too many to go through here" if len(fresh) > SOCIAL_FLOOD else "the watcher's daily limit is reached"
+                await self.bot.notify(f"🔔 {self.w.name}: {len(fresh)} new {what} on {kind.capitalize()} ({why}; "
+                                      "have a look in the app).")
+                return None, {**state, "seen": merged, "runs": runs}
+            runs = {"day": today, "n": runs["n"] + 1}
+        show = {"ids": new} if kind == "gmail" or social else {"ids": new, "filter": self.w.query}
         listing = await self._tool(self.tools.socket, {"cmd": "run", "ops": [{"op": f"{kind}.show", "args": show}]})
         merged = (new + [i for i in state.get("seen", []) if i not in new])[:SEEN_MAX]
-        what = "email(s)" if kind == "gmail" else "task(s)"
+        where = f"on {kind.capitalize()}" if social else f"in {kind} matching `{self.w.query}`"
         prompt = (
-            f'Watcher "{self.w.name}": {len(new)} new {what} in {kind} matching `{self.w.query}`:\n\n'
+            f'Watcher "{self.w.name}": {len(new)} new {what} {where}:\n\n'
             + untrusted(listing.get("text", ""))
         )
-        return prompt, {"seen": merged}
+        return prompt, {"seen": merged, **({"runs": runs} if social else {})}
 
     # --- Telegram: messages after the last seen id, oldest first -------------------------
 
