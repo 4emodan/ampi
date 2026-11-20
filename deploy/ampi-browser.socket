@@ -1,7 +1,7 @@
 [Unit]
 Description=Sandboxed web browser for Claude Assistant (one page per connection)
-Requires=ampi-browser-net.service
-After=ampi-browser-net.service
+# No dependency on ampi-browser-net here (sockets start before basic.target, which would make a boot
+# cycle); each instance requires it and checks the firewall itself before starting.
 
 [Socket]
 # Root owns the socket, so nothing the browser runs can re-bind it. Group ampibrowse = the assistant only;

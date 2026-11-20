@@ -203,14 +203,13 @@ prebuilt release is pinned by sha256: that proves it's the published file, not w
   aren't this server's own. Private/local addresses, other ports and other projects are unreachable.
   Every instance first checks the table is loaded unchanged and refuses to start otherwise (e.g. after
   `nft flush ruleset`: `systemctl restart ampi-browser-net` fixes it).
-- **Watchers and groups never get `browse`**: their tool rules are stripped of it, because injected text
-  could put private data into a URL. The service also refuses their runs unless the run is listed in
-  `/etc/ampi-browser/allow-origins` (e.g. `group:clipboard`). A bare `Bash` rule in the profile's
-  `allowed_tools` would bypass the stripping for groups, so don't use one in a profile that has groups.
+- **Watchers and groups never get `browse`**: their tool rules are stripped of anything that would allow
+  it (including a bare `Bash` rule, which they lose entirely), because injected text could put private
+  data into a URL. The service also refuses requests marked as coming from those runs.
 - Long pages are saved under `web/` in the workspace (deleted after a day), so Claude can Grep them.
 
 Logs: `journalctl -u 'ampi-browser@*'` (site name, outcome and time only). Check: `browse status` as the
-assistant. To update the engine, change `VERSION`/`SHA256` in `install-browser.sh` and run it again; the
+assistant (it runs the engine with JavaScript on a local test page). To update the engine, change `VERSION`/`SHA256` in `install-browser.sh` and run it again; the
 previous version stays in `/usr/local/lib/obscura/` and is switched back automatically if the new one
 doesn't start.
 

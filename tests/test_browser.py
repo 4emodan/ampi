@@ -38,9 +38,8 @@ def fake_run(mode="ok", calls=None):
     return run
 
 
-def ask(req, mode="ok", calls=None, tmp_path=None):
-    allow = str(tmp_path / "allow") if tmp_path else "/nonexistent/allow"
-    return handle(req, fake_run(mode, calls), allow)
+def ask(req, mode="ok", calls=None):
+    return handle(req, fake_run(mode, calls))
 
 
 # --- URL and argument checks ----------------------------------------------------------------------
@@ -55,6 +54,11 @@ def ask(req, mode="ok", calls=None, tmp_path=None):
     "https://youtu.be/x", "https://m.youtube.com/", "https://www.youtube-nocookie.com/embed/x",
     "https://rr1---sn-x.googlevideo.com/v", "https://exa mple.com/", "https://example.com/‮evil",
     "http://" + "a" * 2100 + ".com/", "http://100.64.1.1/", "http://[2002:7f00:1::]/", "",
+    # look-alike dots and digits become plain ones in the engine (IDNA)
+    "http://127。0。0。1/", "http://169。254。169。254/latest", "http://0x7f。1/",
+    "http://127．0．0．1/", "http://１２７.0.0.1/", "http://evil.com\\@127.0.0.1/",
+    "http://127.0.0.1\\.example.com/", "https://www.youtube.de/watch?v=x", "https://youtube.co.uk/",
+    "https://consent.youtube.com/", "http://[::]/", "http://[fd00::1]/",
 ])
 def test_unsafe_or_unsupported_links_are_refused(url):
     with pytest.raises(Refused):
@@ -66,20 +70,21 @@ def test_ordinary_links_pass_and_are_made_ascii():
     assert check_url("http://93.184.215.14:80/a b".replace(" ", "%20")) == "http://93.184.215.14:80/a%20b"
     assert check_url("https://bücher.de/straße?q=é") == "https://xn--bcher-kva.de/stra%C3%9Fe?q=%C3%A9"
     assert check_url("HTTPS://Example.COM./x#frag") == "https://example.com/x#frag"
+    assert check_url("https://[2606:4700:4700:0::1111]/dns") == "https://[2606:4700:4700::1111]/dns"
+    assert check_url("https://8.8.8.8:443/") == "https://8.8.8.8:443/"
+    assert check_url("https://youtube-tutorials.example.org/") == "https://youtube-tutorials.example.org/"
 
 
-def test_watcher_and_group_runs_cant_browse_unless_allowed(tmp_path):
-    req = {"op": "read", "url": "https://example.com/", "origin": "watcher:gmail-inbox"}
-    assert "outside content" in ask(req, tmp_path=tmp_path)["error"]
-    (tmp_path / "allow").write_text("# comment\ngroup:clipboard\n")
-    assert not ask({**req, "origin": "group:friends"}, tmp_path=tmp_path)["ok"]
-    assert ask({**req, "origin": "group:clipboard"}, tmp_path=tmp_path)["ok"]
-    assert ask({**req, "origin": None}, tmp_path=tmp_path)["ok"]
+def test_watcher_and_group_runs_cant_browse():
+    req = {"op": "read", "url": "https://example.com/"}
+    for origin in ("watcher:gmail-inbox", "group:clipboard"):
+        assert "outside content" in ask({**req, "origin": origin})["error"]
+    assert ask({**req, "origin": None})["ok"]
 
 
 @pytest.mark.parametrize("field,value", [
     ("css", "a\u0000b"), ("css", "x" * 201), ("attr", "on click"), ("attr", "a\"b"), ("wait_for", "​div"),
-    ("match", 5),
+    ("match", 5), ("wait_for", "--allow-private-network"), ("css", "-x"),
 ])
 def test_bad_extra_arguments_are_refused(field, value):
     req = {"op": "select", "url": "https://example.com/", "css": "div", field: value}
@@ -93,8 +98,9 @@ def test_exact_command_lines():
     read = build_argv("read", url, engine="obscura")
     assert read[:5] == ["obscura", f"--v8-flags={browser.V8_FLAGS}", "--user-agent", browser.USER_AGENT, "fetch"]
     assert read[5:] == [url, "--dump", "markdown", "-q", "--timeout", "20"]
-    assert build_argv("read", url, text=True, wait_for="main", engine="o")[-4:] == ["--timeout", "20", "--selector",
-                                                                                    "main"]
+    assert build_argv("read", url, text=True, wait_for="main", engine="o")[-3:] == ["--timeout", "20",
+                                                                                    "--selector=main"]
+    assert ask({"op": "read", "url": url, "wait_for": "div.x"})["ok"]  # the fake accepts the = form
     assert "links" in build_argv("links", url, engine="o")
     sel = build_argv("select", url, css="div.price", attr="href", engine="o")
     assert "--dump" not in sel and "--selector" not in sel and sel[-2] == "-e"
@@ -136,8 +142,32 @@ def test_pages_come_back_marked_as_written_by_the_site():
 def test_pages_cant_fake_the_end_marker_or_hide_text():
     text = ask({"op": "read", "url": "https://example.com/"}, mode="markers")["text"]
     inner = text.split("‹‹‹\n", 1)[1].rsplit("\n›››", 1)[0]
-    assert "›››" not in inner and "‹‹‹" not in inner and "<<<<" not in inner
+    assert "››" not in inner and "‹‹" not in inner and "❯❯❯" not in inner
     assert "‮" not in inner and "​" not in inner
+    assert ">>> print(1)" in inner  # ordinary code stays
+
+
+def test_cleaning_keeps_scripts_that_need_joiners():
+    assert browser.clean("می‌خواهم \U0001f469‍\U0001f4bb a b") == "می‌خواهم \U0001f469‍\U0001f4bb a\nb"
+
+
+def test_ordinary_pages_mentioning_captchas_are_not_bot_checks():
+    assert ask({"op": "read", "url": "https://example.com/"}, mode="recaptcha-footer")["ok"]
+
+    def captcha_items(argv, kill_after=0, client=None):
+        return 0, json.dumps({"href": "https://example.com/", "title": "Docs", "count": 1,
+                              "items": ["How to add a captcha"]}).encode(), b"", False
+    assert handle({"op": "select", "url": "https://example.com/", "css": "h2"}, captcha_items)["ok"]
+
+
+def test_the_url_never_decides_the_error_message():
+    reply = ask({"op": "read", "url": "https://example.com/private/timed-out-blocked"}, mode="dns")
+    assert "doesn't exist" in reply["error"]
+
+
+def test_link_labels_over_several_lines_stay_together():
+    text = ask({"op": "links", "url": "https://example.com/"}, mode="multiline-links")["text"]
+    assert "First line two — https://a.com/x" in text and "Second — https://b.com/y" in text
 
 
 def test_the_shown_url_is_escaped_and_short():
@@ -174,26 +204,36 @@ def test_select_lists_the_matches_with_the_title():
 def test_redirects_to_youtube_are_refused():
     assert "youtube command" in ask({"op": "select", "url": "https://bit.ly/x", "css": "a"}, "redirect-yt")["error"]
 
-    def yt_page(argv, kill_after=0):
-        return 0, b'<link rel="canonical" href="https://www.youtube.com/watch?v=x"> ytInitialData', b"", False
-    assert "youtube command" in handle({"op": "read", "url": "https://bit.ly/x"}, yt_page, "/x")["error"]
+    # a redirect to YouTube hits the unit's /etc/hosts block (0.0.0.0), which the engine reports as private
+    assert "youtube command" in ask({"op": "read", "url": "https://bit.ly/x"}, mode="private")["error"]
 
 
 def test_huge_pages_are_cut():
-    def huge(argv, kill_after=0):
+    def huge(argv, kill_after=0, client=None):
         return 0, b"y" * (browser.MAX_TEXT + 10), b"", False
-    text = handle({"op": "read", "url": "https://example.com/"}, huge, "/x")["text"]
+    text = handle({"op": "read", "url": "https://example.com/"}, huge)["text"]
     assert f"cut at {browser.MAX_TEXT:,}" in text
 
 
-def test_status_reports_the_engine():
-    assert "obscura 0.2.7" in ask({"op": "status"})["text"]
+def test_status_runs_javascript_with_the_real_flags():
+    calls = []
+    assert ", working." in ask({"op": "status"}, calls=calls)["text"]
+    page = calls[-1]
+    assert page[1] == f"--v8-flags={browser.V8_FLAGS}" and page[5].startswith("file://") and page[-1] == "document.title"
+    assert "not working" in ask({"op": "status"}, mode="nojs")["text"]
+    assert "not working" in ask({"op": "status"}, mode="oom")["text"]
+
+
+def test_a_sandbox_kill_is_reported_as_such():
+    def sigsys(argv, kill_after=0, client=None):
+        return -31, b"", b"", False
+    assert "sandbox limit" in handle({"op": "read", "url": "https://example.com/"}, sigsys)["error"]
 
 
 def test_unexpected_errors_never_leak_details():
-    def boom(argv, kill_after=0):
+    def boom(argv, kill_after=0, client=None):
         raise RuntimeError("https://example.com/?token=SECRET")
-    reply = handle({"op": "read", "url": "https://example.com/"}, boom, "/x")
+    reply = handle({"op": "read", "url": "https://example.com/"}, boom)
     assert reply == {"ok": False, "error": "the browser service failed"}
 
 
@@ -215,15 +255,26 @@ def _engine(mode, monkeypatch, tmp_path, **env):
 
 
 @posix_only
-def test_the_engine_gets_no_client_socket_and_no_extra_fds(monkeypatch, tmp_path):
+def test_the_engine_gets_no_client_socket_and_no_extra_fds(tmp_path):
+    """Run run_engine in a process whose fd 0 IS a socket (as in the real unit) and look from the child."""
     probe = tmp_path / "probe.py"
-    probe.write_text("import os,sys\nfds=sorted(int(f) for f in os.listdir('/proc/self/fd'))\n"
+    probe.write_text("import os\nfds=sorted(int(f) for f in os.listdir('/proc/self/fd'))\n"
                      "print(os.readlink('/proc/self/fd/0'), fds)\n")
-    a, b = socket.socketpair()
-    with a, b:
-        code, out, _, _ = browser.run_engine([sys.executable, str(probe)], 10)
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import json, os, socket, sys\n"
+        f"sys.path.insert(0, {str(Path(browser.__file__).parent)!r})\n"
+        "import browser\n"
+        "a, b = socket.socketpair()\n"
+        "os.dup2(a.fileno(), 0)\n"
+        f"code, out, err, _ = browser.run_engine([sys.executable, {str(probe)!r}], 10)\n"
+        "print(json.dumps([code, out.decode(), err.decode()]))\n")
+    import subprocess
+    res = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, timeout=30,
+                         env={**os.environ, "AMPI_BROWSER_HOME": str(tmp_path / "h")})
+    code, out, _ = json.loads(res.stdout.strip().splitlines()[-1])
     assert code == 0
-    target, fds = out.decode().split(" ", 1)
+    target, fds = out.split(" ", 1)
     assert target == "/dev/null" and max(json.loads(fds)) <= 3  # 0-2 plus the listdir fd
 
 
@@ -257,24 +308,31 @@ def test_the_engine_stops_when_the_caller_hangs_up(monkeypatch, tmp_path):
 
 
 @posix_only
-def test_the_socket_protocol(monkeypatch, tmp_path):
+def test_a_waiting_caller_does_not_stop_the_engine(monkeypatch, tmp_path):
+    a, b = socket.socketpair()
+    with a, b:  # connected and silent, like the browse client
+        code, out, _, _ = browser.run_engine(_engine("ok", monkeypatch, tmp_path), 30, client=a)
+    assert code == 0 and b"Example Domain" in out
+
+
+@posix_only
+def test_the_socket_protocol():
     a, b = socket.socketpair()
     with a, b:
         b.sendall(b'{"op": "read", ')
         b.sendall(b'"url": "https://example.com/"}\n')
-        reply = browser.serve_connection(a, {os.getuid()}, fake_run(), "/x")
+        reply = browser.serve_connection(a, {os.getuid()}, fake_run())
         assert reply["ok"]
         got = json.loads(b.recv(1 << 20))
         assert got == reply
     a, b = socket.socketpair()
     with a, b:
         b.sendall(b'{"op": "status"}\n')
-        assert browser.serve_connection(a, {os.getuid() + 1}, fake_run(), "/x") == {"ok": False,
-                                                                                    "error": "not allowed"}
+        assert browser.serve_connection(a, {os.getuid() + 1}, fake_run()) == {"ok": False, "error": "not allowed"}
     a, b = socket.socketpair()
     with a, b:
         b.sendall(b"x" * (browser.MAX_REQUEST + 10))
-        assert "too big" in browser.serve_connection(a, {os.getuid()}, fake_run(), "/x")["error"]
+        assert "too big" in browser.serve_connection(a, {os.getuid()}, fake_run())["error"]
 
 
 # --- the browse client ----------------------------------------------------------------------------
@@ -283,7 +341,7 @@ def test_the_client_sends_the_request_and_origin(monkeypatch, capsys, tmp_path):
     sent = []
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setenv("AMPI_ORIGIN", "group:x")
-    monkeypatch.setattr(cli, "browser_request", lambda p: sent.append(p) or {"ok": True, "text": "page"})
+    monkeypatch.setattr(cli, "browser_request", lambda p, **k: sent.append(p) or {"ok": True, "text": "page"})
     assert cli.browse_main(["select", "https://example.com", "li.item", "--attr", "href"]) == 0
     assert sent == [{"op": "select", "origin": "group:x", "url": "https://example.com", "css": "li.item",
                      "attr": "href"}]
@@ -294,16 +352,29 @@ def test_the_client_retries_once_when_the_slot_is_taken(monkeypatch, capsys, tmp
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     replies = [None, None]
-    monkeypatch.setattr(cli, "browser_request", lambda p: replies.pop(0))
+    monkeypatch.setattr(cli, "browser_request", lambda p, **k: replies.pop(0))
     assert cli.browse_main(["read", "https://example.com"]) == 1
-    assert "busy" in capsys.readouterr().err and not replies
+    assert "busy or not working" in capsys.readouterr().err and not replies
+
+
+def test_the_client_does_not_retry_a_slow_failure(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+
+    def slow(p, **k):
+        clock[0] += 5
+        return None
+    calls = []
+    monkeypatch.setattr(cli, "browser_request", lambda p, **k: calls.append(1) or slow(p))
+    assert cli.browse_main(["read", "https://example.com"]) == 1 and len(calls) == 1
 
 
 def test_long_pages_are_saved_and_previewed(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
     body = "Web page (requested URL: x)\n‹‹‹\n" + "word " * 5000 + "\n›››"
-    monkeypatch.setattr(cli, "browser_request", lambda p: {"ok": True, "text": body})
+    monkeypatch.setattr(cli, "browser_request", lambda p, **k: {"ok": True, "text": body})
     assert cli.browse_main(["read", "https://Exa_mple.com/a/../b?q=1"]) == 0
     out = capsys.readouterr().out
     saved = list((tmp_path / "web").glob("*.md"))
@@ -326,11 +397,14 @@ def test_saving_never_follows_a_planted_symlink(tmp_path):
     assert victim.read_text() == "keep"
 
 
-def test_old_saved_pages_are_pruned(tmp_path):
+def test_old_saved_pages_are_pruned_but_other_files_are_kept(tmp_path):
     first = cli.save_page("a", "https://a.com/", tmp_path, now=time.time())
-    os.utime(first, (time.time() - 2 * 86400,) * 2)
+    mine = tmp_path / "web" / "notes.md"
+    mine.write_text("owner's")
+    for f in (first, mine):
+        os.utime(f, (time.time() - 2 * 86400,) * 2)
     cli.save_page("b", "https://b.com/", tmp_path)
-    assert not first.exists()
+    assert not first.exists() and mine.exists()
 
 
 def test_the_hourly_guard(monkeypatch, tmp_path):
@@ -342,13 +416,14 @@ def test_the_hourly_guard(monkeypatch, tmp_path):
 
 
 def test_the_client_waits_less_than_the_bash_timeout():
-    assert cli.BROWSE_LOCK_WAIT + cli.BROWSE_TIMEOUT + 2 < 120
+    assert cli.BROWSE_TOTAL < 120 and cli.BROWSE_LOCK_WAIT < cli.BROWSE_TOTAL
 
 
 # --- bridge: watchers and groups don't get the browser --------------------------------------------
 
 @pytest.mark.parametrize("rule", ["Bash(browse:*)", "Bash(browse *)", "Bash(browse read:*)", " Bash( browse:*) ",
-                                  "Bash(/home/assistant/.local/bin/browse:*)", "Bash(*)", "Bash(brow*)"])
+                                  "Bash(/home/assistant/.local/bin/browse:*)", "Bash(*)", "Bash(brow*)", "Bash",
+                                  "Bash(env browse:*)", "Bash(/usr/bin/env browse read:*)"])
 def test_every_spelling_of_a_browse_rule_is_recognised(rule):
     assert is_browse_rule(rule)
 

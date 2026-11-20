@@ -88,6 +88,8 @@ def ruleset(uid: int, own4: list[str], own6: list[str], resolvers: list[str]) ->
         "\tchain output {",
         "\t\ttype filter hook output priority 0; policy accept;",
         *dns,
+        # Any address of this machine, including ones added after boot (the sets below are a snapshot).
+        f"\t\tmeta skuid {uid} fib daddr type local drop",
         f"\t\tmeta skuid {uid} ip daddr @deny4 drop",
         f"\t\tmeta skuid {uid} ip6 daddr @deny6 drop",
         f"\t\tmeta skuid {uid} tcp dport {{ 80, 443 }} ct state new limit rate over 600/minute burst 200 packets drop",
@@ -115,7 +117,9 @@ def _nft(*args: str, stdin: str | None = None) -> str:
 
 def fingerprint() -> str:
     data = json.loads(_nft("-j", "list", "table", "inet", TABLE))
-    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    # Leave out nft's own version info, so a package upgrade doesn't look like a changed firewall.
+    items = [i for i in data.get("nftables", []) if "metainfo" not in i]
+    return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
 
 
 def load() -> None:

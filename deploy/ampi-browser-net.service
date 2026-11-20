@@ -2,6 +2,8 @@
 Description=Egress firewall and config files for the Claude Assistant browser (nft table inet ampi_browser)
 After=network-online.target nftables.service
 Wants=network-online.target
+# `systemctl restart nftables` flushes every table; reload ours right after.
+PartOf=nftables.service
 
 [Service]
 Type=oneshot

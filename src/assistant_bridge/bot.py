@@ -707,12 +707,15 @@ def watcher_tools(watcher: Watcher, profile: Profile) -> tuple[str, ...]:
 
 
 def is_browse_rule(rule: str) -> bool:
-    """True for a Bash permission rule that would let Claude run the `browse` command (any spelling)."""
+    """True for a Bash permission rule that would let Claude run the `browse` command (any spelling,
+    including a bare `Bash`, wildcards and wrappers like `env browse`)."""
+    if rule.strip() == "Bash":
+        return True
     m = re.fullmatch(r"\s*Bash\((.*)\)\s*", rule, re.S)
     if not m:
         return False
     first = re.split(r"[\s:]", m.group(1).strip(), maxsplit=1)[0]
-    return first == "browse" or first.endswith("/browse") or "*" in first or first == ""
+    return bool(re.search(r"(^|[\s/])browse([\s:]|$)", m.group(1))) or "*" in first or first == ""
 
 
 def without_browse(tools) -> tuple[str, ...]:

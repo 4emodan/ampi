@@ -3,6 +3,9 @@ Description=Claude Assistant browser: one page (connection %i)
 # Pages are hostile input. The engine runs as its own user, sees almost nothing of the filesystem, can't
 # reach Unix sockets, and the nft table (checked before every start) lets it send only DNS to public
 # resolvers and TCP 80/443 to public addresses. Everything in this cgroup dies when the request ends.
+Requires=ampi-browser-net.service
+After=ampi-browser-net.service
+CollectMode=inactive-or-failed
 
 [Service]
 Type=simple
@@ -18,6 +21,7 @@ ExecStartPre=+/usr/bin/python3 -I /usr/local/lib/ampi-browser/browser_net.py che
 ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-browser/browser.py
 RuntimeMaxSec=90
 KillMode=control-group
+TimeoutStopSec=5
 
 # Resources (one slot; the browser dies first when the box is short of memory)
 MemoryHigh=450M
@@ -49,6 +53,8 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources io_uring_setup io_uring_enter io_uring_register
+# A refused call fails with EPERM instead of killing the engine with SIGSYS.
+SystemCallErrorNumber=EPERM
 
 # Filesystem: only the engine, CA certificates, the loader cache and generated minimal files
 ProtectSystem=strict
@@ -63,9 +69,10 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
+# (A denylist of top-level directories: if a project ever adds one, e.g. /data, add it here.)
 TemporaryFileSystem=/etc:ro /var:ro /srv:ro /opt:ro /mnt:ro /media:ro /usr/local:ro /run:ro /boot:ro /snap:ro
 TemporaryFileSystem=/tmp:size=64M,mode=1777
-BindReadOnlyPaths=/etc/ld.so.cache /etc/ssl /etc/ca-certificates /etc/nsswitch.conf /etc/localtime
+BindReadOnlyPaths=/etc/ld.so.cache -/etc/ssl -/etc/ca-certificates /etc/nsswitch.conf -/etc/localtime
 BindReadOnlyPaths=/etc/ampi-browser/resolv.conf:/etc/resolv.conf /etc/ampi-browser/hosts:/etc/hosts
 BindReadOnlyPaths=/etc/ampi-browser/passwd:/etc/passwd /etc/ampi-browser/group:/etc/group
 BindReadOnlyPaths=/usr/local/lib/obscura /usr/local/lib/ampi-browser

@@ -27,7 +27,6 @@ import unicodedata
 import urllib.parse
 
 ENGINE = os.environ.get("AMPI_BROWSER_ENGINE", "/usr/local/lib/obscura/current/obscura")
-ALLOW_ORIGINS_FILE = os.environ.get("AMPI_BROWSER_ALLOW_ORIGINS", "/etc/ampi-browser/allow-origins")
 # Obscura's own Chrome identity plus an honest name, so client hints stay consistent and sites can tell.
 USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 "
               "Safari/537.36 AmpiBrowser/1.0")
@@ -42,7 +41,10 @@ MAX_LINKS = 300
 MAX_ITEMS = 200
 
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com", "googlevideo.com", "youtubei.googleapis.com",
-                 "ytimg.com")
+                 "youtube.googleapis.com", "ytimg.com")
+# Country domains (youtube.de, youtube.co.uk…) only redirect to www.youtube.com, which the unit's
+# /etc/hosts blocks; refusing them here too gives a clearer message.
+YOUTUBE_COUNTRY = re.compile(r"(.+\.)?youtube\.(com?\.)?[a-z]{2,3}")
 LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa", ".intranet", ".corp", ".private")
 NAT64 = ipaddress.ip_network("64:ff9b::/96")
 NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
@@ -67,36 +69,44 @@ def _check_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
 
 
 def check_host(host: str) -> str:
-    host = host.lower().rstrip(".")
+    """Returns the host as it goes into the URL (IPv6 in brackets) or raises Refused."""
+    host = host.strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     if not host:
         raise Refused("the link has no site name")
-    if host.startswith("[") and host.endswith("]"):
-        try:
-            ip = ipaddress.IPv6Address(host[1:-1].split("%", 1)[0])
-        except ValueError:
-            raise Refused("that address isn't valid") from None
+    if ":" in host:  # an IPv6 address (urlsplit drops the brackets)
         if "%" in host:
             raise Refused("that address is private or local; the browser only opens public sites")
-        _check_ip(ip)
-        return host
+        try:
+            ip6 = ipaddress.IPv6Address(host)
+        except ValueError:
+            raise Refused("that address isn't valid") from None
+        _check_ip(ip6)
+        return f"[{ip6.compressed}]"
+    # IDNA first: it turns look-alike dots (。．｡) and full-width digits into plain ones, so the address
+    # checks below see what the engine will see.
+    try:
+        ascii_host = host.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError:
+        raise Refused("that site name isn't valid") from None
+    if not ascii_host:
+        raise Refused("the link has no site name")
     # Browsers read a host whose last label is a number as an IPv4 address, in forms like 2130706433,
     # 0x7f.1 or 017.0.0.1. Accept only plain dotted quads and check them like any other address.
-    if re.fullmatch(r"0x[0-9a-f]*|[0-9]+", host.rsplit(".", 1)[-1]):
+    if re.fullmatch(r"0x[0-9a-f]*|[0-9]+", ascii_host.rsplit(".", 1)[-1]):
         try:
-            ip4 = ipaddress.IPv4Address(host)
+            ip4 = ipaddress.IPv4Address(ascii_host)
         except ValueError:
             raise Refused("write the address as a normal a.b.c.d or use the site's name") from None
         _check_ip(ip4)
-        return host
-    try:
-        ascii_host = host.encode("idna").decode("ascii")
-    except UnicodeError:
-        raise Refused("that site name isn't valid") from None
+        return ascii_host
     if "." not in ascii_host or ascii_host == "localhost" or ascii_host.endswith(LOCAL_SUFFIXES):
         raise Refused("that is a local name; the browser only opens public sites")
     if not re.fullmatch(r"[a-z0-9.-]+", ascii_host) or any(not p or len(p) > 63 for p in ascii_host.split(".")):
         raise Refused("that site name isn't valid")
-    if any(ascii_host == h or ascii_host.endswith("." + h) for h in YOUTUBE_HOSTS):
+    if any(ascii_host == h or ascii_host.endswith("." + h) for h in YOUTUBE_HOSTS) \
+            or YOUTUBE_COUNTRY.fullmatch(ascii_host):
         raise Refused("YouTube pages aren't opened in the browser; use the youtube command")
     return ascii_host
 
@@ -110,6 +120,8 @@ def check_url(url: str) -> str:
         raise Refused("that link is too long")
     if any(_unsafe_char(c) or c.isspace() for c in url):
         raise Refused("the link contains spaces or invisible characters")
+    if "\\" in url:  # browsers read \ as / in web links, which changes where the host ends
+        raise Refused("the link contains a backslash")
     parts = urllib.parse.urlsplit(url)
     if parts.scheme.lower() not in ("http", "https"):
         raise Refused("only http:// and https:// links can be opened")
@@ -140,6 +152,8 @@ def check_short(value: object, what: str, required: bool = False) -> str | None:
         return None
     if not isinstance(value, str) or len(value) > 200 or any(_unsafe_char(c) for c in value):
         raise Refused(f"{what} must be plain text up to 200 characters")
+    if value.startswith("-"):
+        raise Refused(f"{what} can't start with '-'")
     return value
 
 
@@ -149,20 +163,6 @@ def check_int(value: object, what: str, default: int, low: int, high: int) -> in
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
         raise Refused(f"{what} must be a whole number from {low} to {high}")
     return value
-
-
-def origin_allowed(origin: object, allow_file: str = ALLOW_ORIGINS_FILE) -> bool:
-    """Runs that handle outside content (watchers, groups) can't browse unless the owner listed them."""
-    if origin in (None, ""):
-        return True
-    if not isinstance(origin, str):
-        return False
-    try:
-        with open(allow_file, encoding="utf-8") as f:
-            allowed = {line.strip() for line in f if line.strip() and not line.startswith("#")}
-    except OSError:
-        allowed = set()
-    return origin in allowed
 
 
 # --- the engine -------------------------------------------------------------------------------------
@@ -191,7 +191,7 @@ def build_argv(op: str, url: str, *, text: bool = False, wait_for: str | None = 
     if op == "read":
         argv = base + ["--dump", "text" if text else "markdown"] + tail
         if wait_for:
-            argv += ["--selector", wait_for]
+            argv.append(f"--selector={wait_for}")
         return argv
     if op == "links":
         return base + ["--dump", "links"] + tail
@@ -276,26 +276,36 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 # --- turning output into an answer ------------------------------------------------------------------
 
-BOT_CHECK = re.compile(
-    r"just a moment\.\.\.|attention required!? \| cloudflare|cf-chl|checking your browser|"
-    r"verify(ing)? you are (a )?human|confirm (that )?you'?re not a (bot|robot)|are you a robot|"
-    r"not a robot|hcaptcha|recaptcha|turnstile|captcha|unusual traffic from your computer|"
-    r"access denied|request blocked|enable javascript and cookies to continue|ddos protection by",
+# Signatures of bot walls, not words that merely mention them (a "protected by reCAPTCHA" footer is fine).
+BOT_STRONG = re.compile(
+    r"just a moment\.\.\.|attention required!? \| cloudflare|cf-chl-|checking your browser before accessing|"
+    r"verify(ing)? you are (a )?human|unusual traffic from your computer network|"
+    r"confirm (that )?you'?re not a (bot|robot)|enable javascript and cookies to continue|"
+    r"ddos protection by|performing security verification",
     re.IGNORECASE)
-YOUTUBE_PAGE = re.compile(r"ytInitialData|ytcfg\.set|ytInitialPlayerResponse|"
-                          r"rel=\"?canonical\"?[^>]*https?://(www\.|m\.)?youtube\.com/")
-MARKERS = re.compile(r"[‹›«»<>]{3,}|‹‹|››")
+BOT_WEAK = re.compile(r"are you a robot|not a robot|access denied|request blocked|please verify|security check",
+                      re.IGNORECASE)
+BOT_TITLE = re.compile(r"captcha|robot|access denied|blocked|security check|just a moment|attention required",
+                       re.IGNORECASE)
+# The wrapper's own markers and look-alikes, in runs of two or more (single « » are ordinary quotes).
+MARKERS = re.compile(r"[‹›❮❯❬❭〈〉⟨⟩〈〉«»]{2,}")
+KEEP_INVISIBLE = {"‌", "‍"}  # ZWNJ/ZWJ: needed by Persian, Indic scripts and emoji
 
 
 def clean(text: str) -> str:
-    text = unicodedata.normalize("NFC", text)
-    text = "".join(c for c in text if c in "\n\t" or not _unsafe_char(c))
+    text = unicodedata.normalize("NFC", text).replace(" ", "\n").replace(" ", "\n\n")
+    text = "".join(c for c in text if c in "\n\t" or c in KEEP_INVISIBLE or not _unsafe_char(c))
     text = re.sub(r"[ \t]+\n", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def looks_like_bot_check(text: str) -> bool:
-    return len(text) < 4000 and bool(BOT_CHECK.search(text))
+def looks_like_bot_check(body: str, title: str | None = None) -> bool:
+    """Only for whole pages (read) and titles: a short page that is mostly a challenge."""
+    if title and BOT_TITLE.search(title):
+        return True
+    if len(body) < 4000 and BOT_STRONG.search(body):
+        return True
+    return len(body) < 600 and bool(BOT_WEAK.search(body))
 
 
 def shown_url(url: str) -> str:
@@ -310,16 +320,22 @@ def wrap(url: str, body: str, footer: str = "") -> str:
     return f"{head}\n‹‹‹\n{body}\n›››" + (f"\n{footer}" if footer else "")
 
 
-def engine_error(code: int | None, err: bytes, too_big: bool) -> str:
-    e = err.decode("utf-8", "replace").lower()
+def engine_error(code: int | None, err: bytes, too_big: bool, url: str = "") -> str:
+    e = err.decode("utf-8", "replace")
+    if url:  # the engine repeats the URL; its words must not decide the message
+        e = e.replace(url, " ").replace(url.rstrip("/"), " ")
+    e = re.sub(r"https?://\S+", " ", e).lower()
     if too_big:
         return "the page is too big to read"
     if code is None or code == 124 or "timed out" in e or "hard timeout" in e:
         return "the page didn't finish loading in time"
+    if code is not None and code == -getattr(signal, "SIGSYS", 31):
+        log("engine stopped by the system call filter (SIGSYS)")
+        return "the browser engine hit a sandbox limit (the owner can check journalctl -u 'ampi-browser@*')"
     if (code is not None and code < 0) or "heap limit" in e or "out of memory" in e:
         # SIGKILL from the cgroup OOM killer, or V8 aborting at its heap cap (SIGABRT/SIGTRAP)
         return "the page needed too much memory"
-    if "private" in e or "loopback" in e or "not allowed" in e or "blocked" in e or "0.0.0.0" in e:
+    if "private" in e or "internal ip" in e or "loopback" in e or "not allowed" in e or "0.0.0.0" in e:
         return ("that page (or where it redirects) is on a private or blocked address; YouTube is blocked "
                 "here too (use the youtube command)")
     if "dns" in e or "resolve" in e or "lookup" in e:
@@ -330,13 +346,23 @@ def engine_error(code: int | None, err: bytes, too_big: bool) -> str:
 
 
 def format_links(raw: str, match: str | None) -> str:
-    seen, lines = set(), []
+    """Obscura prints `href<TAB>label` per link, or just `href` without a label; a label can run over
+    several lines. (A label line that is itself a lone URL can't be told apart from a link; it is one.)"""
+    entries: list[list[str]] = []
     for line in raw.splitlines():
-        href, _, label = line.partition("\t")
-        href = href.strip()
-        if not href.lower().startswith(("http://", "https://")) or href in seen:
+        if "\t" in line:
+            href, _, label = line.partition("\t")
+            entries.append([href.strip(), label])
+        elif re.fullmatch(r"\s*https?://\S+\s*", line, re.IGNORECASE):
+            entries.append([line.strip(), ""])
+        elif entries:
+            entries[-1][1] += " " + line
+    seen, lines = set(), []
+    for href, label in entries:
+        if not href.lower().startswith(("http://", "https://")) or href in seen or any(c.isspace() for c in href):
             continue
-        label = " ".join(label.split())
+        label = " ".join(clean(label).split())
+        href = clean(href)
         if match and match.lower() not in href.lower() and match.lower() not in label.lower():
             continue
         seen.add(href)
@@ -347,10 +373,10 @@ def format_links(raw: str, match: str | None) -> str:
     return "\n".join(lines)
 
 
-def handle(req: object, run=run_engine, allow_file: str = ALLOW_ORIGINS_FILE) -> dict:
+def handle(req: object, run=run_engine) -> dict:
     """One request -> one reply. Never raises. `run(argv)` runs the engine (tests pass a fake)."""
     try:
-        return _handle(req, run, allow_file)
+        return _handle(req, run)
     except Refused as e:
         return {"ok": False, "error": str(e)}
     except Exception as e:  # noqa: BLE001 - never echo details (they could contain the URL)
@@ -358,17 +384,15 @@ def handle(req: object, run=run_engine, allow_file: str = ALLOW_ORIGINS_FILE) ->
         return {"ok": False, "error": "the browser service failed"}
 
 
-def _handle(req: object, run, allow_file: str) -> dict:
+def _handle(req: object, run) -> dict:
     if not isinstance(req, dict):
         raise Refused("bad request")
     op = req.get("op")
-    if not origin_allowed(req.get("origin"), allow_file):
-        raise Refused("pages can't be opened from a run that handles outside content (a watcher or group); "
-                      "the owner can allow it in /etc/ampi-browser/allow-origins")
+    if req.get("origin") not in (None, ""):
+        # Advisory: the bridge already strips browse from watcher and group runs (the real control).
+        raise Refused("pages can't be opened from a run that handles outside content (a watcher or group)")
     if op == "status":
-        code, out, _, _ = run([ENGINE, "--version"], 15)
-        version = out.decode("utf-8", "replace").strip()[:80] if code == 0 else "not working"
-        return {"ok": True, "text": f"Browser engine: {version}. One page at a time, read-only, no logins."}
+        return {"ok": True, "text": status(run)}
     if op not in ("read", "links", "select"):
         raise Refused(f"unknown operation {op!r}")
     url = check_url(req.get("url"))
@@ -385,17 +409,14 @@ def _handle(req: object, run, allow_file: str) -> dict:
     code, out, err, too_big = run(argv)
     took = time.monotonic() - began
     if code != 0 or too_big:
-        msg = engine_error(code, err, too_big)
+        msg = engine_error(code, err, too_big, url)
         log(f"{op} {host} failed in {took:.1f}s: {msg}")
         return {"ok": False, "error": msg}
     raw = out.decode("utf-8", "replace")
-    if YOUTUBE_PAGE.search(raw):  # a redirect landed on YouTube despite the blocked names
-        log(f"{op} {host} reached youtube")
-        return {"ok": False, "error": "that link leads to YouTube; use the youtube command"}
     if op == "select":
         body, title = _select_result(raw)
     elif op == "links":
-        body, title = format_links(clean(raw), match), None
+        body, title = format_links(raw, match), None
         if not body:
             body = "(no links" + (" matching that" if match else "") + ")"
     else:
@@ -404,7 +425,7 @@ def _handle(req: object, run, allow_file: str) -> dict:
         log(f"{op} {host} empty in {took:.1f}s")
         return {"ok": False, "error": "no readable text (the page needs features this browser lacks, "
                                       "or it blocked the browser)"}
-    if looks_like_bot_check(body) or (title and looks_like_bot_check(title)):
+    if looks_like_bot_check(body if op == "read" else "", title):
         log(f"{op} {host} bot check in {took:.1f}s")
         return {"ok": False, "error": "this site shows a bot check to the server's browser; Ampi doesn't get "
                                       "around those (tell the owner, or try another source)"}
@@ -416,6 +437,25 @@ def _handle(req: object, run, allow_file: str) -> dict:
         body = f"Title: {title}\n\n{body}"
     log(f"{op} {host} ok in {took:.1f}s ({len(body)} chars)")
     return {"ok": True, "text": wrap(url, body, footer)}
+
+
+STATUS_PAGE = os.environ.get("AMPI_BROWSER_STATUS_PAGE",
+                             os.path.join(os.path.dirname(os.path.abspath(__file__)), "status.html"))
+
+
+def status(run) -> str:
+    """Runs the engine for real (production flags, JavaScript, inside the sandbox) on a local test page,
+    so a release that can't run here is caught at install time. No network is used."""
+    code, out, _, _ = run([ENGINE, "--version"], 15)
+    if code != 0:
+        return "Browser engine: not working (it doesn't start)"
+    version = out.decode("utf-8", "replace").strip()[:80]
+    argv = [ENGINE, f"--v8-flags={V8_FLAGS}", "--user-agent", USER_AGENT, "fetch", f"file://{STATUS_PAGE}",
+            "-q", "--timeout", "10", "-e", "document.title"]
+    code, out, err, _ = run(argv, 30)
+    if code != 0 or out.decode("utf-8", "replace").strip() != "ampi-js-ok":
+        return f"Browser engine: {version}, not working ({engine_error(code, err, False)})"
+    return f"Browser engine: {version}, working. One page at a time, read-only, no logins."
 
 
 def _select_result(raw: str) -> tuple[str, str | None]:
@@ -477,8 +517,7 @@ def read_request(sock: socket.socket, timeout: float = 10) -> object:
         raise Refused("bad request") from None
 
 
-def serve_connection(sock: socket.socket, client_uids: set[int], run=run_engine,
-                     allow_file: str = ALLOW_ORIGINS_FILE) -> dict:
+def serve_connection(sock: socket.socket, client_uids: set[int], run=run_engine) -> dict:
     uid = peer_uid(sock)
     try:
         if uid not in client_uids:
@@ -490,7 +529,7 @@ def serve_connection(sock: socket.socket, client_uids: set[int], run=run_engine,
             def run_here(argv: list[str], kill_after: float = KILL_AFTER):
                 return run(argv, kill_after, client=sock)
 
-            reply = handle(req, run_here, allow_file)
+            reply = handle(req, run_here)
     except Refused as e:
         reply = {"ok": False, "error": str(e)}
     except OSError:

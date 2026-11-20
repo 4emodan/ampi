@@ -6,6 +6,7 @@
 # release page, not who built it: it is a young third-party project, which is why it runs in a tight
 # sandbox (deploy/ampi-browser@.service) behind its own egress firewall (src/ampi_tools/browser_net.py).
 set -euo pipefail
+shopt -s nullglob
 
 VERSION=0.2.7
 ASSET=obscura-x86_64-linux-no-render.tar.gz
@@ -28,6 +29,10 @@ if [[ $(uname -m) != x86_64 ]]; then
   echo "Only x86_64 is set up (edit ASSET/SHA256 for another architecture)" >&2
   exit 1
 fi
+if [[ ! -x $APP_HOME/app/.venv/bin/browse ]]; then
+  echo "$APP_HOME/app/.venv/bin/browse is missing: run deploy/install.sh from this checkout first" >&2
+  exit 1
+fi
 
 echo "==> Users: $BROWSER_USER (runs the engine), group $SOCKET_GROUP (may use the socket)"
 getent group "$BROWSER_USER" >/dev/null || groupadd --system "$BROWSER_USER"
@@ -48,7 +53,8 @@ if [[ ! -x $target/obscura ]]; then
   if grep -Eq '(^/|(^|/)\.\.(/|$))' <<<"$members"; then
     echo "archive has absolute or .. paths; refusing" >&2; exit 1
   fi
-  if tar -tvzf "$work/$ASSET" | grep -Ev '^[-d]' | grep -q .; then
+  listing=$(tar -tvzf "$work/$ASSET")
+  if grep -Evq '^[-d]' <<<"$listing"; then
     echo "archive has links or special files; refusing" >&2; exit 1
   fi
   engine=$(grep -E '(^|/)obscura$' <<<"$members" || true)
@@ -68,13 +74,17 @@ echo "==> Service code and config"
 install -d -o root -g root -m 755 "$LIB_DIR" "$CONF_DIR"
 install -o root -g root -m 644 "$SRC_DIR/src/ampi_tools/browser.py" "$LIB_DIR/browser.py"
 install -o root -g root -m 644 "$SRC_DIR/src/ampi_tools/browser_net.py" "$LIB_DIR/browser_net.py"
-[[ -f $CONF_DIR/allow-origins ]] || printf '%s\n' \
-  "# Runs that handle outside content may browse only if listed here, e.g. group:clipboard (one per line)." \
-  > "$CONF_DIR/allow-origins"
+install -o root -g root -m 644 "$SRC_DIR/deploy/ampi-browser-status.html" "$LIB_DIR/status.html"
 [[ -f $CONF_DIR/resolvers ]] || printf '%s\n' "# Public DNS resolvers the browser may use (Hetzner's)." \
   185.12.64.1 185.12.64.2 2a01:4ff:ff00::add:1 2a01:4ff:ff00::add:2 > "$CONF_DIR/resolvers"
 echo "AMPI_BROWSER_CLIENT_UIDS=$(id -u "$APP_USER")" > "$CONF_DIR/instance.env"
-chmod 644 "$CONF_DIR"/allow-origins "$CONF_DIR"/resolvers "$CONF_DIR"/instance.env
+chmod 644 "$CONF_DIR"/resolvers "$CONF_DIR"/instance.env
+extra=$(comm -23 <(ls / | sort) <(printf '%s\n' bin boot cdrom dev etc home lib lib64 lost+found media mnt opt proc \
+  root run sbin snap srv sys tmp usr var bin.usr-is-merged lib.usr-is-merged sbin.usr-is-merged | sort))
+if [[ -n $extra ]]; then
+  echo "    note: the browser can read these top-level folders; add them to TemporaryFileSystem= in"
+  echo "    ampi-browser@.service if they hold anything private: $extra"
+fi
 
 echo "==> systemd units"
 for unit in ampi-browser-net.service ampi-browser.socket ampi-browser@.service; do
@@ -97,8 +107,9 @@ for ws in "$APP_HOME"/profiles/*/; do
 done
 
 echo "==> Check through the real sandbox"
+# `browse status` runs the engine with the real flags and JavaScript on a local test page.
 if ! status=$(sudo -u "$APP_USER" -H "$APP_HOME/app/.venv/bin/browse" status 2>&1) \
-    || [[ $status == *"not working"* ]]; then
+    || [[ $status != *", working."* ]]; then
   echo "$status" >&2
   if [[ -n $previous && $previous != "$target" ]]; then
     ln -sfn "$previous" "$ENGINE_DIR/current.tmp" && mv -T "$ENGINE_DIR/current.tmp" "$ENGINE_DIR/current"
@@ -115,5 +126,6 @@ systemctl is-active --quiet claude-assistant && systemctl restart claude-assista
 cat <<EOF
 
 Done. To let Ampi use it, add "Bash(browse:*)" to allowed_tools in $APP_HOME/config.toml and
-systemctl restart claude-assistant. Watchers and groups never get it (see docs/SETUP.md, section 8d).
+systemctl restart claude-assistant. Watchers and groups never get it (docs/SETUP.md, section 8d).
+Check it on a few real sites, e.g.:  sudo -u $APP_USER -H $APP_HOME/app/.venv/bin/browse read https://example.com
 EOF

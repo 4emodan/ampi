@@ -468,7 +468,9 @@ BROWSE_PRINT = 8_000        # pages up to this size are printed whole
 BROWSE_PREVIEW = 6_000      # longer ones: this much is printed, the rest saved under ./web/
 BROWSE_PER_HOUR = 120       # runaway guard for loops, not a security boundary
 BROWSE_LOCK_WAIT = 30       # seconds to wait for another page to finish (one page at a time)
-BROWSE_TIMEOUT = 75         # lock wait + this stays under Claude Code's 120 s Bash timeout
+BROWSE_TIMEOUT = 75         # one request (the service gives up on a page after 45-90 s)
+BROWSE_TOTAL = 110          # everything, lock wait included: under Claude Code's 120 s Bash timeout
+SAVED_PAGE = re.compile(r"[a-z0-9.-]{1,60}-[0-9a-f]{8}\.md")
 
 
 def browse_parser() -> argparse.ArgumentParser:
@@ -540,12 +542,14 @@ def _one_at_a_time(wait: float = BROWSE_LOCK_WAIT):
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
-def browser_request(payload: dict, path: str | None = None, timeout: float = BROWSE_TIMEOUT) -> dict | None:
-    """One JSON line out, one back. None when the service closed the connection without answering (it is
-    busy). Never half-closes: the service takes EOF as "the caller is gone" and stops the page."""
+def browser_request(payload: dict, path: str | None = None, deadline: float | None = None) -> dict | None:
+    """One JSON line out, one back, all before `deadline` (time.monotonic()). None when the service closed
+    the connection without answering (busy, or it refused to start). Never half-closes: the service takes
+    EOF as "the caller is gone" and stops the page."""
     path = path or os.environ.get("AMPI_BROWSER_SOCKET") or BROWSER_SOCKET
+    deadline = time.monotonic() + BROWSE_TIMEOUT if deadline is None else deadline
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-        s.settimeout(timeout)
+        s.settimeout(max(0.1, deadline - time.monotonic()))
         try:
             s.connect(path)
         except (FileNotFoundError, ConnectionRefusedError):
@@ -555,9 +559,16 @@ def browser_request(payload: dict, path: str | None = None, timeout: float = BRO
         try:
             s.sendall(json.dumps(payload).encode() + b"\n")
             chunks = []
-            while chunk := s.recv(65536):
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise socket.timeout
+                s.settimeout(left)
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
                 chunks.append(chunk)
-                if chunks[-1].endswith(b"\n"):
+                if chunk.endswith(b"\n"):
                     break
         except socket.timeout:
             return {"ok": False, "error": "the page took too long"}
@@ -581,8 +592,8 @@ def save_page(text: str, url: str, root: Path | None = None, now: float | None =
         raise SystemExit("browse: ./web must be a real folder")
     now = time.time() if now is None else now
     for old in web.glob("*.md"):
-        with contextlib.suppress(OSError):
-            if not old.is_symlink() and now - old.stat().st_mtime > 86400:
+        with contextlib.suppress(OSError):  # only pages saved here, never other files in web/
+            if SAVED_PAGE.fullmatch(old.name) and not old.is_symlink() and now - old.stat().st_mtime > 86400:
                 old.unlink()
     host = re.sub(r"[^a-z0-9.-]", "", (urllib.parse.urlsplit(url).hostname or "page").lower())[:60].strip(".")
     digest = hashlib.sha256(url.encode()).hexdigest()[:8]
@@ -609,16 +620,21 @@ def browse_main(argv: list[str] | None = None) -> int:
     if a.cmd != "status" and not _browse_budget():
         print(f"browse: {BROWSE_PER_HOUR} pages in the last hour is the limit; wait a bit", file=sys.stderr)
         return 1
+    deadline = time.monotonic() + BROWSE_TOTAL
     with _one_at_a_time() as got_turn:
         if not got_turn:
             print("browse: another page is still loading; try again in a minute", file=sys.stderr)
             return 1
-        reply = browser_request(payload)
-        if reply is None:
+        began = time.monotonic()
+        reply = browser_request(payload, deadline=deadline)
+        # A quick close without an answer means the slot was taken (another caller outside the lock);
+        # a slow one means the service failed, and retrying won't help.
+        if reply is None and time.monotonic() - began < 1 and deadline - time.monotonic() > 20:
             time.sleep(2)
-            reply = browser_request(payload)
+            reply = browser_request(payload, deadline=deadline)
     if reply is None:
-        print("browse: the browser is busy with another page; try again in a minute", file=sys.stderr)
+        print("browse: the browser is busy or not working; try again in a minute (if this keeps happening, "
+              "tell the owner: journalctl -u 'ampi-browser@*')", file=sys.stderr)
         return 1
     if not reply.get("ok"):
         print(f"browse: {reply.get('error', 'failed')}", file=sys.stderr)
