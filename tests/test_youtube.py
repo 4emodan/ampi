@@ -496,3 +496,27 @@ def test_watcher_reports_new_uploads_but_not_backlogs(setup):
     tools.pairs = [("d2", "D")] + tools.pairs
     run(watch.tick())
     assert len(runner.calls) == 2 and "[d2]" in runner.calls[-1]["prompt"]
+
+
+@pytest.mark.parametrize("status, location", [(403, ""), (302, "https://www.google.com/sorry/index?continue=x")])
+def test_feed_wide_blocks_pause_everything(yt, status, location):
+    daemon, server, client = yt()
+    client.limiter = Limiter(concurrent=2, per_second=50)
+    chans = [f"UC{chr(65 + i) * 22}" for i in range(20)]
+
+    async def blocked(path, q):
+        return httpx.Response(status, headers={"location": location} if location else {})
+
+    server.site = blocked
+    with pytest.raises(ToolError, match="paused"):
+        run(client.recent(chans, 3, False))
+    assert len(server.calls) <= 4  # paused after a few refusals, the rest never sent
+
+
+def test_one_forbidden_feed_doesnt_pause_the_others(yt):
+    daemon, server, client = yt()
+    server.status["/feeds/videos.xml"] = 403
+    resp = ask(daemon, ("youtube.uploads", {"channel": MKBHD}))
+    assert not resp["ok"] and "403" in resp["error"] and "paused" not in resp["error"]
+    del server.status["/feeds/videos.xml"]
+    assert ask(daemon, ("youtube.uploads", {"channel": OTHER}))["ok"]

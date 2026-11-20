@@ -502,10 +502,13 @@ class YouTube:
                         if size > limit:
                             raise ToolError(f"{what}: reply too big")
                         chunks.append(chunk)
-                    status = resp.status_code
+                    status, location = resp.status_code, resp.headers.get("location", "")
             except httpx.TransportError as e:
                 raise ToolError(f"YouTube unreachable ({type(e).__name__})") from e
-        if status in blocked and self.limiter.refusal(status, path):
+        if 300 <= status < 400 and is_block_page(location):
+            status = 429  # Google's "unusual traffic" / consent wall: the same as being refused
+        what_key = path + "?" + urllib.parse.urlencode(sorted((params or {}).items()))  # e.g. one per channel feed
+        if status in blocked and self.limiter.refusal(status, what_key):
             raise ToolError(f"YouTube refused the request ({status}); YouTube requests are paused for 30 minutes")
         return httpx.Response(status, content=b"".join(chunks))
 
@@ -558,7 +561,7 @@ class YouTube:
         self.limiter.check(priority)
 
         async def one(ref: str) -> tuple[str, list[dict]]:
-            cid = await self.channel_id(ref)
+            cid = await self.channel_id(ref, priority=priority)
             return cid, (await self.feed(channel_id=cid, priority=priority))[1]
 
         tasks = [asyncio.ensure_future(one(r)) for r in wanted]
@@ -601,7 +604,7 @@ class YouTube:
 
     # --- channels ------------------------------------------------------------------------
 
-    async def channel_id(self, ref: str, fresh: bool = False) -> str:
+    async def channel_id(self, ref: str, fresh: bool = False, priority: str = "normal") -> str:
         """`UC…` from any normalized channel reference (see channel_ref). `fresh`: don't use the cache (for
         changes the owner approves: a handle can belong to someone else by now)."""
         if CHANNEL_RE.fullmatch(ref):
@@ -612,10 +615,11 @@ class YouTube:
         cid = None
         if self.has_api and (ref.startswith("@") or ref.startswith("user/")):
             param = {"forHandle": ref} if ref.startswith("@") else {"forUsername": ref.split("/", 1)[1]}
-            items = (await self.api("GET", "/channels", {"part": "id", **param}) or {}).get("items", [])
+            kind = "watch" if priority == "watch" else "read"
+            items = (await self.api("GET", "/channels", {"part": "id", **param}, kind=kind) or {}).get("items", [])
             cid = items[0]["id"] if items else None
         if cid is None:
-            cid = await self._channel_id_from_page(ref)
+            cid = await self._channel_id_from_page(ref, priority)
         if not cid or not CHANNEL_RE.fullmatch(cid):
             raise ToolError(f"no YouTube channel {ref}")
         if len(self._channels) > 5000:
@@ -630,11 +634,12 @@ class YouTube:
                 pass
         return cid
 
-    async def _channel_id_from_page(self, ref: str) -> str | None:
+    async def _channel_id_from_page(self, ref: str, priority: str = "normal") -> str | None:
         """The channel's own public page names its id in the canonical link (no API needed)."""
         if not (_handle(ref) == ref or LEGACY_RE.fullmatch(ref)):
             raise ToolError(f"bad channel reference {ref!r}")
-        resp = await self._site_get("/" + urllib.parse.quote(ref, safe="@/._-"), None, MAX_PAGE, "YouTube channel page")
+        resp = await self._site_get("/" + urllib.parse.quote(ref, safe="@/._-"), None, MAX_PAGE, "YouTube channel page",
+                                    priority=priority)
         if resp.status_code == 404:
             return None
         if resp.status_code != 200:
@@ -794,6 +799,12 @@ class YouTube:
     async def unsubscribe(self, sub_id: str) -> None:
         self._subs = None
         await self.api("DELETE", "/subscriptions", {"id": sub_id}, account=True, kind="write")
+
+
+def is_block_page(location: str) -> bool:
+    """A redirect away from YouTube (google.com/sorry, consent.youtube.com, a sign-in page)."""
+    host = (urllib.parse.urlsplit(urllib.parse.urljoin(SITE + "/", location)).hostname or "").lower()
+    return "/sorry/" in location or host not in ("www.youtube.com", "youtube.com", "m.youtube.com")
 
 
 def api_error(resp: httpx.Response) -> str:

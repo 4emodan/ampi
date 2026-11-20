@@ -938,7 +938,7 @@ async def yt_add(s: Services, a: dict) -> Result:
     p = r["playlist"]
     # Videos already in the playlist are skipped, so repeating a request (e.g. after a failure) adds nothing twice.
     present = {i.get("contentDetails", {}).get("videoId")
-               for i in await s.youtube.playlist_items(p["id"], 5000, account=True)}
+               for i in await s.youtube.playlist_items(p["id"], 1000, account=True)}
     todo = [v for v in r["videos"] if v["id"] not in present]
     _check_write_budget(s, len(todo))
     done: list[str] = []
@@ -961,7 +961,7 @@ async def _prepare_remove(s: Services, a: dict) -> dict:
     if not s.youtube.can_write:
         raise ToolError(s.youtube.status() + ": " + NO_WRITE)
     p = await _owner_playlist(s, a)
-    items = await s.youtube.playlist_items(p["id"], 5000, account=True)
+    items = await s.youtube.playlist_items(p["id"], 1000, account=True)
     found = []
     for vid in ids:
         matches = [i for i in items if i.get("contentDetails", {}).get("videoId") == vid]
