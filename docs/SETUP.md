@@ -121,7 +121,9 @@ checks the caller is the `ampitools` user).
   your own (not Ampi's) messages. One write per request, at most 10 automatic messages per chat and 20 in total a
   day; **every automatic message is reported to you** in your chat with Ampi.
 - What is left: inside your private chat, Ampi can still be misled by text it reads there (a pasted email, a
-  web page) into sending a short plain message to a chat you allowed; you see it in the report right away.
+  web page, or a forwarded message from an earlier turn of the same conversation, which only the turn that
+  contains it treats as outside content) into sending a short plain message to a chat you allowed; you see it
+  in the report right away. `/new` starts a fresh conversation.
   "Your private chat" means any `owner_ids` account. A command you approved that plants files Claude later
   loads (e.g. `~/.claude` settings) would also run as your private chat, so be careful approving commands
   that write outside the workspace.

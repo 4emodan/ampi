@@ -537,7 +537,7 @@ def telegram_main(argv: list[str] | None = None) -> int:
         if not response.get("ok") and "didn't answer" in str(response.get("error", "")) and \
                 args.cmd in ("send", "edit", "delete"):
             response["error"] = ("no answer in time: the outcome is unknown and it MAY have gone through. Check "
-                                 f"`tg-read history {args.chat} -n 5` before trying again")
+                                 f"`tg-read history \"{args.chat}\" -n 5` before trying again")
     if not response.get("ok"):
         print(f"telegram: {response.get('error', 'failed')}", file=sys.stderr)
         return 1

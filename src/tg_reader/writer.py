@@ -183,6 +183,8 @@ class Writer:
         }
         code = getattr(e, "code", None)
         definite = name in messages or name in SPAM_ERRORS or (isinstance(code, int) and code in (400, 403, 406, 420))
+        if name == "RandomIdDuplicateError":  # Telethon resent a request that had already gone through
+            definite = False
         if writing and not definite:
             # A network/server error or anything unexpected: the request may have reached Telegram.
             return {"ok": False, "unknown": True, "error": f"no clear answer from Telegram ({name})",
@@ -291,7 +293,7 @@ class Writer:
             raise UserError("that group was upgraded or closed; use the new group's id from `tg-read chats`")
         admin = bool(getattr(e, "creator", False) or getattr(e, "admin_rights", None))
         members = getattr(e, "participants_count", None)
-        if members is None and kind in ("group", "channel"):
+        if members is None and kind == "group":  # channels always ask the owner anyway
             members = await self._member_count(d.id, e)
         return {"peer_id": d.id, "title": d.name or "", "kind": kind, "username": getattr(e, "username", None),
                 "members": members, "admin": admin, "forum": bool(getattr(e, "forum", False)),
@@ -302,8 +304,10 @@ class Writer:
     async def _member_count(self, peer: int, entity: Any) -> int | None:
         """Telegram's chat list usually leaves out the size of supergroups and channels: ask once an hour."""
         cached = self._members.get(peer)
-        if cached and self.clock() - cached[0] < 3600:
+        if cached and self.clock() - cached[0] < (3600 if cached[1] is not None else 600):
             return cached[1]
+        self.reader._admit({"cmd": "resolve"})  # a real API call: it counts against the read budget
+        count = None
         try:
             from telethon.tl.functions.channels import GetFullChannelRequest
             from telethon.tl.functions.messages import GetFullChatRequest
@@ -314,9 +318,11 @@ class Writer:
             count = getattr(full.full_chat, "participants_count", None)
             if count is None:
                 count = len(getattr(getattr(full.full_chat, "participants", None), "participants", []) or []) or None
-        except Exception:  # unknown size: treated as "not small", never as allowed
-            return None
-        self._members[peer] = (self.clock(), count)
+        except Exception as e:  # unknown size: treated as "not small", never as allowed
+            wait = getattr(e, "seconds", None)
+            if isinstance(wait, int) and wait > 0:
+                self.reader._cooldown_until = max(self.reader._cooldown_until, self.reader.clock() + wait)
+        self._members[peer] = (self.clock(), count)  # failures too, for 10 minutes
         return count
 
     async def _entity(self, peer: int, d: Any) -> Any:

@@ -250,8 +250,16 @@ class Daemon:
         if telegram:
             for o in telegram:
                 o["args"]["resolved"]["auto"] = True
-            async with self._tg_lock:  # one automatic write at a time, so the caps can't be raced past
+            # One automatic write at a time, so the caps can't be raced past; a short wait keeps the caller's
+            # deadline, and a request that never got its turn sent nothing.
+            try:
+                await asyncio.wait_for(self._tg_lock.acquire(), 10)
+            except asyncio.TimeoutError:
+                raise ToolError("another Telegram message is being sent; nothing was sent, try again shortly") from None
+            try:
                 ok, text, extra = await execute(self.services, ops)
+            finally:
+                self._tg_lock.release()
         else:
             ok, text, extra = await execute(self.services, ops)
         return {"ok": ok, "text": text, **extra} if ok else {"ok": False, "error": text}

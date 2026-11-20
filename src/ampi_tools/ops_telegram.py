@@ -670,8 +670,9 @@ async def tg_log(s: Services, a: dict) -> str:
     for w in rows:
         when = datetime.fromtimestamp(w["ts"], timezone.utc).strftime("%Y-%m-%d %H:%M")
         ids = ", ".join(f"#{i}" for i in json.loads(w["message_ids"] or "[]"))
-        out.append(f"- {when} UTC {w['action']} in {safe_title(w['title'])} {ids} · "
-                   f"{'automatic' if w['auto'] else 'approved'} · {w['status']}")
+        how = "waiting for the owner" if w["status"] == "requested" else \
+            f"{'automatic' if w['auto'] else 'approved'} · {w['status']}"
+        out.append(f"- {when} UTC {w['action']} in {safe_title(w['title'])} {ids} · {how}")
     return "\n".join(out)
 
 
