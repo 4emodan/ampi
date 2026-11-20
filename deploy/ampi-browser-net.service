@@ -1,0 +1,12 @@
+[Unit]
+Description=Egress firewall and config files for the Claude Assistant browser (nft table inet ampi_browser)
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-browser/browser_net.py load
+
+[Install]
+WantedBy=multi-user.target

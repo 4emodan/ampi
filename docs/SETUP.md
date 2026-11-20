@@ -178,6 +178,42 @@ Optional watchers (section 9): `kind = "threads"` (`query = "replies"`) and `kin
 instructions in `watchers/social-replies.md`. More than 30 new items at once, or more than 24 runs a day,
 become a one-line notice instead of a Claude run.
 
+## 8d. Web browser (optional)
+
+`browse` opens public web pages in a headless browser that runs JavaScript ([Obscura](https://github.com/h4ckf0r0day/obscura),
+a small Rust engine), for sites WebFetch can't read and for exact full text or specific items on a page.
+Read-only: no logins, cookies, forms or clicks. No stealth: sites that show a bot check (Cloudflare, Reddit,
+X, Amazon, Google search…) are reported as blocked, and YouTube always goes through the `youtube` command.
+
+```bash
+sudo bash deploy/install-browser.sh
+# then add "Bash(browse:*)" to allowed_tools in config.toml, and
+systemctl restart claude-assistant
+```
+
+How it is contained (pages are hostile input, and the engine is a young third-party project whose
+prebuilt release is pinned by sha256: that proves it's the published file, not who built it):
+
+- Every page runs in a fresh `ampi-browser@` instance as the `ampibrowser` user, and everything it started
+  is killed when the request ends. One page at a time, 600 MB memory cap, 90 s limit.
+- The instance sees almost no files: no home directories, no `/etc` (apart from CA certificates and
+  generated minimal files), `/var`, `/srv`, `/opt` or `/run`, and it can't open Unix sockets.
+- An nft table (`inet ampi_browser`, loaded by `ampi-browser-net`) lets that user send only DNS to
+  Hetzner's public resolvers (`/etc/ampi-browser/resolvers`) and TCP 80/443 to public addresses that
+  aren't this server's own. Private/local addresses, other ports and other projects are unreachable.
+  Every instance first checks the table is loaded unchanged and refuses to start otherwise (e.g. after
+  `nft flush ruleset`: `systemctl restart ampi-browser-net` fixes it).
+- **Watchers and groups never get `browse`**: their tool rules are stripped of it, because injected text
+  could put private data into a URL. The service also refuses their runs unless the run is listed in
+  `/etc/ampi-browser/allow-origins` (e.g. `group:clipboard`). A bare `Bash` rule in the profile's
+  `allowed_tools` would bypass the stripping for groups, so don't use one in a profile that has groups.
+- Long pages are saved under `web/` in the workspace (deleted after a day), so Claude can Grep them.
+
+Logs: `journalctl -u 'ampi-browser@*'` (site name, outcome and time only). Check: `browse status` as the
+assistant. To update the engine, change `VERSION`/`SHA256` in `install-browser.sh` and run it again; the
+previous version stays in `/usr/local/lib/obscura/` and is switched back automatically if the new one
+doesn't start.
+
 ## 9. Watchers and briefings (optional)
 
 Watchers let the assistant act without being asked. They check Gmail, Todoist, a Telegram chat, YouTube channels, or the clock, and start Claude with instructions from `<workspace>/watchers/<name>.md`. Starter instructions are installed by `install-tools.sh` (from `templates/watchers/`). Ask the assistant to change them, or edit them yourself.
@@ -255,3 +291,5 @@ systemctl restart claude-assistant
 ```bash
 cd ~/claude-assistant && git pull && sudo bash deploy/install.sh
 ```
+
+If you use them, also re-run `deploy/install-tools.sh` and `deploy/install-browser.sh`.

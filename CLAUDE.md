@@ -58,11 +58,16 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
                         rate limiter and daily quota budgets
   meta.py, ops_social.py Threads + Instagram (Meta's official APIs: own posts and replies/comments only);
                         token refresh, secret redaction, checks on published text
-  client.py             `todoist` / `gmail` / `youtube` commands the assistant runs (skills: templates/skills/)
+  client.py             `todoist` / `gmail` / `youtube` / `threads` / `instagram` / `browse` commands the assistant
+                        runs (skills: templates/skills/)
+  browser.py            stdlib-only; one sandboxed `ampi-browser@` instance per page (socket-activated, user
+                        `ampibrowser`) running the Obscura engine read-only; not part of the ampi-tools daemon
+  browser_net.py        root: nft egress table for the browser user + generated resolv.conf/hosts/passwd
 tests/                  pytest; fake claude CLI + fake Telegram API, no network
 deploy/                 install.sh, systemd unit (runs as user `assistant`, isolated);
                         install-tg-reader.sh, tg-reader.service (user `tgreader`);
-                        install-tools.sh, ampi-tools.service (user `ampitools`)
+                        install-tools.sh, ampi-tools.service (user `ampitools`);
+                        install-browser.sh, ampi-browser.socket + ampi-browser@.service + ampi-browser-net.service
 templates/               starter CLAUDE.md, group/watcher instructions, skills
 docs/SETUP.md           server setup steps
 ```

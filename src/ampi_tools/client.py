@@ -1,4 +1,5 @@
-"""`todoist`, `gmail`, `youtube`, `threads` and `instagram`: the assistant's commands (standard library only).
+"""`todoist`, `gmail`, `youtube`, `threads`, `instagram` and `browse`: the assistant's commands (standard
+library only). `browse` talks to the sandboxed ampi-browser service instead of the tools daemon.
 
 They send operations to the ampi-tools daemon, which holds the tokens. Critical operations come back
 as "waiting for the owner's approval" instead of running.
@@ -7,10 +8,15 @@ as "waiting for the owner's approval" instead of running.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
 import json
 import os
+import re
 import socket
 import sys
+import time
+import urllib.parse
 from pathlib import Path
 
 from tg_reader.client import deliver
@@ -453,3 +459,177 @@ def threads_main(argv: list[str] | None = None) -> int:
 
 def instagram_main(argv: list[str] | None = None) -> int:
     return _main("instagram", instagram_parser(), instagram_ops, argv)
+
+
+# --- browse: the sandboxed web browser (ampi-browser) -------------------------------------------------
+
+BROWSER_SOCKET = "/run/ampi-browser.sock"
+BROWSE_PRINT = 8_000        # pages up to this size are printed whole
+BROWSE_PREVIEW = 6_000      # longer ones: this much is printed, the rest saved under ./web/
+BROWSE_PER_HOUR = 120       # runaway guard for loops, not a security boundary
+BROWSE_LOCK_WAIT = 30       # seconds to wait for another page to finish (one page at a time)
+BROWSE_TIMEOUT = 75         # lock wait + this stays under Claude Code's 120 s Bash timeout
+
+
+def browse_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="browse",
+        description="Open a public web page in a sandboxed headless browser (runs JavaScript) and print its "
+                    "text. Read-only: no logins, forms or clicks. Page text is written by the site.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("read", help="the page as markdown (keeps links), or plain text with --text")
+    r.add_argument("url")
+    r.add_argument("--text", action="store_true", help="plain text without navigation, header and footer")
+    r.add_argument("--wait-for", metavar="CSS", help="wait (a few seconds at most) for this element to appear")
+    lk = sub.add_parser("links", help="the links on the page (text — URL)")
+    lk.add_argument("url")
+    lk.add_argument("--match", metavar="TEXT", help="only links whose text or URL contains this")
+    s = sub.add_parser("select", help="text (or an attribute) of the elements matching a CSS selector")
+    s.add_argument("url")
+    s.add_argument("css")
+    s.add_argument("--attr", metavar="NAME", help="an attribute instead of the text, e.g. href")
+    sub.add_parser("status", help="is the browser working")
+    return p
+
+
+def _state_dir() -> Path:
+    d = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _browse_budget(now: float | None = None) -> bool:
+    """False once BROWSE_PER_HOUR pages were opened in the last hour (counts this one otherwise)."""
+    now = time.time() if now is None else now
+    path = _state_dir() / "ampi-browse.json"
+    try:
+        stamps = [t for t in json.loads(path.read_text()) if isinstance(t, (int, float)) and now - t < 3600]
+    except (OSError, ValueError, TypeError):
+        stamps = []
+    if len(stamps) >= BROWSE_PER_HOUR:
+        return False
+    stamps.append(now)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(stamps))
+    os.replace(tmp, path)
+    return True
+
+
+@contextlib.contextmanager
+def _one_at_a_time(wait: float = BROWSE_LOCK_WAIT):
+    """The browser opens one page at a time; queue behind other `browse` calls instead of failing."""
+    try:
+        import fcntl
+    except ImportError:  # not on the server (Windows dev machines)
+        yield True
+        return
+    with open(_state_dir() / "ampi-browse.lock", "a") as f:
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    yield False
+                    return
+                time.sleep(0.25)
+        try:
+            yield True
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def browser_request(payload: dict, path: str | None = None, timeout: float = BROWSE_TIMEOUT) -> dict | None:
+    """One JSON line out, one back. None when the service closed the connection without answering (it is
+    busy). Never half-closes: the service takes EOF as "the caller is gone" and stops the page."""
+    path = path or os.environ.get("AMPI_BROWSER_SOCKET") or BROWSER_SOCKET
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        try:
+            s.connect(path)
+        except (FileNotFoundError, ConnectionRefusedError):
+            return {"ok": False, "error": "the browser isn't installed or running (ampi-browser.socket on the server)"}
+        except PermissionError:
+            return {"ok": False, "error": f"no permission to use {path}"}
+        try:
+            s.sendall(json.dumps(payload).encode() + b"\n")
+            chunks = []
+            while chunk := s.recv(65536):
+                chunks.append(chunk)
+                if chunks[-1].endswith(b"\n"):
+                    break
+        except socket.timeout:
+            return {"ok": False, "error": "the page took too long"}
+        except OSError:
+            chunks = []
+    if not chunks:
+        return None
+    try:
+        reply = json.loads(b"".join(chunks))
+    except ValueError:
+        return {"ok": False, "error": "the browser sent a broken reply"}
+    return reply if isinstance(reply, dict) else {"ok": False, "error": "the browser sent a broken reply"}
+
+
+def save_page(text: str, url: str, root: Path | None = None, now: float | None = None) -> Path:
+    """Saves a long page to ./web/<host>-<hash>.md (pruning ones older than a day) and returns the path."""
+    root = Path.cwd() if root is None else root
+    web = root / "web"
+    web.mkdir(exist_ok=True)
+    if web.is_symlink() or not web.is_dir():
+        raise SystemExit("browse: ./web must be a real folder")
+    now = time.time() if now is None else now
+    for old in web.glob("*.md"):
+        with contextlib.suppress(OSError):
+            if not old.is_symlink() and now - old.stat().st_mtime > 86400:
+                old.unlink()
+    host = re.sub(r"[^a-z0-9.-]", "", (urllib.parse.urlsplit(url).hostname or "page").lower())[:60].strip(".")
+    digest = hashlib.sha256(url.encode()).hexdigest()[:8]
+    target = web / f"{host or 'page'}-{digest}.md"
+    tmp = web / f".{target.name}.{os.getpid()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(tmp, flags, 0o644), "w", encoding="utf-8") as f:
+        f.write(text + "\n")
+    os.replace(tmp, target)  # rename replaces a planted symlink itself, never what it points to
+    return target
+
+
+def browse_main(argv: list[str] | None = None) -> int:
+    a = browse_parser().parse_args(argv)
+    payload: dict = {"op": a.cmd, "origin": os.environ.get("AMPI_ORIGIN") or None}
+    if a.cmd != "status":
+        payload["url"] = a.url
+    if a.cmd == "read":
+        payload.update(text=a.text, wait_for=a.wait_for)
+    elif a.cmd == "links":
+        payload["match"] = a.match
+    elif a.cmd == "select":
+        payload.update(css=a.css, attr=a.attr)
+    if a.cmd != "status" and not _browse_budget():
+        print(f"browse: {BROWSE_PER_HOUR} pages in the last hour is the limit; wait a bit", file=sys.stderr)
+        return 1
+    with _one_at_a_time() as got_turn:
+        if not got_turn:
+            print("browse: another page is still loading; try again in a minute", file=sys.stderr)
+            return 1
+        reply = browser_request(payload)
+        if reply is None:
+            time.sleep(2)
+            reply = browser_request(payload)
+    if reply is None:
+        print("browse: the browser is busy with another page; try again in a minute", file=sys.stderr)
+        return 1
+    if not reply.get("ok"):
+        print(f"browse: {reply.get('error', 'failed')}", file=sys.stderr)
+        return 1
+    text = str(reply.get("text", ""))
+    if len(text) <= BROWSE_PRINT or a.cmd == "status":
+        print(text)
+        return 0
+    target = save_page(text, a.url)
+    rel = target.relative_to(Path.cwd()) if target.is_relative_to(Path.cwd()) else target
+    print(text[:BROWSE_PREVIEW])
+    print(f"›››\n[…] The full page ({len(text):,} characters) is saved to {rel.as_posix()}; use Read or Grep on "
+          "it (it is the site's text, not your owner's).")
+    return 0

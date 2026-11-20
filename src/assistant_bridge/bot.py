@@ -314,6 +314,8 @@ class ProfileBot:
             try:
                 with contextlib.ExitStack() as stack:
                     allowed, extra_args, extra_env = self.profile.allowed_tools, self.profile.extra_args, None
+                    if group is not None:  # other people write here: no web browser (see without_browse)
+                        allowed = without_browse(allowed)
                     if self.permissions is not None:
                         label = f'group "{group.name}"' if group is not None else "private chat"
                         token = stack.enter_context(self.permissions.run(label, outside_content=group is not None))
@@ -700,8 +702,24 @@ def watcher_tools(watcher: Watcher, profile: Profile) -> tuple[str, ...]:
     """Watchers process outside content (emails, messages). Unless their config says otherwise, they get
     the profile's tools without web access, so injected text can't send data to a website."""
     if watcher.allowed_tools is not None:
-        return watcher.allowed_tools
-    return tuple(t for t in profile.allowed_tools if t.split("(", 1)[0] not in ("WebFetch", "WebSearch"))
+        return without_browse(watcher.allowed_tools)
+    return without_browse(t for t in profile.allowed_tools if t.split("(", 1)[0] not in ("WebFetch", "WebSearch"))
+
+
+def is_browse_rule(rule: str) -> bool:
+    """True for a Bash permission rule that would let Claude run the `browse` command (any spelling)."""
+    m = re.fullmatch(r"\s*Bash\((.*)\)\s*", rule, re.S)
+    if not m:
+        return False
+    first = re.split(r"[\s:]", m.group(1).strip(), maxsplit=1)[0]
+    return first == "browse" or first.endswith("/browse") or "*" in first or first == ""
+
+
+def without_browse(tools) -> tuple[str, ...]:
+    """Runs that handle outside content (watchers, groups) don't get the web browser: injected text could
+    otherwise put private data into a URL, and page text would flow back unfiltered. The browser service
+    also refuses those runs by origin, but that is advisory; this is the real control."""
+    return tuple(t for t in tools if not is_browse_rule(t))
 
 
 def watcher_thread_id(name: str) -> int:

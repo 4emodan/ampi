@@ -1,0 +1,76 @@
+[Unit]
+Description=Claude Assistant browser: one page (connection %i)
+# Pages are hostile input. The engine runs as its own user, sees almost nothing of the filesystem, can't
+# reach Unix sockets, and the nft table (checked before every start) lets it send only DNS to public
+# resolvers and TCP 80/443 to public addresses. Everything in this cgroup dies when the request ends.
+
+[Service]
+Type=simple
+User=ampibrowser
+Group=ampibrowser
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+Environment=AMPI_BROWSER_HOME=/tmp/h
+EnvironmentFile=/etc/ampi-browser/instance.env
+# Fail closed: no browser unless the firewall is loaded exactly as ampi-browser-net left it.
+ExecStartPre=+/usr/bin/python3 -I /usr/local/lib/ampi-browser/browser_net.py check
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-browser/browser.py
+RuntimeMaxSec=90
+KillMode=control-group
+
+# Resources (one slot; the browser dies first when the box is short of memory)
+MemoryHigh=450M
+MemoryMax=600M
+MemorySwapMax=0
+OOMPolicy=continue
+OOMScoreAdjust=800
+CPUQuota=100%
+CPUWeight=20
+IOWeight=20
+Nice=10
+TasksMax=64
+LimitFSIZE=64M
+LimitCORE=0
+
+# Privileges
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+KeyringMode=private
+RemoveIPC=true
+UMask=0077
+# The V8 flags include --jitless, so no writable+executable memory is needed.
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources io_uring_setup io_uring_enter io_uring_register
+
+# Filesystem: only the engine, CA certificates, the loader cache and generated minimal files
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=true
+PrivateIPC=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+TemporaryFileSystem=/etc:ro /var:ro /srv:ro /opt:ro /mnt:ro /media:ro /usr/local:ro /run:ro /boot:ro /snap:ro
+TemporaryFileSystem=/tmp:size=64M,mode=1777
+BindReadOnlyPaths=/etc/ld.so.cache /etc/ssl /etc/ca-certificates /etc/nsswitch.conf /etc/localtime
+BindReadOnlyPaths=/etc/ampi-browser/resolv.conf:/etc/resolv.conf /etc/ampi-browser/hosts:/etc/hosts
+BindReadOnlyPaths=/etc/ampi-browser/passwd:/etc/passwd /etc/ampi-browser/group:/etc/group
+BindReadOnlyPaths=/usr/local/lib/obscura /usr/local/lib/ampi-browser
+InaccessiblePaths=-/sys/firmware
+
+# Network: no Unix sockets (the connection arrives as stdin); private ranges also denied here
+RestrictAddressFamilies=AF_INET AF_INET6
+IPAddressDeny=localhost link-local multicast 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 198.18.0.0/15 240.0.0.0/4 fc00::/7 fec0::/10 64:ff9b::/96 2002::/16 2001::/32

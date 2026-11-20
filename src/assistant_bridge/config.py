@@ -190,6 +190,9 @@ def _parse_watchers(raw: object, where: str) -> tuple[Watcher, ...]:
             raise ConfigError(f"{ww}: at/days only apply to kind = \"schedule\"")
         tools = w.get("allowed_tools")
         tools = None if tools is None else _str_list(tools, f"{ww}.allowed_tools")
+        if tools and any(t.strip() in ("Bash", "Bash(*)", "Bash(:*)", "Bash()") for t in tools):
+            raise ConfigError(f"{ww}: a bare Bash rule lets a watcher run any command (watchers read outside "
+                              "content); list the commands, e.g. \"Bash(todoist:*)\"")
         at = _str_list(w.get("at", []), f"{ww}.at")
         if kind == "schedule":
             if not at:

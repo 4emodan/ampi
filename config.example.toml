@@ -42,7 +42,8 @@ model = "sonnet"
 # Tools Claude may use without asking. Anything else is denied (nobody can approve prompts).
 # With the Telegram reader (docs/SETUP.md, section 7) also add "Skill" and "Bash(tg-read:*)";
 # with Todoist/Gmail (section 8) add "Bash(todoist:*)" and "Bash(gmail:*)"; with YouTube (8b) "Bash(youtube:*)";
-# with Threads/Instagram (8c) "Bash(threads:*)" / "Bash(instagram:*)".
+# with Threads/Instagram (8c) "Bash(threads:*)" / "Bash(instagram:*)"; with the web browser (8d) "Bash(browse:*)"
+# (watchers and groups never get browse, whatever is listed here).
 allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"]
 # Extra arguments passed to `claude` on every run (optional).
 extra_args = []
