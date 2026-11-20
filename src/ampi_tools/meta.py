@@ -484,7 +484,7 @@ def mixed_scripts(text: str) -> list[str]:
     main = max(counts, key=counts.get) if counts else None
     out = []
     for w, s in zip(words, per_word):
-        if len(s) > 1 or (main and s and s != {main} and counts.get(main, 0) >= 3 * counts.get(next(iter(s)), 0)):
+        if len(s) > 1 or (main and s and s != {main}):  # every word outside the main alphabet is listed
             out.append(w)
     return out
 

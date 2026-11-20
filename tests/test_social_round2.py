@@ -1,5 +1,7 @@
 """Review round-2 fixes."""
 
+import time
+
 import httpx
 import pytest
 from test_social import approve, ask, social  # noqa: F401 (social is a fixture)
@@ -44,8 +46,12 @@ def test_a_published_container_is_reported_as_posted(social):
                 return httpx.Response(200, json={"status": "PUBLISHED"})
             return httpx.Response(400, json={"error": {"message": "x", "code": 100}})
         if path == "/me/threads":
-            return httpx.Response(200, json={"data": [{"id": "777", "text": "hello world",
-                                                       "permalink": "https://www.threads.com/@me_user/post/X"}]})
+            now = time.strftime("%Y-%m-%dT%H:%M:%S+0000", time.gmtime())
+            return httpx.Response(200, json={"data": [
+                {"id": "776", "text": "hello world", "permalink": "https://www.threads.com/@me_user/post/OLD",
+                 "timestamp": "2026-01-01T00:00:00+0000"},
+                {"id": "777", "text": "hello world", "timestamp": now,
+                 "permalink": "https://www.threads.com/@me_user/post/X"}]})
         return orig(method, path, q)
 
     graph.threads = threads

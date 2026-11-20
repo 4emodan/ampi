@@ -36,7 +36,8 @@ def test_instagram_counts_characters_not_bytes():
 
 def test_mixed_alphabets_are_flagged():
     assert any("mixed alphabets" in e for e in text_extras("Greаt talk"))
-    assert not any("mixed alphabets" in e for e in text_extras("Καλή talk"))
+    assert not any("mixed alphabets" in e for e in text_extras("Καλή μέρα"))
+    assert any("mixed alphabets" in e for e in text_extras("Καλή talk και μέρα"))
 
 
 def test_an_unknown_owner_never_counts_as_the_owner(tmp_path):

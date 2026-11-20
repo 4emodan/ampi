@@ -234,6 +234,7 @@ async def th_publish(s: Services, a: dict) -> Result:
     if r["target"]:
         params["reply_to_id"] = r["target"]["id"]
     maybe = ". It may have been posted anyway: check `threads posts` before asking again"
+    started = time.time()
     try:
         made = await c.call("POST", f"/{uid}/threads", params)
     except ToolError as e:
@@ -254,8 +255,14 @@ async def th_publish(s: Services, a: dict) -> Result:
         """The same text among the owner's newest posts/replies: the post went out even if Meta's answers were odd."""
         try:
             for p in await c.pages("/me/replies" if r["target"] else "/me/threads",
-                                   {"fields": "id,text,permalink"}, 5):
-                if p.get("text") == r["text"] and p.get("permalink"):
+                                   {"fields": "id,text,permalink,timestamp,replied_to"}, 5):
+                try:
+                    when = datetime.strptime(str(p.get("timestamp", "")), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+                except ValueError:
+                    continue
+                parent = (p.get("replied_to") or {}).get("id") if isinstance(p.get("replied_to"), dict) else None
+                if (p.get("text") == r["text"] and p.get("permalink") and when >= started - 5
+                        and (not r["target"] or parent == r["target"]["id"])):
                     return str(p["permalink"])
         except ToolError:
             pass
@@ -269,7 +276,10 @@ async def th_publish(s: Services, a: dict) -> Result:
     if status == "IN_PROGRESS":
         for _ in range(6):
             await asyncio.sleep(5)
-            status = (await c.call("GET", f"/{post_id}", {"fields": "status"})).get("status")
+            try:
+                status = (await c.call("GET", f"/{post_id}", {"fields": "status"})).get("status")
+            except ToolError as e:
+                raise ToolError(f"{e}{maybe}") from None
             if status != "IN_PROGRESS":
                 break
     if status == "IN_PROGRESS":
