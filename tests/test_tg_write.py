@@ -671,3 +671,52 @@ def test_runs_are_registered_for_every_claude_process(tmp_path, fake_claude_env)
     run(runner.run_turn("hi", cwd=tmp_path, session_id="00000000-0000-0000-0000-000000000002", started=False,
                         model=None, allowed_tools=["Read"], origin="group:x"))
     assert seen[0] == ("spawn", "group:x") and seen[-1] == ("exit",)
+
+
+# --- review round 2 ----------------------------------------------------------------------------------
+
+def test_a_resent_request_is_an_unknown_outcome(tmp_path):
+    writer, client = make_writer(tmp_path)
+    client.fail = type("RandomIdDuplicateError", (Exception,), {"code": 400})("dup")
+    assert w(writer, cmd="send", peer_id=ANNA.id, text="x").get("unknown")
+
+
+def test_member_count_failures_are_cached_and_cost_budget(tmp_path):
+    writer, client = make_writer(tmp_path)
+    calls = []
+
+    async def full(request):
+        calls.append(request)
+        raise FloodWaitError(30)
+
+    client.__call__ = full
+    type(client).__call__ = lambda self, req: full(req)
+    group = NS(id=77, title="Club", participants_count=None, megagroup=True, bot=False)
+    assert run(writer._member_count(-100077, group)) is None
+    assert writer.reader._cooldown_until > writer.reader.clock()
+    assert run(writer._member_count(-100077, group)) is None
+    assert len(calls) <= 1  # the failure is remembered (and telethon may be missing here: then 0 calls)
+
+
+def test_a_busy_automatic_write_sends_nothing(tgd):
+    daemon, client, _ = tgd(rules=ALLOW_ANNA)
+
+    async def scenario():
+        await daemon._tg_lock.acquire()
+        try:
+            import ampi_tools.server as srv
+            orig = srv.asyncio.wait_for
+
+            async def quick(aw, timeout):
+                return await orig(aw, 0.05)
+            srv.asyncio.wait_for = quick
+            try:
+                return await daemon.handle({"cmd": "run", "ops": [{"op": "telegram.send", "args": {
+                    "chat": "Anna K", "text": "see you at noon"}}]}, 501)
+            finally:
+                srv.asyncio.wait_for = orig
+        finally:
+            daemon._tg_lock.release()
+
+    reply = run(scenario())
+    assert "nothing was sent" in reply["error"] and client.sent == []
