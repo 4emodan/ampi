@@ -53,6 +53,8 @@ class FakeGraph:
     def threads(self, method, path, q):
         if path == "/me":
             return httpx.Response(200, json={"id": "111", "username": "me_user"})
+        if path == "/me/replies":
+            return httpx.Response(200, json={"data": []})
         if path == "/me/threads":
             return httpx.Response(200, json={"data": [self.th_posts["201"]], "paging": {}})
         if path == "/201/conversation":
@@ -142,7 +144,7 @@ def test_links_and_ids():
     "a͏b", "aㅤb", "tab\there", "x️",
 ])
 def test_invisible_characters_are_refused(text):
-    with pytest.raises(ToolError, match="invisible or control"):
+    with pytest.raises(ToolError, match="invisible"):
         check_text(text, 500, True)
 
 

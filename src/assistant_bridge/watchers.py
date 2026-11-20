@@ -208,11 +208,16 @@ class Watch:
             runs = state.get("runs", {}) if state.get("runs", {}).get("day") == today else {"day": today, "n": 0}
             if len(fresh) > SOCIAL_FLOOD or runs["n"] >= SOCIAL_RUNS_PER_DAY:
                 merged = (fresh + [i for i in state.get("seen", []) if i not in fresh])[:SEEN_MAX]
-                why = "too many to go through here" if len(fresh) > SOCIAL_FLOOD else "the watcher's daily limit is reached"
-                await self.bot.notify(f"🔔 {self.w.name}: {len(fresh)} new {what} on {kind.capitalize()} ({why}; "
-                                      "have a look in the app).")
+                flood = len(fresh) > SOCIAL_FLOOD
+                why = "too many to go through here" if flood else "the watcher's daily limit is reached"
+                told = runs.get("told", [])
+                reason = "flood" if flood else "limit"
+                if reason not in told:  # one notice per reason a day, not one per check
+                    await self.bot.notify(f"🔔 {self.w.name}: {len(fresh)} new {what} on {kind.capitalize()} ({why}; "
+                                          "have a look in the app; no more notices about this today).")
+                    runs = {**runs, "told": told + [reason]}
                 return None, {**state, "seen": merged, "runs": runs}
-            runs = {"day": today, "n": runs["n"] + 1}
+            runs = {**runs, "day": today, "n": runs["n"] + 1}
         show = {"ids": new} if kind == "gmail" or social else {"ids": new, "filter": self.w.query}
         listing = await self._tool(self.tools.socket, {"cmd": "run", "ops": [{"op": f"{kind}.show", "args": show}]})
         merged = (new + [i for i in state.get("seen", []) if i not in new])[:SEEN_MAX]

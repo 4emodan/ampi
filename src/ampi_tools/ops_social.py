@@ -8,13 +8,14 @@ owner's own posts, and checked again right before running, so the owner approves
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import ops as _ops
-from .meta import ID_RE, MetaClient, check_text, redact, social_ref, text_extras
+from .meta import ID_RE, MetaClient, check_text, exact_block, redact, social_ref, text_extras
 from .ops import (
     FIELDS, OPS, PREPARE, Op, Result, Services, _int, clean, clean_block, id_list, need,
 )
@@ -64,6 +65,8 @@ async def th_profile(s: Services, a: dict) -> Result:
     me = await c.call("GET", "/me", {"fields": "id,username,name,threads_biography,is_verified"})
     scopes = c.auth.scopes()
     can = "publish/reply/delete with approval" if "threads_content_publish" in scopes else "read-only login"
+    if not c.auth.load().get("scopes_checked"):
+        can += " (as requested at login; Meta doesn't report what was granted)"
     return _with_note(c, f"@{me.get('username')} ({me.get('name', '')}) [{me.get('id')}] · {can}\n"
                          f"  {_one(me.get('threads_biography'), 500)}")
 
@@ -88,23 +91,25 @@ async def _th_resolve(c: MetaClient, ref: str) -> dict:
     else:
         _, user, code = ref.split(":", 2)
         found = None
-        for p in await _owner_posts(c, 30, 300):
-            if p.get("shortcode") == code:
-                found = p
-                break
-            if user != owner["username"].lower() and not found:
-                for r in await c.pages(f"/{p['id']}/conversation", {"fields": REPLY_FIELDS}, 300):
+        if user == owner["username"].lower():  # the owner's own post or reply
+            for p in await _owner_posts(c, 30, 300) + await c.pages("/me/replies", {"fields": POST_FIELDS}, 200):
+                if p.get("shortcode") == code:
+                    found = p
+                    break
+        else:  # someone's reply under one of the owner's recent posts (bounded: at most 25 conversations)
+            for p in await _owner_posts(c, 30, 25):
+                for r in await c.pages(f"/{p['id']}/conversation", {"fields": REPLY_FIELDS}, 200):
                     if r.get("shortcode") == code:
                         found = r
                         break
-            if found:
-                break
+                if found:
+                    break
         if not found:
-            raise ToolError("that post isn't the owner's, nor a reply under one of their posts from the last 30 days")
+            raise ToolError("that post isn't the owner's, nor a reply under one of their recent posts")
         item = await c.call("GET", f"/{found['id']}", {"fields": REPLY_FIELDS})
     owned = str(item.get("username", "")).lower() == owner["username"].lower()
     root = (item.get("root_post") or {}).get("id") if isinstance(item.get("root_post"), dict) else None
-    root_owned = owned and not item.get("is_reply")
+    root_owned = owned and item.get("is_reply") is False  # a missing field never counts as "top-level"
     if root and not root_owned:
         r = await c.call("GET", f"/{root}", {"fields": "id,username"})
         root_owned = str(r.get("username", "")).lower() == owner["username"].lower()
@@ -182,7 +187,7 @@ async def th_ids(s: Services, a: dict) -> Result:
                 _th_cache[r["id"]] = {**r, "post": _one(p.get("text"), 80)}
     if len(_th_cache) > 5000:
         _th_cache.clear()
-    return {"ids": ids, "text": ""}
+    return {"ids": ids[:1500], "text": ""}  # the watcher remembers 2000
 
 
 async def th_show(s: Services, a: dict) -> Result:
@@ -226,20 +231,40 @@ async def th_publish(s: Services, a: dict) -> Result:
     params = {"media_type": "TEXT", "text": r["text"], "auto_publish_text": "true"}
     if r["target"]:
         params["reply_to_id"] = r["target"]["id"]
+    maybe = ". It may have been posted anyway: check `threads posts` before asking again"
     try:
         made = await c.call("POST", f"/{uid}/threads", params)
     except ToolError as e:
         if "unreachable" in str(e) or "error 5" in str(e):  # the request may have gone through
-            raise ToolError(f"{e}. It may have been posted anyway: check `threads posts` before asking again") from None
+            raise ToolError(f"{e}{maybe}") from None
         raise
     post_id = str(made.get("id", ""))
-    link = ""
-    if ID_RE.fullmatch(post_id):
-        try:
-            link = (await c.call("GET", f"/{post_id}", {"fields": "id,permalink"})).get("permalink", "")
-        except ToolError:
-            pass
-    return f"Posted on Threads{' as a reply' if r['target'] else ''}: {link or post_id}"
+    if not ID_RE.fullmatch(post_id):
+        raise ToolError(f"Threads didn't return an id{maybe}")
+    what = "a reply" if r["target"] else "a post"
+    # auto_publish_text should publish at once; if Meta only made a container, publish that (first and only time).
+    try:
+        status = (await c.call("GET", f"/{post_id}", {"fields": "status,error_message"})).get("status")
+    except ToolError:
+        status = None
+    if status in ("FINISHED", "IN_PROGRESS"):
+        for _ in range(6):
+            if status == "FINISHED":
+                break
+            await asyncio.sleep(5)
+            status = (await c.call("GET", f"/{post_id}", {"fields": "status"})).get("status")
+        if status != "FINISHED":
+            raise ToolError(f"Threads hasn't finished preparing {what} (status {status}); nothing was published")
+        post_id = str((await c.call("POST", f"/{uid}/threads_publish", {"creation_id": post_id})).get("id", post_id))
+    elif status in ("ERROR", "EXPIRED"):
+        raise ToolError(f"Threads didn't publish {what} (status {status}); nothing was posted")
+    try:
+        link = (await c.call("GET", f"/{post_id}", {"fields": "id,permalink"})).get("permalink", "")
+    except ToolError:
+        link = ""
+    if not link:
+        raise ToolError(f"couldn't confirm that {what} was published{maybe}")
+    return f"Posted {what} on Threads: {link}"
 
 
 async def _prepare_delete(s: Services, a: dict) -> dict:
@@ -290,7 +315,7 @@ async def describe_publish(s: Services, a: dict) -> str:
     t = r.get("target")
     head = (f"Post a PUBLIC reply on Threads to @{clean(t['username'], 40)}'s post “{clean(t['text'], 120)}” [{t['id']}]"
             if t else "Post PUBLICLY on Threads (anyone can see it)")
-    lines = [head + f", {len(r.get('text', ''))} characters, shown in full:", clean_block(r.get("text", ""))]
+    lines = [head + f", {len(r.get('text', ''))} characters, exactly as it will appear:", exact_block(r.get("text", ""))]
     lines += [f"  {x}" for x in text_extras(r.get("text", ""))]
     return "\n".join(lines)
 
@@ -345,7 +370,14 @@ async def ig_profile(s: Services, a: dict) -> Result:
 
 
 async def _own_media(c: MetaClient, limit: int, priority: str = "normal") -> list[dict]:
-    return await c.pages("/me/media", {"fields": MEDIA_FIELDS}, limit, priority=priority, page_size=50)
+    try:
+        return await c.pages("/me/media", {"fields": MEDIA_FIELDS}, limit, priority=priority, page_size=50)
+    except ToolError as e:
+        if "(100)" not in str(e):
+            raise
+        # A field this login can't read (Meta then fails the whole request): the essentials only.
+        return await c.pages("/me/media", {"fields": "id,media_type,timestamp,permalink,like_count,comments_count"},
+                             limit, priority=priority, page_size=50)
 
 
 async def ig_media(s: Services, a: dict) -> Result:
@@ -398,10 +430,7 @@ async def ig_comments(s: Services, a: dict) -> Result:
 async def ig_insights(s: Services, a: dict) -> Result:
     c = ig(s)
     days = min(a.get("days", 7), 30)
-    uid = c.auth.user["id"]
-    if not ID_RE.fullmatch(uid):
-        raise ToolError("log in again (`ampi-tools instagram-login`)")
-    data = await c.call("GET", f"/{uid}/insights", {
+    data = await c.call("GET", "/me/insights", {
         "metric": "reach,views,accounts_engaged,total_interactions,likes,comments,shares,saves",
         "period": "day", "metric_type": "total_value", "since": _since(days), "until": int(time.time())})
     return _with_note(c, f"Last {days} days: " + " · ".join(f"{m.get('name')}: {_metric_total(m)}"
@@ -424,7 +453,7 @@ async def ig_ids(s: Services, a: dict) -> Result:
                     _ig_cache[x["id"]] = {**x, "post": _one(m.get("caption"), 80), "media_id": m["id"]}
     if len(_ig_cache) > 5000:
         _ig_cache.clear()
-    return {"ids": ids, "text": ""}
+    return {"ids": ids[:1500], "text": ""}
 
 
 async def ig_show(s: Services, a: dict) -> Result:
@@ -489,8 +518,8 @@ async def describe_ig_reply(s: Services, a: dict) -> str:
     r = a.get("resolved") or {}
     cm = r.get("comment", {})
     lines = [f"Reply PUBLICLY on Instagram to @{clean(cm.get('username', ''), 40)}'s comment “{clean(cm.get('text', ''), 120)}” "
-             f"[{cm.get('id')}] (a reply to a reply shows under the top comment), shown in full:",
-             clean_block(r.get("text", ""))]
+             f"[{cm.get('id')}] (a reply to a reply shows under the top comment), exactly as it will appear:",
+             exact_block(r.get("text", ""))]
     lines += [f"  {x}" for x in text_extras(r.get("text", ""))]
     return "\n".join(lines)
 

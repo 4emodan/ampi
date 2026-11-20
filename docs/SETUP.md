@@ -155,15 +155,14 @@ come to you as Approve/Reject buttons first.
      `threads_basic, threads_read_replies, threads_manage_insights` (and `threads_content_publish,
      threads_manage_replies, threads_delete` if you want posting), put `https://localhost:8765/` in
      **Redirect callback URLs**, then **App roles → Roles → Add people → Threads Tester** with your Threads
-     username, and accept it in Threads → Settings → Account → **Website permissions**. Copy the *Threads app
+     username, and accept it in Threads (usually Settings → Account → **Website permissions**). Copy the *Threads app
      ID and secret* into `THREADS_APP_ID=` / `THREADS_APP_SECRET=` in `/home/ampitools/env`.
    - **Instagram:** add the product "Instagram" → **API setup with Instagram login**. Add your Instagram account
-     as an **Instagram tester** (App roles) and accept it in Instagram → Settings → **Apps and websites** →
-     Tester invites. Set the redirect URL `https://localhost:8765/` under **Business login settings**. Copy the
+     as an **Instagram tester** (App roles) and accept it in Instagram (usually Settings → **Apps and websites** →
+     Tester invites). Set the redirect URL `https://localhost:8765/` under **Business login settings**. Copy the
      *Instagram app ID and secret* into `INSTAGRAM_APP_ID=` / `INSTAGRAM_APP_SECRET=`.
    - If Meta refuses a localhost redirect, use an https address on a domain you own instead (the page doesn't
      have to exist) and set it as `META_REDIRECT_URI=` in the env file too.
-   - Recommended: in the app's **Advanced settings**, turn on **Require app secret**.
 2. Log in (prints a link; after allowing access, paste back the address the browser ends up on):
    ```bash
    sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools threads-login'      # add --write to allow posting

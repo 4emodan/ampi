@@ -58,8 +58,9 @@ def redact(text: Any) -> str:
     for secret in sorted(_SECRETS, key=len, reverse=True):
         if secret in s:
             s = s.replace(secret, "[redacted]")
-    # Anything shaped like a Meta token or code in a URL, even if it isn't registered (yet).
-    return re.sub(r"(access_token|client_secret|code|fb_exchange_token)=[^&\s\"']+", r"\1=[redacted]", s)
+    # Anything shaped like a Meta token, secret or code (URL, JSON or dict form), even if not registered (yet).
+    return re.sub(r"([\"']?(?:access_token|client_secret|code|fb_exchange_token|prev_token)[\"']?\s*[:=]\s*[\"']?)"
+                  r"[^&\s\"',}]+", r"\1[redacted]", s)
 
 
 class RedactingFormatter(logging.Formatter):
@@ -126,6 +127,7 @@ class MetaAuth:
         register_secret(secret)
         data = self.load()
         register_secret(data.get("access_token"))
+        register_secret(data.get("prev_token"))  # replaced tokens stay valid until they expire
 
     # --- storage -------------------------------------------------------------------------
 
@@ -149,8 +151,27 @@ class MetaAuth:
 
     @property
     def user(self) -> dict:
+        """The owner's account. Never empty: an unknown owner would make "is this the owner's post?" fail open."""
         d = self.load()
-        return {"id": str(d.get("user_id", "")), "username": str(d.get("username", ""))}
+        user = {"id": str(d.get("user_id", "")), "username": str(d.get("username", ""))}
+        if not ID_RE.fullmatch(user["id"]) or not user["username"]:
+            raise ToolError(f"the {self.s.name} login doesn't say which account it is: run "
+                            f"`ampi-tools {self.s.login_command}` again")
+        return user
+
+    async def update_user(self, client: "MetaClient") -> None:
+        """Keeps the stored username current (an old name could be taken by someone else)."""
+        data = self.load()
+        if not data.get("access_token"):
+            return
+        me = await client.call("GET", "/me", {"fields": "user_id,username" if self.s is INSTAGRAM else "id,username"})
+        uid, name = str(me.get("user_id") or me.get("id") or ""), str(me.get("username", ""))
+        if ID_RE.fullmatch(uid) and name and (uid, name) != (data.get("user_id"), data.get("username")):
+            if data.get("user_id") and uid != data.get("user_id"):
+                log.warning("%s token now belongs to another account; not updating", self.s.name)
+                return
+            data.update(user_id=uid, username=name)
+            self.save(data)
 
     def scopes(self) -> set[str]:
         return set(self.load().get("scopes", []))
@@ -192,15 +213,18 @@ class MetaAuth:
         granted = short.get("permissions")
         scopes = (granted.split(",") if isinstance(granted, str) else
                   list(self.s.read_scopes + (self.s.write_scopes if write else ())))
+        me = await MetaClient(self.s, self, self._client).call("GET", "/me", {
+            "fields": "user_id,username" if self.s is INSTAGRAM else "id,username"}, token=long["access_token"])
+        user_id, username = str(me.get("user_id") or me.get("id") or ""), str(me.get("username", ""))
+        if not ID_RE.fullmatch(user_id) or not username:
+            raise ToolError(f"{self.s.name} didn't say which account this is; nothing was saved, try again")
+        old = self.load().get("access_token")
         now = time.time()
         data = {"access_token": long["access_token"], "scopes": scopes, "obtained_at": now,
-                "expires_at": now + float(long.get("expires_in", 60 * DAY)), "login_at": now}
-        self.save(data)
-        me = await MetaClient(self.s, self, self._client).call("GET", "/me", {
-            "fields": "user_id,username" if self.s is INSTAGRAM else "id,username"})
-        data["user_id"] = str(me.get("user_id") or me.get("id") or "")
-        data["username"] = str(me.get("username", ""))
-        self.save(data)
+                "expires_at": now + float(long.get("expires_in", 60 * DAY)), "login_at": now,
+                "user_id": user_id, "username": username, "scopes_checked": isinstance(granted, str),
+                **({"prev_token": old} if old else {})}
+        self.save(data)  # only now: a token whose account isn't known is never stored
         return data
 
     # --- tokens ----------------------------------------------------------------------------
@@ -235,7 +259,7 @@ class MetaAuth:
                 return False
             register_secret(new["access_token"])
             now = time.time()
-            data.update(access_token=new["access_token"], obtained_at=now,
+            data.update(access_token=new["access_token"], prev_token=data["access_token"], obtained_at=now,
                         expires_at=now + float(new.get("expires_in", 60 * DAY)))
             self.save(data)
             log.info("%s token refreshed", self.s.name)
@@ -280,7 +304,7 @@ class MetaAuth:
 
 PATH_RE = re.compile(r"/(me|[0-9]{1,30})(?:/([a-z_]{1,40}))?")
 EDGES = {"threads", "insights", "conversation", "replies", "threads_insights", "manage_reply", "media",
-         "comments"}
+         "comments", "threads_publish"}
 HOURLY = {"normal": 300, "watch": 200}
 
 
@@ -299,11 +323,12 @@ class MetaClient:
             raise ToolError(f"too many {self.s.name} requests in the last hour; try again later")
         self._hour[priority].append(now)
 
-    async def call(self, method: str, path: str, params: dict | None = None, *, priority: str = "normal") -> Any:
+    async def call(self, method: str, path: str, params: dict | None = None, *, priority: str = "normal",
+                   token: str | None = None) -> Any:
         m = PATH_RE.fullmatch(path)
         if not m or (m.group(2) and m.group(2) not in EDGES):
             raise ToolError(f"refusing odd {self.s.name} path {path!r}")
-        token = await self.auth.token()
+        token = token or await self.auth.token()
         self._count(priority)
         params = {k: v for k, v in (params or {}).items() if v is not None and v != ""}
         headers = {}
@@ -334,10 +359,15 @@ class MetaClient:
         while len(out) < limit:
             data = await self.call("GET", path, {**params, "limit": min(page_size, limit - len(out)), "after": after},
                                    priority=priority)
-            items = data.get("data", []) if isinstance(data, dict) else []
-            out += [i for i in items if isinstance(i, dict)]
-            after = ((data.get("paging") or {}).get("cursors") or {}).get("after") if data.get("paging", {}).get("next") else None
-            if not after or not items:
+            if not isinstance(data, dict):
+                break
+            asked = min(page_size, limit - len(out))
+            items = [i for i in (data.get("data") or []) if isinstance(i, dict)]
+            out += items
+            paging = data.get("paging") or {}
+            after = (paging.get("cursors") or {}).get("after") if isinstance(paging, dict) else None
+            # Threads pages often carry only cursors (no "next"): go on while pages come back full.
+            if not after or not items or (len(items) < asked and not (isinstance(paging, dict) and paging.get("next"))):
                 break
         return out[:limit]
 
@@ -361,7 +391,7 @@ def meta_error(s: MetaService, data: Any, status: int) -> str:
 
 _EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF), (0x2300, 0x23FF), (0x2190, 0x21FF),
                  (0x3030, 0x303D), (0x3297, 0x3299), (0x1FC00, 0x1FFFD))
-_SNEAKY = set("͏ᅟᅠㅤﾠ᠎")
+_SNEAKY = set("͏ᅟᅠㅤﾠ\u180e⠀￼")
 
 
 def is_emoji(ch: str) -> bool:
@@ -370,30 +400,77 @@ def is_emoji(ch: str) -> bool:
 
 
 def check_text(text: str, limit: int, emoji_bytes: bool) -> str:
-    """Text to publish must be exactly what the owner sees in the approval: no invisible characters (they could
-    hide data inside a public post), except the joiner and emoji selector inside emoji. Returns the text."""
+    """Text to publish must be exactly what the owner sees in the approval, with nowhere to hide data: plain
+    spaces and line breaks only (single spaces, none at line ends, at most one blank line), no invisible or
+    special-form characters (non-breaking spaces, 𝐦𝐚𝐭𝐡 letters, fullwidth letters...), except what emoji need.
+    Returns the text."""
     if not isinstance(text, str) or not text.strip():
         raise ToolError("the text is empty")
+    for line in text.split("\n"):
+        if line != line.strip(" ") or "  " in line:
+            raise ToolError("use single spaces, and none at the start or end of a line")
+    if "\n\n\n" in text or text.startswith("\n") or text.endswith("\n"):
+        raise ToolError("at most one empty line between paragraphs, none at the start or end")
+    in_tag = False
     for i, ch in enumerate(text):
-        if ch == "\n":
-            continue
         prev, nxt = text[i - 1] if i else "", text[i + 1] if i + 1 < len(text) else ""
-        if ch == "️":  # emoji presentation, once, right after an emoji or symbol
-            if prev and (is_emoji(prev) or unicodedata.category(prev) == "So") and nxt != "️":
-                continue
-        elif ch == "‍":  # joins emoji (👩‍💻), nothing else
-            if prev and nxt and (is_emoji(prev) or prev == "️") and is_emoji(nxt):
-                continue
-        elif (unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Co", "Cn", "Cs")
-              and not IGNORABLE.match(ch) and ch not in _SNEAKY
-              and not 0xFE00 <= ord(ch) <= 0xFE0F and not 0xE0100 <= ord(ch) <= 0xE01EF):
+        o = ord(ch)
+        if ch in " \n":
             continue
-        raise ToolError(f"the text contains an invisible or control character (U+{ord(ch):04X}); remove it")
-    size = sum(len(ch.encode()) if is_emoji(ch) or ch in "‍️" else 1 for ch in text)
+        if 0xE0020 <= o <= 0xE007F:  # tag letters: only inside a subdivision flag (🏴 + tags + cancel tag)
+            if (in_tag or prev == "\U0001F3F4") and (o != 0xE007F or in_tag):
+                in_tag = o != 0xE007F
+                continue
+        elif ch == "\ufe0f":  # emoji presentation, once, after an emoji/symbol or in a keycap (1️⃣)
+            if prev and nxt != "\ufe0f" and (is_emoji(prev) or unicodedata.category(prev) == "So"
+                                             or (prev in "0123456789#*" and nxt == "\u20e3")):
+                continue
+        elif ch == "\u200d":  # joins emoji (👩‍💻), nothing else
+            if prev and nxt and (is_emoji(prev) or prev == "\ufe0f") and is_emoji(nxt):
+                continue
+        elif ch == "\u20e3":  # keycap
+            if prev == "\ufe0f" or prev in "0123456789#*":
+                continue
+        elif (unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Zs", "Co", "Cn", "Cs")
+              and not ch.isspace() and not IGNORABLE.match(ch) and ch not in _SNEAKY
+              and not 0xFE00 <= o <= 0xFE0F and not 0xE0100 <= o <= 0xE01EF
+              and not (unicodedata.category(ch)[0] in "LN" and unicodedata.normalize("NFKC", ch) != ch)):
+            continue
+        raise ToolError(f"the text contains an invisible, special-form or control character (U+{o:04X}); "
+                        "use plain letters and spaces")
+    if in_tag:
+        raise ToolError("the text contains an unfinished flag sequence")
+    if emoji_bytes:
+        size = sum(len(ch.encode()) if is_emoji(ch) or ch in "\u200d\ufe0f\u20e3" or 0xE0020 <= ord(ch) <= 0xE007F
+                   else 1 for ch in text)
+    else:
+        size = len(text)
     if size > limit:
         raise ToolError(f"the text is too long ({size} of {limit}" + (", emoji count as several" if emoji_bytes else "")
                         + ")")
     return text
+
+
+def exact_block(text: str) -> str:
+    """Checked text for an approval, shown exactly as it will be published (nothing stripped)."""
+    return "\n".join(f"│ {line}" for line in text.split("\n"))
+
+
+def _script(ch: str) -> str:
+    try:
+        return unicodedata.name(ch).split()[0]
+    except ValueError:
+        return "?"
+
+
+def mixed_scripts(text: str) -> list[str]:
+    """Words mixing alphabets (Grеat with a Cyrillic е): a classic way to fake names or hide bits."""
+    out = []
+    for word in re.findall(r"\w+", text):
+        scripts = {_script(ch) for ch in word if ch.isalpha()}
+        if len(scripts) > 1:
+            out.append(word)
+    return out
 
 
 def text_extras(text: str) -> list[str]:
@@ -416,6 +493,9 @@ def text_extras(text: str) -> list[str]:
     tags = sorted(set(re.findall(r"(?<![\w&])#(\w{1,50})", text)))
     if tags:
         out.append("tags: " + ", ".join(f"#{t}" for t in tags))
+    mixed = mixed_scripts(text)
+    if mixed:
+        out.append("⚠ mixed alphabets in: " + ", ".join(ascii(w) for w in mixed[:10]))
     return out
 
 
@@ -440,6 +520,8 @@ def social_ref(v: Any) -> str:
                     and re.fullmatch(r"[A-Za-z0-9_-]{5,40}", parts[2]):
                 return f"threads:{parts[0][1:].lower()}:{parts[2]}"
         if host in ("instagram.com", "www.instagram.com"):
+            if len(parts) >= 3 and parts[1] in ("p", "reel") and re.fullmatch(r"[A-Za-z0-9._]{1,30}", parts[0]):
+                parts = parts[1:]  # newer links: instagram.com/<user>/p/CODE
             if len(parts) >= 2 and parts[0] in ("p", "reel", "reels", "tv") and re.fullmatch(r"[A-Za-z0-9_-]{5,40}", parts[1]):
                 return f"instagram:{parts[1]}"
     raise ToolError(f"not a Threads/Instagram post id or link: {v!r}")

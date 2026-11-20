@@ -256,12 +256,16 @@ def meta_auth(service: MetaService, client: httpx.AsyncClient, home: Path) -> Me
 
 
 async def refresh_meta_tokens(services: Services) -> None:
-    """Long-lived Meta tokens die after 60 days unless refreshed, used or not."""
+    """Long-lived Meta tokens die after 60 days unless refreshed, used or not. Also keeps the stored usernames
+    current (an old one could be taken by someone else)."""
     while True:
         for c in (services.threads_client, services.instagram_client):
             if c is not None:
                 try:
                     await c.auth.refresh_if_due()
+                    await c.auth.update_user(c)
+                except ToolError as e:
+                    log.warning("%s: %s", c.s.name, redact(e))
                 except Exception:
                     log.exception("token refresh failed")
         await asyncio.sleep(6 * 3600)
@@ -432,6 +436,12 @@ def main(argv: list[str] | None = None) -> None:
     home = Path(os.environ.get("AMPI_TOOLS_HOME") or Path.home())
     for handler in logging.getLogger().handlers:  # tokens never reach the journal, tracebacks included
         handler.setFormatter(RedactingFormatter("%(levelname)s %(message)s"))
+
+    def excepthook(kind, value, tb) -> None:  # crashes outside logging (e.g. during a login) are redacted too
+        import traceback
+        sys.stderr.write(redact("".join(traceback.format_exception(kind, value, tb))))
+
+    sys.excepthook = excepthook
     if args.command in ("threads-login", "instagram-login"):
         asyncio.run(_meta_login(home, THREADS if args.command == "threads-login" else INSTAGRAM, args.write))
         return
