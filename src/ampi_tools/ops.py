@@ -966,7 +966,7 @@ async def _prepare_remove(s: Services, a: dict) -> dict:
     for vid in ids:
         matches = [i for i in items if i.get("contentDetails", {}).get("videoId") == vid]
         if not matches:
-            raise ToolError(f"video {vid} isn't in “{p['title']}”")
+            raise ToolError(f"video {vid} isn't among the first 1,000 videos of “{p['title']}”")
         for m in matches:  # a video can be in a playlist more than once
             sn = m.get("snippet", {})
             found.append({"item": m["id"], "id": vid,

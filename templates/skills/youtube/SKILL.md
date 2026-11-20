@@ -23,9 +23,10 @@ youtube playlists      youtube subscriptions      youtube liked [-n 20]
 - **Transcripts can't be fetched** (YouTube blocks that from the server). To summarize a video, use its
   description, chapters and, if the owner wants, top comments, and say that's what the summary is based
   on. Don't look for transcripts some other way.
-- Without the YouTube API being set up, `youtube video` gives title and channel (plus description, date
-  and views if it's among the channel's 15 newest uploads), and `uploads`, `channel`, `feed --channel`
-  work; search, comments, `playlists`, `subscriptions` and `liked` need the API. Say so when that's why.
+- Without the YouTube API being set up, `youtube video` gives title and channel, and `uploads`, `channel`
+  and `feed --channel` work with channel ids or links (`UC…`, `youtube.com/channel/UC…`); `@handles` and
+  search, comments, `playlists`, `subscriptions` and `liked` need the API. Say so when that's why.
+- Playlists are checked up to their first 1,000 videos (adding skips videos already among those).
 - Searching is expensive (about 30 a day): prefer `video`, `uploads` and `feed`. At most 3 searches per
   command. Long output is saved to a file under `youtube/`: read it.
 

@@ -802,9 +802,11 @@ class YouTube:
 
 
 def is_block_page(location: str) -> bool:
-    """A redirect away from YouTube (google.com/sorry, consent.youtube.com, a sign-in page)."""
-    host = (urllib.parse.urlsplit(urllib.parse.urljoin(SITE + "/", location)).hostname or "").lower()
-    return "/sorry/" in location or host not in ("www.youtube.com", "youtube.com", "m.youtube.com")
+    """Google's "unusual traffic" page (google.com/sorry). Consent and sign-in redirects are not blocks: they
+    only mean this one lookup isn't available without the API."""
+    u = urllib.parse.urlsplit(urllib.parse.urljoin(SITE + "/", location))
+    return "/sorry/" in u.path or (u.hostname or "").lower().startswith("ipv4.google.") or \
+        ((u.hostname or "").lower().endswith("google.com") and "sorry" in u.path)
 
 
 def api_error(resp: httpx.Response) -> str:
