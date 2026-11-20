@@ -115,10 +115,16 @@ checks the caller is the `ampitools` user).
   ```
   then `systemctl restart ampi-tools`. Ask Ampi "what are your Telegram permissions?" or "stop sending to Anna
   without asking" (it can remove "always" permissions, never add them).
-- **Even where allowed, Ampi asks first** for: anything a watcher, group run or unknown process wants, links,
-  @mentions, emails, phone numbers or 4+ digits, text starting with "/", channels, groups over 50 members, other
-  people's chats it isn't in, deleting, and editing your own (not Ampi's) messages. At most 10 automatic messages
-  per chat and 20 in total a day; **every automatic message is reported to you** in your chat with Ampi.
+- **Even where allowed, Ampi asks first** for: anything a watcher, group run, run with a forwarded message, or
+  unknown process wants; links, @mentions, emails, phone numbers or numbers of 4+ digits; text starting with "/";
+  people who aren't in your contacts, channels, groups over 50 members (or of unknown size); deleting; and editing
+  your own (not Ampi's) messages. One write per request, at most 10 automatic messages per chat and 20 in total a
+  day; **every automatic message is reported to you** in your chat with Ampi.
+- What is left: inside your private chat, Ampi can still be misled by text it reads there (a pasted email, a
+  web page) into sending a short plain message to a chat you allowed; you see it in the report right away.
+  "Your private chat" means any `owner_ids` account. A command you approved that plants files Claude later
+  loads (e.g. `~/.claude` settings) would also run as your private chat, so be careful approving commands
+  that write outside the workspace.
 - **Never possible**: writing to bots, to chats outside your chat list, to Telegram's login-code chat, or to
   the chats Ampi reads itself (its groups and watched chats: a message from you there would count as your
   command); formatting, files, forwarding, reactions, moderating other people's messages.
@@ -126,8 +132,9 @@ checks the caller is the `ampitools` user).
   spam or flood limits, writing pauses (24 hours after a spam signal) and you're told.
 - Ampi's messages show as "Me (sent by Ampi)" when it reads chats, so it never mistakes them for yours.
 
-Setup (after section 7 and section 8): re-run `deploy/install-tg-reader.sh` and `deploy/install-tools.sh`, then
-add `"Bash(telegram:*)"` to `allowed_tools` in `config.toml` and `systemctl restart claude-assistant`.
+Setup (after sections 7 and 8, with `[tools] approvals = true`): re-run `deploy/install.sh`,
+`deploy/install-tg-reader.sh` and `deploy/install-tools.sh`, then add `"Bash(telegram:*)"` to `allowed_tools` in
+`config.toml` and `systemctl restart claude-assistant`.
 
 ## 8. Todoist and Gmail (optional)
 

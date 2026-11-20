@@ -89,6 +89,7 @@ Done. To connect your accounts (see docs/SETUP.md, section 8):
   4. Check:  sudo -u $TOOLS_USER -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools check'
   5. YouTube (optional, docs/SETUP.md 8b): YOUTUBE_API_KEY in $TOOLS_HOME/env, and/or
      sudo -u $TOOLS_USER -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools youtube-login'
-  6. In $APP_HOME/config.toml: [tools] approvals = true, and add "Bash(todoist:*)", "Bash(gmail:*)" and
-     "Bash(youtube:*)" to allowed_tools; then systemctl restart claude-assistant
+  6. In $APP_HOME/config.toml: [tools] approvals = true, and add "Bash(todoist:*)", "Bash(gmail:*)",
+     "Bash(youtube:*)" (and "Bash(telegram:*)" to write in Telegram as you, docs/SETUP.md 7b) to
+     allowed_tools; then systemctl restart claude-assistant
 EOF

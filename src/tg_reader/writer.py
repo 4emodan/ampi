@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 from datetime import timezone
@@ -29,6 +30,7 @@ from typing import Any
 
 from .reader import Reader, UserError, _kind, _media_note
 
+log = logging.getLogger("tg-reader")
 MAX_TEXT = 4096  # Telegram's limit, in UTF-16 code units
 MAX_IDS = 20
 WRITES_PER_MINUTE = 10
@@ -100,6 +102,7 @@ class Writer:
         self.clock = clock
         self.state_path = Path(state_path) if state_path else None
         self.state = self._load()
+        self._members: dict[int, tuple[float, int | None]] = {}
         reader.ampi_sent = {(int(p), int(i)) for p, i in self.state["sent"]}
 
     # --- persisted limits ---------------------------------------------------------------------
@@ -150,9 +153,13 @@ class Writer:
         self.reader.ampi_sent.add((peer, mid))
         self._save()
 
-    def _telegram_error(self, e: Exception) -> dict:
+    def _telegram_error(self, e: Exception, writing: bool) -> dict:
         name = type(e).__name__
-        if name in SPAM_ERRORS:
+        wait = getattr(e, "seconds", None)
+        if isinstance(wait, int) and wait > 0 and name != "SlowModeWaitError":
+            # The whole account must back off, reads included.
+            self.reader._cooldown_until = max(self.reader._cooldown_until, self.reader.clock() + wait)
+        if name in SPAM_ERRORS and (writing or name == "PeerFloodError"):
             # PeerFlood is Telegram's spam signal: a full day. A flood wait: ten times the asked wait, >= 1 h.
             wait = getattr(e, "seconds", 0) if name != "PeerFloodError" else 0
             pause = SPAM_BLOCK if name == "PeerFloodError" else max(int(wait or 0) * 10, 3600)
@@ -174,7 +181,14 @@ class Writer:
             "MessageDeleteForbiddenError": "Telegram doesn't allow deleting that message",
             "TopicClosedError": "that forum topic is closed",
         }
-        return {"ok": False, "error": messages.get(name, f"Telegram refused: {name}"), "telegram_error": name}
+        code = getattr(e, "code", None)
+        definite = name in messages or name in SPAM_ERRORS or (isinstance(code, int) and code in (400, 403, 406, 420))
+        if writing and not definite:
+            # A network/server error or anything unexpected: the request may have reached Telegram.
+            return {"ok": False, "unknown": True, "error": f"no clear answer from Telegram ({name})",
+                    "telegram_error": name}
+        return {"ok": False, "error": messages.get(name, f"Telegram refused: {name}"), "telegram_error": name,
+                "not_sent": True}
 
     # --- requests -----------------------------------------------------------------------------
 
@@ -191,7 +205,7 @@ class Writer:
         except UserError as e:
             return {"ok": False, "error": str(e), "not_sent": True}
         except Exception as e:  # Telethon errors
-            return self._telegram_error(e)
+            return self._telegram_error(e, writing=request.get("cmd") in ("send", "edit", "delete"))
         finally:
             self.reader._lock.release()
 
@@ -215,9 +229,6 @@ class Writer:
         if cmd == "messages":
             self.reader._admit({"cmd": "messages"})
             return {"ok": True, "messages": await self.messages(peer, d, _msg_ids(request.get("ids")))}
-        if cmd not in ("send", "edit", "delete"):
-            raise UserError(f"unknown command {cmd!r}")
-        self._charge(peer)
         if cmd == "send":
             reply_to = request.get("reply_to")
             return {"ok": True, **await self.send(peer, d, _text(request.get("text")),
@@ -225,7 +236,9 @@ class Writer:
         if cmd == "edit":
             return {"ok": True, **await self.edit(peer, d, _msg_id(request.get("message_id")),
                                                   _text(request.get("text")), request.get("expect"))}
-        return {"ok": True, **await self.delete(peer, d, _msg_ids(request.get("ids")), request.get("expect"))}
+        if cmd == "delete":
+            return {"ok": True, **await self.delete(peer, d, _msg_ids(request.get("ids")), request.get("expect"))}
+        raise UserError(f"unknown command {cmd!r}")
 
     def _allowed(self, peer: int, protected: set[int]) -> int:
         if peer in self.reader.deny or peer == BOTFATHER:
@@ -277,11 +290,34 @@ class Writer:
         if getattr(e, "migrated_to", None) is not None or getattr(e, "deactivated", False):
             raise UserError("that group was upgraded or closed; use the new group's id from `tg-read chats`")
         admin = bool(getattr(e, "creator", False) or getattr(e, "admin_rights", None))
+        members = getattr(e, "participants_count", None)
+        if members is None and kind in ("group", "channel"):
+            members = await self._member_count(d.id, e)
         return {"peer_id": d.id, "title": d.name or "", "kind": kind, "username": getattr(e, "username", None),
-                "members": getattr(e, "participants_count", None), "admin": admin,
-                "forum": bool(getattr(e, "forum", False)),
+                "members": members, "admin": admin, "forum": bool(getattr(e, "forum", False)),
+                "contact": bool(getattr(e, "contact", False)) if kind == "person" else None,
                 "last_date": d.date.astimezone(timezone.utc).isoformat(timespec="minutes") if getattr(d, "date", None)
                 else None}
+
+    async def _member_count(self, peer: int, entity: Any) -> int | None:
+        """Telegram's chat list usually leaves out the size of supergroups and channels: ask once an hour."""
+        cached = self._members.get(peer)
+        if cached and self.clock() - cached[0] < 3600:
+            return cached[1]
+        try:
+            from telethon.tl.functions.channels import GetFullChannelRequest
+            from telethon.tl.functions.messages import GetFullChatRequest
+            if hasattr(entity, "megagroup") or hasattr(entity, "broadcast"):
+                full = await self.client(GetFullChannelRequest(entity))
+            else:
+                full = await self.client(GetFullChatRequest(entity.id))
+            count = getattr(full.full_chat, "participants_count", None)
+            if count is None:
+                count = len(getattr(getattr(full.full_chat, "participants", None), "participants", []) or []) or None
+        except Exception:  # unknown size: treated as "not small", never as allowed
+            return None
+        self._members[peer] = (self.clock(), count)
+        return count
 
     async def _entity(self, peer: int, d: Any) -> Any:
         return "me" if d is None else d.entity
@@ -296,9 +332,13 @@ class Writer:
             (target,) = await self.messages(peer, d, [reply_to])
             if not target["exists"]:
                 raise UserError(f"message #{reply_to} isn't in that chat (any more)")
-        msg = await self.client.send_message(await self._entity(peer, d), text, reply_to=reply_to,
-                                             parse_mode=None, link_preview=False)
-        self._record_sent(peer, msg.id)
+        entity = await self._entity(peer, d)
+        self._charge(peer)  # only now: refused or invalid requests don't use up the budget
+        msg = await self.client.send_message(entity, text, reply_to=reply_to, parse_mode=None, link_preview=False)
+        try:
+            self._record_sent(peer, msg.id)
+        except Exception:  # the message went out; bookkeeping trouble must not make it look failed
+            log.exception("could not record a sent message")
         return {"message_id": msg.id, "date": snapshot(peer, msg, msg.id)["date"]}
 
     async def _own_unchanged(self, peer: int, d: Any, ids: list[int], expect: Any, *, text_only: bool) -> None:
@@ -316,13 +356,16 @@ class Writer:
 
     async def edit(self, peer: int, d: Any, mid: int, text: str, expect: Any) -> dict:
         await self._own_unchanged(peer, d, [mid], expect, text_only=True)
-        msg = await self.client.edit_message(await self._entity(peer, d), mid, text, parse_mode=None,
-                                             link_preview=False)
+        entity = await self._entity(peer, d)
+        self._charge(peer)
+        msg = await self.client.edit_message(entity, mid, text, parse_mode=None, link_preview=False)
         return {"message_id": mid, "hash": message_hash(peer, msg) if msg is not None else None}
 
     async def delete(self, peer: int, d: Any, ids: list[int], expect: Any) -> dict:
         await self._own_unchanged(peer, d, ids, expect, text_only=False)
-        affected = await self.client.delete_messages(await self._entity(peer, d), ids, revoke=True)
+        entity = await self._entity(peer, d)
+        self._charge(peer)
+        affected = await self.client.delete_messages(entity, ids, revoke=True)
         count = sum(getattr(a, "pts_count", 0) or 0 for a in (affected or []))
         if count == 0:
             raise UserError("Telegram deleted nothing (the messages may already be gone)")

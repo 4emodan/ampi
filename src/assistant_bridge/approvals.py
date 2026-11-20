@@ -102,12 +102,15 @@ class ApprovalRelay:
         ids, complete = self.protected()
         resp = await self.ask(self.socket, {"cmd": "telegram.protect", "ids": ids, "complete": complete}, timeout=10)
         if resp.get("ok"):
-            self._protected_at = now if complete else None  # incomplete: try again next tick
+            # Incomplete (a Telegram watcher hasn't found its chat yet): try again in a minute.
+            self._protected_at = now if complete else now - PROTECT_EVERY + 60
 
     async def send_notices(self, notices: list[dict]) -> None:
+        """Reports of automatic Telegram writes etc. A notice is acknowledged only once it was really sent."""
         for n in notices:
             try:
-                await self.bot.notify(fit(str(n.get("text", "")), MAX_MESSAGE))
+                await self.bot.api.send_message(self.bot.profile.owner_chat_id,
+                                                fit(str(n.get("text", "")), MAX_MESSAGE))
             except TelegramError as e:
                 log.warning("could not send notice #%s: %s", n.get("id"), e)
                 return  # try again next tick

@@ -41,7 +41,7 @@ from . import ops_social
 from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact
 from .ops_telegram import (
     TG_PENDING_CAP, WRITE_OPS, RunRegistry, TelegramRules, TelegramSide, TelegramStore, TgWriterClient,
-    check_approval_size, grant_offer, needs_approval,
+    check_approval_size, grant_offer, needs_approval, note_requested,
 )
 from .youtube import SCOPE_READ, SCOPE_WRITE, YouTube
 
@@ -127,6 +127,7 @@ class Daemon:
         self.policy = policy
         self.trusted = trusted
         self.runs = runs or RunRegistry()
+        self._tg_lock = asyncio.Lock()
 
     @property
     def tg_store(self) -> TelegramStore | None:
@@ -167,8 +168,9 @@ class Daemon:
                 )
             if cmd == "runs.register":
                 origin = request.get("origin")
-                if not isinstance(origin, str) or not (origin == "private" or origin.startswith(("group:", "watcher:"))):
-                    raise ToolError("origin must be private, group:NAME or watcher:NAME")
+                if not isinstance(origin, str) or not (
+                        origin == "private" or origin.startswith(("group:", "watcher:", "forwarded:"))):
+                    raise ToolError("origin must be private, group:NAME, watcher:NAME or forwarded:…")
                 self.runs.register(_int(request.get("pid")), origin[:100])
                 return {"ok": True}
             if cmd == "runs.unregister":
@@ -188,7 +190,7 @@ class Daemon:
             log.exception("request failed")
             return {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
 
-    async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "private") -> dict:
+    async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "unknown") -> dict:
         """`origin` is where the request really came from ("private", "group:…", "watcher:…" or "unknown");
         `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
         ops = await pre_resolve(self.services, ops)
@@ -196,10 +198,13 @@ class Daemon:
             if o["op"] == "telegram.revoke":
                 o["args"]["origin_checked"] = origin
         telegram = [o for o in ops if o["op"] in WRITE_OPS]
+        if len(telegram) > 1:  # caps and the duplicate guard are per message: one per request
+            raise ToolError("one Telegram write per request (send them one at a time)")
         critical = False
         for o in ops:
             if o["op"] in WRITE_OPS:
-                if o["op"] in self.policy.require_approval or needs_approval(self.services, o, origin):
+                ask = needs_approval(self.services, o, origin)  # also refuses "never" chats
+                if ask or o["op"] in self.policy.require_approval:
                     critical = True
             elif self.policy.critical(o["op"]) or await shares_with_others(self.services, o):
                 critical = True
@@ -215,8 +220,8 @@ class Daemon:
             ops = await prepare(self.services, ops)
             summary = await summarize(self.services, ops, self.policy)
             who = None
-            if origin.startswith(("group:", "watcher:")):
-                who = origin
+            if origin.startswith(("group:", "watcher:", "forwarded:")):
+                who = "a forwarded message in your chat" if origin.startswith("forwarded:") else origin
             elif origin == "unknown":
                 if isinstance(claimed_origin, str) and claimed_origin.strip():
                     who = claimed_origin
@@ -229,6 +234,9 @@ class Daemon:
             grants = grant_offer(self.services, ops, origin) if telegram else None
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
             approval_id = self.approvals.add(ops, summary, reason, grants)
+            for o in telegram:
+                if o["op"] == "telegram.send":  # the duplicate guard also sees requests that are waiting
+                    note_requested(self.services, o)
             log.info("approval #%s requested: %s", approval_id, [o["op"] for o in ops])
             return {
                 "ok": True,
@@ -239,9 +247,13 @@ class Daemon:
                     "owner briefly what you asked for; don't ask again or try another way.\n" + summary
                 ),
             }
-        for o in telegram:
-            o["args"]["resolved"]["auto"] = True
-        ok, text, extra = await execute(self.services, ops)
+        if telegram:
+            for o in telegram:
+                o["args"]["resolved"]["auto"] = True
+            async with self._tg_lock:  # one automatic write at a time, so the caps can't be raced past
+                ok, text, extra = await execute(self.services, ops)
+        else:
+            ok, text, extra = await execute(self.services, ops)
         return {"ok": ok, "text": text, **extra} if ok else {"ok": False, "error": text}
 
     async def decide(self, approval_id: int, approve: bool, nonce: str, message_id: int | None,
@@ -263,10 +275,6 @@ class Daemon:
         if not approve:
             log.info("approval #%s rejected", approval_id)
             return {"ok": True, "status": "rejected", "text": "Rejected; nothing was done."}
-        if always and self.tg_store:
-            for g in grants:  # from the stored request, never from the button
-                self.tg_store.grant(int(g["peer_id"]), g["action"], g["title"])
-            log.info("approval #%s approved with a standing permission", approval_id)
         ok, text, status = False, "interrupted", "failed"
         try:
             ok, text, _ = await execute(self.services, json.loads(item["ops"]))
@@ -274,6 +282,11 @@ class Daemon:
         finally:
             self.approvals.finish(approval_id, status, text)
             log.info("approval #%s %s", approval_id, status)
+        if always and ok and self.tg_store:
+            for g in grants:  # from the stored request, never from the button
+                self.tg_store.grant(int(g["peer_id"]), g["action"], g["title"])
+            text += f"\nFrom now on (30 days) sending there doesn't need your approval: {grants[0]['title']}."
+            log.info("approval #%s approved with a standing permission", approval_id)
         return {"ok": True, "status": status, "text": text}
 
     def list_text(self) -> str:

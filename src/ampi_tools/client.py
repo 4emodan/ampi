@@ -464,6 +464,7 @@ def instagram_main(argv: list[str] | None = None) -> int:
 # --- telegram: writing as the owner (through ampi-tools) ----------------------------------------------
 
 DRAFT_MAX_AGE = 600  # a draft file must have been written in the last 10 minutes
+TELEGRAM_TIMEOUT = 110
 
 
 def telegram_parser() -> argparse.ArgumentParser:
@@ -525,7 +526,23 @@ def telegram_ops(a: argparse.Namespace) -> list[dict]:
 
 
 def telegram_main(argv: list[str] | None = None) -> int:
-    return _main("telegram", telegram_parser(), telegram_ops, argv)
+    """Like the other commands, but the whole call stays under Claude Code's 120 s Bash limit, and a timeout
+    says plainly that a write may have gone through."""
+    args = telegram_parser().parse_args(argv)
+    if args.cmd == "approvals":
+        response = request({"cmd": "approvals.list"})
+    else:
+        response = request({"cmd": "run", "ops": telegram_ops(args), "reason": args.reason,
+                            "origin": os.environ.get("AMPI_ORIGIN") or None}, timeout=TELEGRAM_TIMEOUT)
+        if not response.get("ok") and "didn't answer" in str(response.get("error", "")) and \
+                args.cmd in ("send", "edit", "delete"):
+            response["error"] = ("no answer in time: the outcome is unknown and it MAY have gone through. Check "
+                                 f"`tg-read history {args.chat} -n 5` before trying again")
+    if not response.get("ok"):
+        print(f"telegram: {response.get('error', 'failed')}", file=sys.stderr)
+        return 1
+    print(deliver(response.get("text", "") or "Done.", None, f"telegram-{args.cmd}", save_dir=Path("telegram")))
+    return 0
 
 
 # --- browse: the sandboxed web browser (ampi-browser) -------------------------------------------------

@@ -32,7 +32,7 @@ def run(coro):
 
 # --- a fake Telethon --------------------------------------------------------------------------------
 
-ANNA = NS(id=11, first_name="Anna", username="anna_k", bot=False)
+ANNA = NS(id=11, first_name="Anna", username="anna_k", bot=False, contact=True)
 FRIENDS = NS(id=22, title="Friends", username=None, participants_count=12, bot=False)
 BIG = NS(id=33, title="Big group", username=None, participants_count=5000, bot=False)
 NEWS = NS(id=44, title="News", username="newsch", broadcast=True, bot=False, admin_rights=True)
@@ -500,7 +500,7 @@ def test_telegram_requests_expire_after_a_day_and_stuck_ones_are_reported(tmp_pa
 
 
 @pytest.mark.parametrize("text,ok", [
-    ("Hello, Anna! 😀", True), ("family 👨‍👩‍👧 and 1️⃣ ❤️", True), ("line one\n  indented", True),
+    ("Hello, Anna! 😀", True), ("family 👨‍👩‍👧 and 1️⃣ ❤️", True), ("line one\nline two", True), ("line one\n  indented", False), ("two  spaces", False), ("ok\U000e0100\U000e0101", False), ("ok\ufe00", False), ("ok\u180b", False),
     ("zero​width", False), ("bidi‮trick", False), ("nbsp here", False), ("tab\there", False),
     ("café", False), ("", False),
 ])
@@ -569,3 +569,105 @@ def test_relay_shows_the_always_button_on_its_own_row_and_parses_answers():
         "ap:3:ab:a"
     assert "also allows: send in “Anna K”" in request_text(item)
     assert len(buttons_for({"id": 3, "nonce": "ab", "summary": "s"})) == 1
+
+
+# --- review round 1 ----------------------------------------------------------------------------------
+
+def test_one_telegram_write_per_request(tgd):
+    daemon, client, _ = tgd(rules=ALLOW_ANNA)
+    ops = [{"op": "telegram.send", "args": {"chat": "Anna K", "text": f"hello {w}"}} for w in ("one", "two")]
+    reply = run(daemon.handle({"cmd": "run", "ops": ops}, 501))
+    assert "one Telegram write per request" in reply["error"] and client.sent == []
+
+
+def test_errors_that_may_have_reached_telegram_are_unknown_not_failed(tmp_path):
+    writer, client = make_writer(tmp_path)
+    client.fail = ConnectionError("reset")
+    reply = w(writer, cmd="send", peer_id=ANNA.id, text="x")
+    assert reply.get("unknown") and not reply.get("not_sent")
+    refused = type("ChatWriteForbiddenError", (Exception,), {})
+    client.fail = refused("no")
+    reply = w(writer, cmd="send", peer_id=ANNA.id, text="y")
+    assert reply.get("not_sent") and "can't write" in reply["error"]
+
+
+def test_refused_requests_dont_use_the_write_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr("tg_reader.writer.WRITES_PER_MINUTE", 1)
+    writer, client = make_writer(tmp_path)
+    assert "isn't yours" in w(writer, cmd="edit", peer_id=ANNA.id, message_id=6, text="x", expect={})["error"]
+    assert w(writer, cmd="send", peer_id=ANNA.id, text="still allowed")["ok"]
+
+
+def test_strangers_never_get_automatic_messages_or_always(tgd, monkeypatch):
+    monkeypatch.setattr(ANNA, "contact", False)
+    daemon, client, _ = tgd(rules=ALLOW_ANNA)
+    assert tell(daemon, "telegram.send", chat="Anna K", text="see you at noon").get("approval")
+    (item,) = pending(daemon)["items"]
+    assert "NOT in your contacts" in item["summary"] and "grant_label" not in item
+
+
+def test_chat_titles_cant_fake_the_approval_text():
+    line = tg.chat_line({"kind": "group", "peer_id": -100123, "title": 'Mom" (person, id 1) “x”', "members": 3000})
+    assert line.startswith("[group id -100123, 3000 members] named:") and '"' not in line and "(" not in line
+
+
+def test_never_beats_require_approval(tgd):
+    daemon, _, _ = tgd(rules={"default": "never"}, policy=Policy(require_approval=frozenset({"telegram.send"})))
+    assert "doesn't allow" in tell(daemon, "telegram.send", chat="Anna K", text="hi")["error"]
+
+
+def test_pending_requests_count_for_the_duplicate_guard(tgd):
+    daemon, _, _ = tgd()
+    assert tell(daemon, "telegram.send", chat="Anna K", text="on my way").get("approval")
+    assert "last 10 minutes" in tell(daemon, "telegram.send", chat="Anna K", text="on my way")["error"]
+
+
+@pytest.mark.parametrize("text", ["12 345", "1.234.567", "see сайт.рф", "code 12-34-56"])
+def test_more_risky_text_asks(text):
+    assert not tg.auto_safe(text)
+
+
+def test_notices_are_acknowledged_only_after_they_were_sent():
+    from assistant_bridge.approvals import ApprovalRelay
+    from assistant_bridge.telegram import TelegramError
+
+    class Api:
+        def __init__(self):
+            self.fail, self.sent = True, []
+
+        async def send_message(self, chat_id, text, thread_id=None, parse_mode=None):
+            if self.fail:
+                raise TelegramError("sendMessage", "down")
+            self.sent.append(text)
+
+    acks = []
+
+    async def ask(path, payload, timeout=300):
+        acks.append(payload)
+        return {"ok": True}
+
+    bot = NS(api=Api(), profile=NS(owner_chat_id=1))
+    relay = ApprovalRelay(bot, "sock", ask)
+    run(relay.send_notices([{"id": 7, "text": "Sent as you"}]))
+    assert acks == []
+    bot.api.fail = False
+    run(relay.send_notices([{"id": 7, "text": "Sent as you"}]))
+    assert acks == [{"cmd": "notices.ack", "id": 7}] and bot.api.sent == ["Sent as you"]
+
+
+def test_runs_are_registered_for_every_claude_process(tmp_path, fake_claude_env):
+    from conftest import FAKE_CLAUDE
+    from assistant_bridge.claude_runner import ClaudeRunner, clean_env
+    runner = ClaudeRunner(FAKE_CLAUDE, timeout_seconds=30, max_concurrent=1, env=clean_env(os.environ, []))
+    seen = []
+
+    async def spawn(pid, origin):
+        seen.append(("spawn", origin))
+
+    async def gone(pid):
+        seen.append(("exit",))
+
+    runner.on_spawn, runner.on_exit = spawn, gone
+    run(runner.run_turn("hi", cwd=tmp_path, session_id="00000000-0000-0000-0000-000000000002", started=False,
+                        model=None, allowed_tools=["Read"], origin="group:x"))
+    assert seen[0] == ("spawn", "group:x") and seen[-1] == ("exit",)

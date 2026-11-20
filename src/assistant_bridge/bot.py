@@ -331,7 +331,10 @@ class ProfileBot:
                         allowed_tools=allowed,
                         append_system_prompt=system_prompt,
                         extra_args=extra_args,
-                        origin=f"group:{group.name}" if group is not None else None,
+                        # A forwarded message in the private chat is someone else's text: treat that run
+                        # like outside content (e.g. no Telegram writes without asking).
+                        origin=f"group:{group.name}" if group is not None else (
+                            "forwarded:private" if any(m.get("forward_origin") for m, _ in bodies) else None),
                         extra_env=extra_env,
                     )
             except asyncio.CancelledError:

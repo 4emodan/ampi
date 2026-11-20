@@ -172,7 +172,9 @@ async def serve(config: Config) -> None:
             socket_path = config.tools.socket
 
             async def on_spawn(pid: int, origin: str) -> None:
-                await ask(socket_path, {"cmd": "runs.register", "pid": pid, "origin": origin}, timeout=10)
+                reply = await ask(socket_path, {"cmd": "runs.register", "pid": pid, "origin": origin}, timeout=10)
+                if not reply.get("ok"):  # the run then counts as "unknown" (everything asks the owner)
+                    log.warning("ampi-tools refused to register run %s: %s", pid, reply.get("error"))
 
             async def on_exit(pid: int) -> None:
                 await ask(socket_path, {"cmd": "runs.unregister", "pid": pid}, timeout=10)

@@ -22,19 +22,18 @@ import os
 import re
 import sqlite3
 import time
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import ops as _ops
-from .meta import exact_block, mixed_scripts, text_extras
+from .meta import check_text, exact_block, mixed_scripts, text_extras
 from .ops import FIELDS, OPS, PRE_RESOLVE, Op, Services, _choice, _text, clean
 from .todoist import ToolError
 
 DEFAULT_SOCKET = "/run/tg-writer/tg-write.sock"
-WRITER_TIMEOUT = 60
+WRITER_TIMEOUT = 45  # resolve (25) + messages (25) + write (45) stays under the client's 110 s
 MAX_TELEGRAM = 4096          # Telegram's own limit (UTF-16 units): automatic writes
 MAX_APPROVAL_SEND = 3000     # what still fits in one approval message
 MAX_APPROVAL_EDIT = 2000     # the old text is shown too
@@ -74,44 +73,23 @@ FIELDS.update({
 
 # --- text ---------------------------------------------------------------------------------------
 
-_EMOJI_GLUE = {"‍", "️", "⃣"}
-
-
 def check_message(text: str) -> str:
-    """What gets sent must be what the owner reads: ordinary characters, spaces and line breaks; nothing
-    invisible, no control or private-use characters (emoji joiners only inside emoji)."""
+    """What gets sent must be exactly what the owner reads, with nowhere to hide data: the same rules as
+    public posts (meta.check_text: plain characters, single spaces, no invisible or variation characters
+    except what emoji need, NFC), plus Telegram's own length limit."""
     if not isinstance(text, str) or not text.strip():
         raise ToolError("the message is empty")
-    if unicodedata.normalize("NFC", text) != text:
-        raise ToolError("the text has decomposed characters (use the normal composed form)")
-    for i, ch in enumerate(text):
-        if ch in (" ", "\n"):
-            continue
-        cat = unicodedata.category(ch)
-        if ch in _EMOJI_GLUE:
-            prev = text[i - 1] if i else ""
-            if prev and (prev in _EMOJI_GLUE or unicodedata.category(prev) in ("So", "Sk", "Nd")
-                         or ord(prev) >= 0x1F000):
-                continue
-            raise ToolError("the text has an invisible joiner outside an emoji")
-        if cat[0] in "LMNPS" and ch not in _ops_sneaky():
-            continue
-        raise ToolError(f"the text has a character that isn't shown normally (U+{ord(ch):04X}); use plain text")
+    check_text(text, 100_000, False)
     if utf16_len(text) > MAX_TELEGRAM:
         raise ToolError(f"the message is too long for Telegram ({utf16_len(text)} characters, max {MAX_TELEGRAM})")
     return text
 
 
-def _ops_sneaky() -> set[str]:
-    from .meta import _SNEAKY
-    return _SNEAKY
-
-
 _RISKY = re.compile(
     r"(?:[a-z][a-z0-9+.-]*://|www\.|tg:|t\.me|telegram\.(?:me|dog)|"   # links and Telegram deep links
-    r"\b[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}\b|"                            # bare domains (apps link them)
+    r"\w[\w-]*(?:\.[\w-]+)*\.[^\W\d_]{2,}|"                            # bare domains, any alphabet (сайт.рф)
     r"[\w.+-]+@[\w-]+\.[\w.]+|(?<![\w.])@\w{2,}|"                      # emails, @mentions
-    r"\d{4,}|\d[\d \-]{6,}\d|\+\d)",                                    # codes, phone numbers
+    r"\d{4,}|\d[\d .,'\-]{2,}\d|\+\d)",                                  # codes, numbers with separators, phones
     re.IGNORECASE)
 
 
@@ -366,7 +344,7 @@ def _tg(s: Services) -> TelegramSide:
 
 
 async def _ask(s: Services, payload: dict) -> dict:
-    reply = await _tg(s).client.call(payload)
+    reply = await _tg(s).client.call(payload, timeout=25)  # lookups only; writes go through client.call
     if not reply.get("ok"):
         raise ToolError(reply.get("error", "Telegram refused"))
     return reply
@@ -386,9 +364,11 @@ def _check_never(side: TelegramSide, chat: dict) -> None:
 
 async def _resolve(s: Services, a: dict, op: str) -> dict:
     side = _tg(s)
+    if not a.get("chat"):
+        raise ToolError("which chat? Give its exact name, @username, id (from `tg-read chats`) or \"me\"")
     chat = await _ask(s, {"cmd": "resolve", "chat": a["chat"]})
     chat = {k: chat.get(k) for k in ("peer_id", "title", "kind", "username", "members", "admin", "forum",
-                                     "last_date")}
+                                     "last_date", "contact")}
     _check_never(side, chat)
     r: dict[str, Any] = {"chat": chat, "requested": time.time()}
     if op in ("telegram.send", "telegram.edit"):
@@ -448,8 +428,10 @@ def _allowed(side: TelegramSide, chat: dict, action: str) -> bool:
 
 
 def auto_eligible_chat(chat: dict) -> bool:
-    if chat.get("kind") in ("person", "saved"):
+    if chat.get("kind") == "saved":
         return True
+    if chat.get("kind") == "person":
+        return chat.get("contact") is True  # not strangers who happened to write to the owner
     members = chat.get("members")
     return chat.get("kind") == "group" and isinstance(members, int) and 0 < members <= AUTO_GROUP_MAX_MEMBERS
 
@@ -481,7 +463,14 @@ def grant_offer(s: Services, ops: list[dict], origin: str) -> list[dict] | None:
     chat = ops[0]["args"]["resolved"]["chat"]
     if not auto_eligible_chat(chat):
         return None
-    return [{"peer_id": chat["peer_id"], "action": "send", "title": clean(chat.get("title"), 60)}]
+    return [{"peer_id": chat["peer_id"], "action": "send", "title": safe_title(chat.get("title"))}]
+
+
+def note_requested(s: Services, o: dict) -> None:
+    r = o["args"]["resolved"]
+    chat = r["chat"]
+    _tg(s).store.log_write(chat["peer_id"], chat.get("title") or "", "send", [],
+                           text_hash(chat["peer_id"], r["text"]), False, "requested")
 
 
 def check_approval_size(o: dict) -> None:
@@ -495,23 +484,36 @@ def check_approval_size(o: dict) -> None:
 
 # --- the approval text ------------------------------------------------------------------------------
 
+_TITLE_TRICKS = re.compile(r"[\"'“”‘’«»„‟‹›()\[\]{}<>（）【】]")
+
+
+def safe_title(title: Any, limit: int = 60) -> str:
+    """Chat titles are chosen by other people: no quotes or brackets that could fake the text around them."""
+    return clean(_TITLE_TRICKS.sub(" ", str(title or "")), limit) or "(no name)"
+
+
 def chat_line(chat: dict) -> str:
-    title = clean(chat.get("title") or "", 80)
     if chat.get("kind") == "saved":
         return "your Saved Messages"
-    bits = [chat.get("kind") or "chat", f"id {chat['peer_id']}"]
+    kind = chat.get("kind") or "chat"
+    if kind == "person":
+        kind = "person in your contacts" if chat.get("contact") else "person NOT in your contacts"
+    bits = [f"{kind} id {chat['peer_id']}"]
     if chat.get("username"):
         bits.append("@" + clean(chat["username"], 40))
     members = chat.get("members")
+    public = "PUBLIC " if chat.get("username") else ""
     if chat.get("kind") == "channel":
-        bits.append(f"PUBLIC to {members} subscribers" if members else "PUBLIC channel")
+        bits.append(f"{public}channel, {members} subscribers" if members else f"{public}channel".strip())
     elif members:
-        bits.append(f"{members} members")
+        bits.append(f"{public}group, {members} members" if public else f"{members} members")
+    elif chat.get("kind") == "group":
+        bits.append("member count unknown" + (", PUBLIC" if public else ""))
     if chat.get("admin"):
         bits.append("you're an admin")
     if chat.get("forum"):
         bits.append("forum: goes to the General topic unless it's a reply")
-    return f"“{title}” ({', '.join(bits)})"
+    return f"[{', '.join(bits)}] named: {safe_title(chat.get('title'))}"
 
 
 def _snippet(snap: dict, limit: int = 120) -> str:
@@ -567,11 +569,22 @@ def _blocked(side: TelegramSide, reply: dict) -> None:
                           f"stopped writing until {reply.get('blocked_until')}.")
 
 
+def _recheck_auto(side: TelegramSide, chat: dict, thash: str | None) -> None:
+    """Right before an automatic write: the caps and the duplicate guard again (other runs may have written
+    since this request was checked)."""
+    if side.store.auto_count() >= AUTO_PER_DAY or side.store.auto_count(chat["peer_id"]) >= AUTO_PER_CHAT_DAY:
+        raise ToolError("the daily limit of messages without asking is reached; ask the owner instead")
+    if thash and side.store.duplicate(chat["peer_id"], thash):
+        raise ToolError("the same text went to that chat in the last 10 minutes; check `tg-read history`")
+
+
 async def tg_send(s: Services, a: dict) -> str:
     side, r = _tg(s), a["resolved"]
     chat, auto = r["chat"], bool(r.get("auto"))
     _check_never(side, chat)
     thash = text_hash(chat["peer_id"], r["text"])
+    if auto:
+        _recheck_auto(side, chat, thash)
     payload = {"cmd": "send", "peer_id": chat["peer_id"], "text": r["text"]}
     if r.get("reply"):
         payload["reply_to"] = r["reply"]["id"]
@@ -594,6 +607,8 @@ async def tg_edit(s: Services, a: dict) -> str:
     side, r = _tg(s), a["resolved"]
     chat, auto, old = r["chat"], bool(r.get("auto")), r["message"]
     _check_never(side, chat)
+    if auto:
+        _recheck_auto(side, chat, None)
     reply = await side.client.call({"cmd": "edit", "peer_id": chat["peer_id"], "message_id": old["id"],
                                     "text": r["text"], "expect": {str(old["id"]): old["hash"]}})
     thash = text_hash(chat["peer_id"], r["text"])
@@ -638,7 +653,7 @@ async def tg_permissions(s: Services, a: dict) -> str:
         lines.append(f"- chat {key}: never (config)")
     for g in side.store.grants():
         until = datetime.fromtimestamp(g["expires"], timezone.utc).strftime("%Y-%m-%d")
-        lines.append(f"- “{clean(g['title'], 60)}” (id {g['peer_id']}): {g['action']} without asking until {until} "
+        lines.append(f"- {safe_title(g['title'])} (id {g['peer_id']}): {g['action']} without asking until {until} "
                      "(owner tapped “always”)")
     lines.append(f"Without asking only from the owner's private chat, only plain text (no links, @mentions, long "
                  f"numbers or /commands), to people, Saved Messages or groups of up to {AUTO_GROUP_MAX_MEMBERS} "
@@ -655,7 +670,7 @@ async def tg_log(s: Services, a: dict) -> str:
     for w in rows:
         when = datetime.fromtimestamp(w["ts"], timezone.utc).strftime("%Y-%m-%d %H:%M")
         ids = ", ".join(f"#{i}" for i in json.loads(w["message_ids"] or "[]"))
-        out.append(f"- {when} UTC {w['action']} in “{clean(w['title'], 60)}” {ids} · "
+        out.append(f"- {when} UTC {w['action']} in {safe_title(w['title'])} {ids} · "
                    f"{'automatic' if w['auto'] else 'approved'} · {w['status']}")
     return "\n".join(out)
 
@@ -664,9 +679,14 @@ async def tg_revoke(s: Services, a: dict) -> str:
     side = _tg(s)
     if a.get("origin_checked") != "private":
         raise ToolError("permissions can only be changed from the owner's private chat")
-    chat = (await _ask(s, {"cmd": "resolve", "chat": a.get("chat", "")}))
-    n = side.store.revoke(chat["peer_id"], a.get("action"))
-    return f"Removed {n} permission(s) for “{clean(chat.get('title'), 60)}”." if n else \
+    want = (a.get("chat") or "").strip()
+    if re.fullmatch(r"-?\d{1,20}", want):  # by id straight from the list (works even if the chat is gone)
+        peer, title = int(want), want
+    else:
+        chat = await _ask(s, {"cmd": "resolve", "chat": want})
+        peer, title = chat["peer_id"], chat.get("title") or want
+    n = side.store.revoke(peer, a.get("action"))
+    return f"Removed {n} permission(s) for {safe_title(title)}." if n else \
         "There was no tapped permission for that chat (config permissions are changed on the server)."
 
 

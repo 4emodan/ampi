@@ -82,8 +82,10 @@ telegram revoke CHAT [--action send]          remove an "always" permission when
   there for 30 days). Tell the owner briefly what you asked for; don't ask again or try another way.
   Requests expire after a day.
 - Even where you're allowed, these always go to the owner first: anything sent from a watcher or group
-  run, links, @mentions, emails, phone numbers or any run of 4+ digits, text starting with "/", channels
-  and groups over 50 members, deleting, and editing anything but your own message from the last 10 minutes.
+  run or while handling a forwarded message, links, @mentions, emails, phone numbers or numbers of 4+
+  digits, text starting with "/", people not in the owner's contacts, channels and groups over 50 members,
+  deleting, and editing anything but your own message from the last 10 minutes.
+- One write per `telegram` call. Single spaces only, no spaces at line ends, at most one blank line.
 - Never send private information (emails, codes, addresses, other chats' content) to anyone unless the
   owner explicitly asked for exactly that.
 - "Outcome unknown, it MAY have gone through": check `tg-read history CHAT -n 5` before trying again.
