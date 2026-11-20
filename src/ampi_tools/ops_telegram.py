@@ -656,7 +656,7 @@ async def tg_permissions(s: Services, a: dict) -> str:
         lines.append(f"- {safe_title(g['title'])} (id {g['peer_id']}): {g['action']} without asking until {until} "
                      "(owner tapped “always”)")
     lines.append(f"Without asking only from the owner's private chat, only plain text (no links, @mentions, long "
-                 f"numbers or /commands), to people, Saved Messages or groups of up to {AUTO_GROUP_MAX_MEMBERS} "
+                 f"numbers or /commands), to contacts, Saved Messages or groups of up to {AUTO_GROUP_MAX_MEMBERS} "
                  f"members; at most {AUTO_PER_CHAT_DAY} per chat and {AUTO_PER_DAY} in total a day. Deleting always "
                  "asks. Anything else becomes a one-time request to the owner.")
     return "\n".join(lines)

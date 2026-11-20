@@ -266,7 +266,10 @@ class Writer:
         if s.lower() in ("me", "saved", "saved messages") or s == str(self.self_id):
             return {"peer_id": self.self_id, "title": "Saved Messages", "kind": "saved", "username": None,
                     "members": None, "admin": True, "forum": False, "last_date": None}
-        dialogs = await self.reader.dialogs()
+        dialogs = [d for d in await self.reader.dialogs()  # never suggest chats that are off limits
+                   if d.id not in self.reader.deny and d.id != BOTFATHER]
+        if s.lstrip("-").isdigit() and int(s) in self.reader.deny | {BOTFATHER}:
+            raise UserError("that chat is off limits")
         if s.lstrip("-").isdigit():
             matches = [d for d in dialogs if d.id == int(s)]
         elif s.startswith("@"):
@@ -275,7 +278,7 @@ class Writer:
         else:
             matches = [d for d in dialogs if (d.name or "").strip().lower() == s.lower()]
             if not matches:
-                close = [d for d in dialogs if s.lower() in (d.name or "").lower()][:10]
+                close = [d for d in dialogs if s.lower() in (d.name or "").lower() and _kind(d) != "bot"][:10]
                 hint = "".join(f"\n- {d.name} ({_kind(d)}, id {d.id})" for d in close)
                 raise UserError(f"no chat is named exactly {chat!r}" + (f"; did you mean (use the id):{hint}" if
                                                                          hint else "; see `tg-read chats`"))
