@@ -282,7 +282,8 @@ BOT_STRONG = re.compile(
     r"just a moment\.\.\.|attention required!? \| cloudflare|cf-chl-|checking your browser before accessing|"
     r"verify(ing)? you are (a )?human|unusual traffic from your computer network|"
     r"confirm (that )?you'?re not a (bot|robot)|enable javascript and cookies to continue|"
-    r"ddos protection by|performing security verification",
+    r"ddos protection by|performing security verification|blocked by network security|"
+    r"you('ve| have) been blocked|why have i been blocked|pardon our interruption",
     re.IGNORECASE)
 BOT_WEAK = re.compile(r"are you a robot|not a robot|access denied|request blocked|please verify|security check",
                       re.IGNORECASE)
@@ -298,6 +299,15 @@ def clean(text: str) -> str:
     text = unicodedata.normalize("NFC", text).replace(" ", "\n").replace(" ", "\n\n")
     text = "".join(c for c in text if c in "\n\t" or c in KEEP_INVISIBLE or not _unsafe_char(c))
     text = re.sub(r"[ \t]+\n", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def tidy_page(text: str) -> str:
+    """Drops what only costs tokens: embedded images (base64 data: URIs) and <style> blocks that some
+    pages leave in their no-JavaScript fallback text."""
+    text = re.sub(r"!\[([^\]\n]{0,200})\]\(data:[^)\s]*\)", lambda m: f"[image: {m[1]}]" if m[1] else "", text)
+    text = re.sub(r"data:[a-z]+/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]{100,}", "[embedded data]", text)
+    text = re.sub(r"<style\b[^>]*>.*?</style>", "", text, flags=re.S | re.I)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -422,7 +432,7 @@ def _handle(req: object, run) -> dict:
         if not body:
             body = "(no links" + (" matching that" if match else "") + ")"
     else:
-        body, title = clean(raw), None
+        body, title = tidy_page(clean(raw)), None
     if not body.strip():
         log(f"{op} {host} empty in {took:.1f}s")
         return {"ok": False, "error": "no readable text (the page needs features this browser lacks, "

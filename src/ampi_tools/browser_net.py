@@ -89,12 +89,13 @@ def ruleset(uid: int, own4: list[str], own6: list[str], resolvers: list[str]) ->
         "\t\ttype filter hook output priority 0; policy accept;",
         *dns,
         # Any address of this machine, including ones added after boot (the sets below are a snapshot).
-        f"\t\tmeta skuid {uid} fib daddr type local drop",
-        f"\t\tmeta skuid {uid} ip daddr @deny4 drop",
-        f"\t\tmeta skuid {uid} ip6 daddr @deny6 drop",
+        # reject (not drop), so a blocked page fails at once instead of waiting for the timeout
+        f"\t\tmeta skuid {uid} fib daddr type local reject with icmpx admin-prohibited",
+        f"\t\tmeta skuid {uid} ip daddr @deny4 reject with icmpx admin-prohibited",
+        f"\t\tmeta skuid {uid} ip6 daddr @deny6 reject with icmpx admin-prohibited",
         f"\t\tmeta skuid {uid} tcp dport {{ 80, 443 }} ct state new limit rate over 600/minute burst 200 packets drop",
         f"\t\tmeta skuid {uid} tcp dport {{ 80, 443 }} accept",
-        f"\t\tmeta skuid {uid} drop",
+        f"\t\tmeta skuid {uid} reject with icmpx admin-prohibited",
         "\t}",
         "}",
     ]) + "\n"
@@ -116,7 +117,9 @@ def _nft(*args: str, stdin: str | None = None) -> str:
 
 
 def fingerprint() -> str:
-    data = json.loads(_nft("-j", "list", "table", "inet", TABLE))
+    # Numeric output (-n -y): the check runs inside the browser's filesystem view, where nft can't read
+    # /etc/protocols or /etc/services and would print numbers instead of names.
+    data = json.loads(_nft("-n", "-y", "-j", "list", "table", "inet", TABLE))
     # Leave out nft's own version info, so a package upgrade doesn't look like a changed firewall.
     items = [i for i in data.get("nftables", []) if "metainfo" not in i]
     return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
@@ -145,14 +148,17 @@ def load() -> None:
 
 
 def check() -> int:
+    why = "the table differs from what was loaded"
     try:
         with open(STATE, encoding="utf-8") as f:
             expected = f.read().strip()
         ok = fingerprint() == expected
-    except (OSError, subprocess.CalledProcessError, ValueError):
-        ok = False
+    except subprocess.CalledProcessError as e:
+        ok, why = False, f"nft failed ({e.returncode}): {(e.stderr or '').strip()[:200]}"
+    except (OSError, ValueError) as e:
+        ok, why = False, f"{type(e).__name__}: {e}"[:200]
     if not ok:
-        print("ampi-browser: the egress firewall isn't loaded as expected; "
+        print(f"ampi-browser: the egress firewall isn't loaded as expected ({why}); "
               "run systemctl restart ampi-browser-net", file=sys.stderr)
         return 1
     return 0

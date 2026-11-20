@@ -148,6 +148,12 @@ def test_pages_cant_fake_the_end_marker_or_hide_text():
     assert "›" not in browser.wrap("u", "a ›‍›‌› b").split("‹‹‹\n", 1)[1].rsplit("\n›››", 1)[0]
 
 
+def test_known_block_pages_are_bot_checks():
+    reddit = ("You've been blocked by network security.\n\nTo continue, log in to your Reddit account or use "
+              "your developer token\n\n[Log in](https://www.reddit.com/login/)")
+    assert browser.looks_like_bot_check(reddit)
+
+
 @pytest.mark.parametrize("title", ["Robot - Wikipedia", "Blocked drains in London", "Access control basics",
                                    "Security checklist for shops"])
 def test_ordinary_titles_are_not_bot_checks(title):
@@ -157,6 +163,14 @@ def test_ordinary_titles_are_not_bot_checks(title):
 
 def test_cleaning_keeps_scripts_that_need_joiners():
     assert browser.clean("می‌خواهم \U0001f469‍\U0001f4bb a b") == "می‌خواهم \U0001f469‍\U0001f4bb a\nb"
+
+
+def test_embedded_images_and_style_blocks_are_dropped():
+    page = ("<style>.hide-when-no-script { visibility: hidden; }</style>\n# News\n\n"
+            "![](data:image/png;base64," + "A" * 500 + ")\n![logo](data:image/gif;base64,R0lG)\nText "
+            "data:image/png;base64," + "B" * 300 + " end")
+    out = browser.tidy_page(page)
+    assert out == "# News\n\n\n[image: logo]\nText [embedded data] end".replace("\n\n\n", "\n\n")
 
 
 def test_ordinary_pages_mentioning_captchas_are_not_bot_checks():
@@ -490,7 +504,8 @@ def test_the_firewall_denies_own_and_private_addresses_and_allows_only_web_ports
     assert "1.2.3.4/32" in rules and "2a00:1111:2222:3333::/64" in rules
     assert "10.0.0.0/8" in rules and "169.254.0.0/16" in rules and "fc00::/7" in rules
     assert "meta skuid 999 tcp dport { 80, 443 } accept" in rules
-    assert rules.rstrip().splitlines()[-3].strip() == "meta skuid 999 drop"
+    assert rules.rstrip().splitlines()[-3].strip() == "meta skuid 999 reject with icmpx admin-prohibited"
+    assert "fib daddr type local reject" in rules
     assert "185.12.64.1, 185.12.64.2" in rules and "th dport 53 accept" in rules
     assert "limit rate over 600/minute" in rules
     # every rule is for the browser's user only

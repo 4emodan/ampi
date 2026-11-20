@@ -76,8 +76,12 @@ BindReadOnlyPaths=/etc/ld.so.cache -/etc/ssl -/etc/ca-certificates /etc/nsswitch
 BindReadOnlyPaths=/etc/ampi-browser/resolv.conf:/etc/resolv.conf /etc/ampi-browser/hosts:/etc/hosts
 BindReadOnlyPaths=/etc/ampi-browser/passwd:/etc/passwd /etc/ampi-browser/group:/etc/group
 BindReadOnlyPaths=/usr/local/lib/obscura /usr/local/lib/ampi-browser
+# The root ExecStartPre check runs inside this filesystem view too; it needs the loaded table's hash.
+BindReadOnlyPaths=/run/ampi-browser-net.sha256
 InaccessiblePaths=-/sys/firmware
 
-# Network: no Unix sockets (the connection arrives as stdin); private ranges also denied here
-RestrictAddressFamilies=AF_INET AF_INET6
+# Network: no Unix sockets (the connection arrives as stdin); private ranges also denied here.
+# AF_NETLINK only because this setting also binds the root ExecStartPre firewall check (nft speaks
+# netlink); unprivileged, with no user namespaces, the engine can only read network info through it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
 IPAddressDeny=localhost link-local multicast 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 198.18.0.0/15 240.0.0.0/4 fc00::/7 fec0::/10 64:ff9b::/96 2002::/16 2001::/32
