@@ -2,13 +2,15 @@
 Description=Egress firewall and config files for the Claude Assistant browser (nft table inet ampi_browser)
 After=network-online.target nftables.service
 Wants=network-online.target
-# `systemctl restart nftables` flushes every table; reload ours right after.
+# `systemctl restart/reload nftables` flushes every table; load ours again right after.
 PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-browser/browser_net.py load
+ExecReload=/usr/bin/python3 -I /usr/local/lib/ampi-browser/browser_net.py load
 
 [Install]
 WantedBy=multi-user.target

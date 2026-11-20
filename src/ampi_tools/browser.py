@@ -48,6 +48,7 @@ YOUTUBE_COUNTRY = re.compile(r"(.+\.)?youtube\.(com?\.)?[a-z]{2,3}")
 LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa", ".intranet", ".corp", ".private")
 NAT64 = ipaddress.ip_network("64:ff9b::/96")
 NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
+IPV4_COMPATIBLE = ipaddress.ip_network("::/96")  # deprecated ::a.b.c.d form
 
 
 class Refused(Exception):
@@ -62,7 +63,7 @@ def _unsafe_char(ch: str) -> bool:
 
 def _check_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
     if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped or ip.sixtofour or ip.teredo or ip in NAT64 or ip in NAT64_LOCAL:
+        if ip.ipv4_mapped or ip.sixtofour or ip.teredo or ip in NAT64 or ip in NAT64_LOCAL or ip in IPV4_COMPATIBLE:
             raise Refused("that address points at another (possibly private) address; use a normal public one")
     if not ip.is_global or ip.is_multicast:
         raise Refused("that address is private or local; the browser only opens public sites")
@@ -285,10 +286,11 @@ BOT_STRONG = re.compile(
     re.IGNORECASE)
 BOT_WEAK = re.compile(r"are you a robot|not a robot|access denied|request blocked|please verify|security check",
                       re.IGNORECASE)
-BOT_TITLE = re.compile(r"captcha|robot|access denied|blocked|security check|just a moment|attention required",
-                       re.IGNORECASE)
+BOT_TITLE = re.compile(r"^\s*(just a moment|attention required|access denied|security check\b(?!list)|"
+                       r"are you a (human|robot))|"
+                       r"captcha|verify(ing)? you are (a )?human", re.IGNORECASE)
 # The wrapper's own markers and look-alikes, in runs of two or more (single « » are ordinary quotes).
-MARKERS = re.compile(r"[‹›❮❯❬❭〈〉⟨⟩〈〉«»]{2,}")
+MARKERS = re.compile(r"[‹›❮❯❬❭〈〉⟨⟩〈〉«»](?:[‌‍]*[‹›❮❯❬❭〈〉⟨⟩〈〉«»])+")
 KEEP_INVISIBLE = {"‌", "‍"}  # ZWNJ/ZWJ: needed by Persian, Indic scripts and emoji
 
 

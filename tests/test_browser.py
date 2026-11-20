@@ -58,7 +58,7 @@ def ask(req, mode="ok", calls=None):
     "http://127。0。0。1/", "http://169。254。169。254/latest", "http://0x7f。1/",
     "http://127．0．0．1/", "http://１２７.0.0.1/", "http://evil.com\\@127.0.0.1/",
     "http://127.0.0.1\\.example.com/", "https://www.youtube.de/watch?v=x", "https://youtube.co.uk/",
-    "https://consent.youtube.com/", "http://[::]/", "http://[fd00::1]/",
+    "https://consent.youtube.com/", "http://[::]/", "http://[fd00::1]/", "http://[::a9fe:a9fe]/",
 ])
 def test_unsafe_or_unsupported_links_are_refused(url):
     with pytest.raises(Refused):
@@ -145,6 +145,14 @@ def test_pages_cant_fake_the_end_marker_or_hide_text():
     assert "››" not in inner and "‹‹" not in inner and "❯❯❯" not in inner
     assert "‮" not in inner and "​" not in inner
     assert ">>> print(1)" in inner  # ordinary code stays
+    assert "›" not in browser.wrap("u", "a ›‍›‌› b").split("‹‹‹\n", 1)[1].rsplit("\n›››", 1)[0]
+
+
+@pytest.mark.parametrize("title", ["Robot - Wikipedia", "Blocked drains in London", "Access control basics",
+                                   "Security checklist for shops"])
+def test_ordinary_titles_are_not_bot_checks(title):
+    assert not browser.looks_like_bot_check("", title)
+    assert browser.looks_like_bot_check("", "Just a moment...")
 
 
 def test_cleaning_keeps_scripts_that_need_joiners():
@@ -423,7 +431,8 @@ def test_the_client_waits_less_than_the_bash_timeout():
 
 @pytest.mark.parametrize("rule", ["Bash(browse:*)", "Bash(browse *)", "Bash(browse read:*)", " Bash( browse:*) ",
                                   "Bash(/home/assistant/.local/bin/browse:*)", "Bash(*)", "Bash(brow*)", "Bash",
-                                  "Bash(env browse:*)", "Bash(/usr/bin/env browse read:*)"])
+                                  "Bash(env browse:*)", "Bash(/usr/bin/env browse read:*)", "Bash(env:*)",
+                                  "Bash(sh:*)", "Bash(python3:*)", "Bash(/usr/bin/timeout:*)", "Bash(uv run:*)"])
 def test_every_spelling_of_a_browse_rule_is_recognised(rule):
     assert is_browse_rule(rule)
 

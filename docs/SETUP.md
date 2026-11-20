@@ -204,8 +204,9 @@ prebuilt release is pinned by sha256: that proves it's the published file, not w
   Every instance first checks the table is loaded unchanged and refuses to start otherwise (e.g. after
   `nft flush ruleset`: `systemctl restart ampi-browser-net` fixes it).
 - **Watchers and groups never get `browse`**: their tool rules are stripped of anything that would allow
-  it (including a bare `Bash` rule, which they lose entirely), because injected text could put private
-  data into a URL. The service also refuses requests marked as coming from those runs.
+  it, because injected text could put private data into a URL. That includes a bare `Bash` rule and rules
+  for commands that run other commands (`env`, `sh`, `python3`, `uv`, `xargs`, `timeout`…), which those
+  runs lose entirely. The service also refuses requests marked as coming from those runs.
 - Long pages are saved under `web/` in the workspace (deleted after a day), so Claude can Grep them.
 
 Logs: `journalctl -u 'ampi-browser@*'` (site name, outcome and time only). Check: `browse status` as the

@@ -715,7 +715,15 @@ def is_browse_rule(rule: str) -> bool:
     if not m:
         return False
     first = re.split(r"[\s:]", m.group(1).strip(), maxsplit=1)[0]
-    return bool(re.search(r"(^|[\s/])browse([\s:]|$)", m.group(1))) or "*" in first or first == ""
+    return (bool(re.search(r"(^|[\s/])browse([\s:]|$)", m.group(1))) or "*" in first or first == ""
+            or first.rsplit("/", 1)[-1] in COMMAND_RUNNERS)
+
+
+# Commands that run other commands: any of them would let a run start `browse` (and drop AMPI_ORIGIN).
+COMMAND_RUNNERS = frozenset({
+    "env", "timeout", "xargs", "nice", "nohup", "setsid", "stdbuf", "sudo", "exec", "command", "eval", "time",
+    "watch", "script", "flock", "sh", "bash", "dash", "zsh", "fish", "python", "python3", "uv", "uvx", "pipx",
+    "node", "npx", "deno", "bun", "perl", "ruby", "php", "make", "find", "awk", "busybox"})
 
 
 def without_browse(tools) -> tuple[str, ...]:
