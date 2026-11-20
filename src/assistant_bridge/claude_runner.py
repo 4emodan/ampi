@@ -146,11 +146,16 @@ class ClaudeRunner:
         self._sem = asyncio.Semaphore(max_concurrent)
         self._env = dict(env) if env is not None else clean_env(os.environ, ())
 
-    async def _exec(self, args: list[str], prompt: str, cwd: Path) -> RunResult:
+    async def _exec(self, args: list[str], prompt: str, cwd: Path, origin: str | None = None) -> RunResult:
+        env = self._env
+        if origin:
+            # Tells the tool commands (and so the owner's approval requests) that this run handles outside
+            # content. Claude can't drop it: the allowed `Bash(tool:*)` rules don't match `env`/`unset` prefixes.
+            env = {**self._env, "AMPI_ORIGIN": origin}
         proc = await asyncio.create_subprocess_exec(
             *args,
             cwd=str(cwd),
-            env=self._env,
+            env=env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -178,8 +183,10 @@ class ClaudeRunner:
         allowed_tools: Sequence[str],
         append_system_prompt: str | None = None,
         extra_args: Sequence[str] = (),
+        origin: str | None = None,
     ) -> RunResult:
-        """Send one message to the conversation's Claude session.
+        """Send one message to the conversation's Claude session. `origin` (e.g. "watcher:gmail-inbox") marks
+        runs that handle outside content rather than the owner's own messages.
 
         A new conversation creates the session with --session-id; later turns use --resume.
         If the stored state disagrees with Claude Code's (session missing or already created),
@@ -199,7 +206,7 @@ class ClaudeRunner:
                     extra_args=extra_args,
                     settings_file=self._settings_file,
                 )
-                result = await self._exec(args, prompt, cwd)
+                result = await self._exec(args, prompt, cwd, origin)
                 if result.ok or attempt == 1 or not result.error:
                     break
                 if resume and _MISSING_SESSION.search(result.error):

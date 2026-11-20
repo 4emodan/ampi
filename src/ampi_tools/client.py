@@ -327,7 +327,8 @@ def _main(prog: str, parser: argparse.ArgumentParser, to_ops, argv: list[str] | 
     if args.cmd == "approvals":
         response = request({"cmd": "approvals.list"})
     else:
-        response = request({"cmd": "run", "ops": to_ops(args), "reason": args.reason})
+        response = request({"cmd": "run", "ops": to_ops(args), "reason": args.reason,
+                            "origin": os.environ.get("AMPI_ORIGIN") or None})
     if not response.get("ok"):
         print(f"{prog}: {response.get('error', 'failed')}", file=sys.stderr)
         return 1

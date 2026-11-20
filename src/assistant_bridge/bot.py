@@ -302,6 +302,7 @@ class ProfileBot:
                     allowed_tools=self.profile.allowed_tools,
                     append_system_prompt=system_prompt,
                     extra_args=self.profile.extra_args,
+                    origin=f"group:{group.name}" if group is not None else None,
                 )
             except asyncio.CancelledError:
                 self._record(conv, started_at, RunResult(ok=False, text="", error="cancelled"), prompt)
@@ -362,6 +363,7 @@ class ProfileBot:
                     allowed_tools=watcher_tools(watcher, self.profile),
                     append_system_prompt=self.system_prompt + "\n\n" + self._watcher_prompt(watcher),
                     extra_args=self.profile.extra_args,
+                    origin=f"watcher:{watcher.name}",
                 )
             except asyncio.CancelledError:
                 if key not in self._stopped_by_owner:

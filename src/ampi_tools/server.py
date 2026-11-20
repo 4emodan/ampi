@@ -117,7 +117,7 @@ class Daemon:
                 # The watchers' YouTube ops use their own reserve of quota and requests; only the bridge has it.
                 if any(o["op"] in WATCHER_ONLY for o in ops) and not await self.trusted(pid):
                     raise ToolError("youtube.ids/youtube.show are for watchers; use `youtube feed` / `youtube video`")
-                return await self.run(ops, request.get("reason"))
+                return await self.run(ops, request.get("reason"), request.get("origin"))
             if cmd == "approvals.list":
                 return {"ok": True, "text": self.list_text()}
             if cmd == "approvals.pending":
@@ -137,7 +137,7 @@ class Daemon:
             log.exception("request failed")
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-    async def run(self, ops: list[dict], reason: Any) -> dict:
+    async def run(self, ops: list[dict], reason: Any, origin: Any = None) -> dict:
         ops = await pre_resolve(self.services, ops)
         critical = False
         for o in ops:
@@ -149,6 +149,10 @@ class Daemon:
                 raise ToolError(f"{MAX_PENDING} requests are already waiting for the owner; wait for their answer")
             ops = await prepare(self.services, ops)
             summary = await summarize(self.services, ops, self.policy)
+            if isinstance(origin, str) and origin.strip():
+                # Not the owner typing in chat: a watcher or group run that read outside content asked for this.
+                summary = (f"⚠ Asked for by {clean(origin, 80)} while handling outside content, not by you in "
+                           f"chat.\n{summary}")
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
             approval_id = self.approvals.add(ops, summary, reason)
             log.info("approval #%s requested: %s", approval_id, [o["op"] for o in ops])

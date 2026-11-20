@@ -21,7 +21,8 @@ mode = os.environ.get("FAKE_CLAUDE_MODE", "echo")
 log_path = os.environ.get("FAKE_CLAUDE_LOG")
 if log_path:
     with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps({"args": args, "prompt": prompt, "cwd": os.getcwd(), "env_has_api_key": "ANTHROPIC_API_KEY" in os.environ}) + "\n")
+        f.write(json.dumps({"args": args, "prompt": prompt, "cwd": os.getcwd(), "env_has_api_key": "ANTHROPIC_API_KEY" in os.environ,
+                            "origin": os.environ.get("AMPI_ORIGIN")}) + "\n")
 
 
 def result(text, is_error=False, subtype="success"):
