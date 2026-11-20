@@ -1,6 +1,7 @@
 """The `tg-reader` daemon: holds the owner's Telegram login and answers read-only requests.
 
     tg-reader login    once, interactively, as the tgreader user (you type the phone code yourself)
+    tg-reader login-qr same, but you scan a QR code with your phone instead of typing a code
     tg-reader serve    run by systemd (deploy/tg-reader.service)
 
 Settings come from the environment (deploy/tg-reader.env.example):
@@ -111,12 +112,53 @@ async def _login() -> None:
     await client.disconnect()
 
 
+QR_ROUNDS = 6  # each QR code lives about 30 s
+
+
+async def _login_qr() -> None:
+    import getpass
+
+    import qrcode
+    from telethon.errors import SessionPasswordNeededError
+
+    os.umask(0o077)  # the session file is as good as your Telegram password
+    client = _make_client()
+    await client.connect()
+    try:
+        if await client.is_user_authorized():
+            print("Already logged in. To log in again, delete the session file first.")
+            return
+        print("On your phone: Telegram -> Settings -> Devices -> Link Desktop Device, then scan this code.")
+        qr = await client.qr_login()
+        for _ in range(QR_ROUNDS):
+            code = qrcode.QRCode(border=1)
+            code.add_data(qr.url)
+            code.print_ascii(invert=True)
+            try:
+                await qr.wait(timeout=30)
+                break
+            except asyncio.TimeoutError:
+                print("That code expired; here's a fresh one.")
+                await qr.recreate()
+            except SessionPasswordNeededError:
+                await client.sign_in(password=getpass.getpass("Your Telegram cloud password (2FA): "))
+                break
+        else:
+            sys.exit("No scan in time. Run `tg-reader login-qr` again.")
+        me = await client.get_me()
+        print(f"Logged in as {getattr(me, 'first_name', '')} (id {me.id}). Session saved; start the service:")
+        print("  systemctl restart tg-reader")
+    finally:
+        await client.disconnect()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="tg-reader", description="Read-only Telegram reader daemon")
-    parser.add_argument("command", choices=["serve", "login"])
+    parser.add_argument("command", choices=["serve", "login", "login-qr"])
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    asyncio.run(_serve() if args.command == "serve" else _login())
+    run = {"serve": _serve, "login": _login, "login-qr": _login_qr}[args.command]
+    asyncio.run(run())
 
 
 if __name__ == "__main__":

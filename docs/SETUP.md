@@ -84,6 +84,7 @@ The login session could do anything your account can, so it is kept away from th
    ```bash
    sudo -u tgreader -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/tg-reader login'
    ```
+   If no code arrives (Telegram sometimes doesn't send codes to a new API app), use `login-qr` instead: it prints a QR code that you scan with your phone under Telegram → Settings → Devices → **Link Desktop Device**. Make the terminal wide enough to show the whole code.
 4. `systemctl restart tg-reader && journalctl -u tg-reader -n 20` (should say "listening").
 5. In `config.toml`, add `"Skill"` and `"Bash(tg-read:*)"` to `allowed_tools`, then `systemctl restart claude-assistant`.
 

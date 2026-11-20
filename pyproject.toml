@@ -8,7 +8,7 @@ dependencies = ["httpx>=0.27"]
 
 [project.optional-dependencies]
 # Only the tg-reader daemon (separate tgreader user) needs Telethon.
-reader = ["telethon>=1.40,<2"]
+reader = ["telethon>=1.40,<2", "qrcode>=7.4"]
 
 [project.scripts]
 claude-assistant = "assistant_bridge.main:main"
