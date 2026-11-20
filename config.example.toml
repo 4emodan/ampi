@@ -46,6 +46,9 @@ model = "sonnet"
 allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"]
 # Extra arguments passed to `claude` on every run (optional).
 extra_args = []
+# Ask you in Telegram (Approve / Reject) when Claude wants to do something not in allowed_tools
+# (run a script, install a package...), instead of refusing it. Watchers never ask. docs/SETUP.md, section 10.
+# ask_permissions = true
 
 # Groups this bot acts in. It handles every message YOU post or forward there; others are ignored.
 # First turn off privacy mode: @BotFather -> /setprivacy -> pick the bot -> Disable, then (re-)add the bot.

@@ -14,6 +14,9 @@ Environment=PATH=/home/assistant/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/home/assistant/app/.venv/bin/claude-assistant --config /home/assistant/config.toml
 Restart=on-failure
 RestartSec=10
+# /run/claude-assistant: the permission-request sockets (only the assistant user can reach them).
+RuntimeDirectory=claude-assistant
+RuntimeDirectoryMode=0700
 # Let a running task finish its current step before systemd kills it.
 TimeoutStopSec=30
 

@@ -67,6 +67,8 @@ class Tools:
     socket: str = "/run/ampi-tools/tools.sock"
     tg_reader_socket: str = "/run/tg-reader/tg-reader.sock"
     approvals: bool = False  # relay approval requests from ampi-tools to the owner
+    # Root helper that installs Ubuntu packages the owner approved (deploy/install-pkg.sh); "" = none.
+    pkg_socket: str = "/run/ampi-pkg/pkg.sock"
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,9 @@ class Profile:
     groups: tuple[Group, ...] = ()
     watchers: tuple[Watcher, ...] = ()
     timezone: str = "UTC"
+    # Ask the owner in Telegram (Approve / Reject) when Claude wants to do something its rules don't
+    # allow, instead of just refusing. Only for conversations; watchers never ask.
+    ask_permissions: bool = False
 
     @property
     def owner_chat_id(self) -> int:
@@ -117,7 +122,7 @@ def _str_list(value: object, field: str) -> tuple[str, ...]:
 FORBIDDEN_FLAGS = (
     "--bare", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--permission-mode",
     "--add-dir", "--settings", "--setting-sources", "--mcp-config", "--allowedTools", "--allowed-tools",
-    "--disallowedTools", "--disallowed-tools", "--plugin-dir",
+    "--disallowedTools", "--disallowed-tools", "--plugin-dir", "--permission-prompt-tool", "--permission-prompts",
 )
 
 
@@ -224,9 +229,10 @@ def _parse_tools(raw: object) -> Tools:
     defaults = Tools()
     sock = raw.get("socket", defaults.socket)
     tg = raw.get("tg_reader_socket", defaults.tg_reader_socket)
-    if not isinstance(sock, str) or not isinstance(tg, str):
+    pkg = raw.get("pkg_socket", defaults.pkg_socket)
+    if not isinstance(sock, str) or not isinstance(tg, str) or not isinstance(pkg, str):
         raise ConfigError("tools sockets must be paths")
-    return Tools(socket=sock, tg_reader_socket=tg, approvals=approvals)
+    return Tools(socket=sock, tg_reader_socket=tg, approvals=approvals, pkg_socket=pkg)
 
 
 def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None = None) -> Config:
@@ -301,6 +307,9 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
             zone(tz)
         except (ZoneInfoNotFoundError, ValueError, TypeError):
             raise ConfigError(f"{where}: unknown timezone {tz!r} (e.g. \"Europe/Athens\")") from None
+        ask_permissions = p.get("ask_permissions", False)
+        if not isinstance(ask_permissions, bool):
+            raise ConfigError(f"{where}: ask_permissions must be true or false")
 
         profiles.append(
             Profile(
@@ -317,6 +326,7 @@ def load_config(path: str | os.PathLike[str], environ: Mapping[str, str] | None 
                 groups=groups,
                 watchers=watchers,
                 timezone=tz,
+                ask_permissions=ask_permissions,
             )
         )
 

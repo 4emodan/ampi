@@ -63,6 +63,8 @@ DENIED_TOOLS = (
     "Edit(./CLAUDE.local.md)",
     "Edit(./**/CLAUDE.md)",
     "Edit(./**/CLAUDE.local.md)",
+    # The permission prompt tool is Claude Code's to call, not Claude's (see permissions.py).
+    "mcp__ampi__approve",
 )
 
 
@@ -146,12 +148,13 @@ class ClaudeRunner:
         self._sem = asyncio.Semaphore(max_concurrent)
         self._env = dict(env) if env is not None else clean_env(os.environ, ())
 
-    async def _exec(self, args: list[str], prompt: str, cwd: Path, origin: str | None = None) -> RunResult:
-        env = self._env
+    async def _exec(self, args: list[str], prompt: str, cwd: Path, origin: str | None = None,
+                    extra_env: Mapping[str, str] | None = None) -> RunResult:
+        env = {**self._env, **(extra_env or {})}
         if origin:
             # Tells the tool commands (and so the owner's approval requests) that this run handles outside
             # content. Claude can't drop it: the allowed `Bash(tool:*)` rules don't match `env`/`unset` prefixes.
-            env = {**self._env, "AMPI_ORIGIN": origin}
+            env = {**env, "AMPI_ORIGIN": origin}
         proc = await asyncio.create_subprocess_exec(
             *args,
             cwd=str(cwd),
@@ -184,6 +187,7 @@ class ClaudeRunner:
         append_system_prompt: str | None = None,
         extra_args: Sequence[str] = (),
         origin: str | None = None,
+        extra_env: Mapping[str, str] | None = None,
     ) -> RunResult:
         """Send one message to the conversation's Claude session. `origin` (e.g. "watcher:gmail-inbox") marks
         runs that handle outside content rather than the owner's own messages.
@@ -206,7 +210,7 @@ class ClaudeRunner:
                     extra_args=extra_args,
                     settings_file=self._settings_file,
                 )
-                result = await self._exec(args, prompt, cwd, origin)
+                result = await self._exec(args, prompt, cwd, origin, extra_env)
                 if result.ok or attempt == 1 or not result.error:
                     break
                 if resume and _MISSING_SESSION.search(result.error):

@@ -10,11 +10,13 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 
 import httpx
 
 from .approvals import ApprovalRelay
 from .bot import ProfileBot
+from .permissions import PermissionBroker
 from .watchers import Watch
 from .claude_runner import BILLING_ENV_VARS, ClaudeRunner, clean_env
 from .config import Config, ConfigError, load_config
@@ -132,6 +134,12 @@ async def serve(config: Config) -> None:
                 log.warning("[%s] %s is missing or not owned by root: Claude could give itself settings or hooks. "
                             "Run deploy/install.sh as root.", p.name, dot)
             bots.append(ProfileBot(p, TelegramAPI(p.bot_token, client), store, runner))
+        run_dir = os.environ.get("RUNTIME_DIRECTORY") or tempfile.gettempdir()  # systemd: /run/claude-assistant
+        for b in bots:
+            if b.profile.ask_permissions:
+                b.permissions = PermissionBroker(b, os.path.join(run_dir, f"permission-{b.profile.name}.sock"),
+                                                 config.tools.pkg_socket or None)
+                await b.permissions.start()
         pollers = [asyncio.create_task(b.poll_forever(), name=f"poll-{b.profile.name}") for b in bots]
         if config.tools.approvals:
             # Approval requests go to the first profile's owner chat (one relay, so no duplicates).

@@ -1,0 +1,22 @@
+[Unit]
+Description=Installs Ubuntu packages the owner approved for Claude Assistant (root helper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root, because apt needs it. It only answers the claude-assistant bridge process, which sends a
+# request only after the owner tapped Approve in Telegram (see deploy/ampi-pkg.py).
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-pkg/ampi-pkg.py
+RuntimeDirectory=ampi-pkg
+RuntimeDirectoryMode=0755
+Restart=always
+RestartSec=10
+# Package scripts must be able to change the system, so only light isolation here.
+PrivateTmp=true
+ProtectHome=read-only
+MemoryMax=1G
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

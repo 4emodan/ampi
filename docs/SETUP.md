@@ -214,6 +214,32 @@ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
   allowed_tools = ["Read", "Bash(youtube:*)"]  # titles are written by strangers: no writing files, no web
   ```
 
+## 10. Running scripts and installing things, with your approval (optional)
+
+With `ask_permissions = true` in a profile, anything Claude wants to do that `allowed_tools` doesn't allow
+(running a script or program, `uv pip install`, fetching a page when the web isn't allowed...) reaches you
+as a Telegram message with **✅ Approve / ❌ Reject**. It shows the exact command or request, and the run
+waits for your tap, up to 10 minutes. No answer means no.
+
+- Approved commands run as the `assistant` user inside the same sandbox, so they can only write to
+  `/home/assistant`. Python packages go into a virtualenv in the workspace.
+- The deny rules still win: the secrets listed under "Isolation and limits" are never even asked about.
+- Requests from a group run are marked, because that run handles messages written by others.
+- Watchers never ask: whatever their rules don't allow is simply refused.
+- A request can't be approved by anyone but you: buttons carry a one-time secret and only count on the
+  message the bot sent. `/cancel` withdraws open requests.
+
+**Ubuntu packages (apt).** Claude can also ask for system packages (e.g. `librsvg2-bin`). The request
+shows the packages, anything apt would add along with them, and the reason. Approved installs are done
+by a small root helper that only takes requests from the bridge process, only installs (never removes),
+and logs everything (`journalctl -u ampi-pkg`):
+
+```bash
+sudo bash deploy/install-pkg.sh
+# then in config.toml, in the profile: ask_permissions = true
+systemctl restart claude-assistant
+```
+
 ## Isolation and limits
 
 - The service runs as `assistant`, sees no other home directories, and gets a read-only view of the rest of the filesystem.
