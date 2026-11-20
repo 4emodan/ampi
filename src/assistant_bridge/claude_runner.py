@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -147,6 +148,9 @@ class ClaudeRunner:
         self._timeout = timeout_seconds
         self._sem = asyncio.Semaphore(max_concurrent)
         self._env = dict(env) if env is not None else clean_env(os.environ, ())
+        # Tells ampi-tools which process each run is and where it comes from (see RunTracker); optional.
+        self.on_spawn: Callable[[int, str], Awaitable[None]] | None = None
+        self.on_exit: Callable[[int], Awaitable[None]] | None = None
 
     async def _exec(self, args: list[str], prompt: str, cwd: Path, origin: str | None = None,
                     extra_env: Mapping[str, str] | None = None) -> RunResult:
@@ -163,6 +167,12 @@ class ClaudeRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        if self.on_spawn is not None:
+            # Before claude reads its prompt (stdin), so no tool call can come before the registration.
+            try:
+                await self.on_spawn(proc.pid, origin or "private")
+            except Exception:
+                log.warning("could not register run %s with the tools service", proc.pid, exc_info=True)
         try:
             out, err = await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), self._timeout)
         except asyncio.TimeoutError:
@@ -171,6 +181,10 @@ class ClaudeRunner:
         except asyncio.CancelledError:
             await _stop(proc)
             raise
+        finally:
+            if self.on_exit is not None:
+                with contextlib.suppress(Exception):
+                    await self.on_exit(proc.pid)
         return parse_output(
             proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
         )

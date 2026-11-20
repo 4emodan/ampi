@@ -1,5 +1,5 @@
 [Unit]
-Description=Telegram reader for Claude Assistant (read-only access to the owner's account)
+Description=Telegram reader for Claude Assistant (reads for the assistant; writes only for ampi-tools)
 After=network-online.target
 Wants=network-online.target
 # Only once you've logged in (tg-reader login); otherwise it would restart forever.
@@ -12,8 +12,11 @@ Group=tgread
 EnvironmentFile=/home/tgreader/env
 ExecStart=/home/tgreader/app/.venv/bin/tg-reader serve
 # /run/tg-reader/tg-reader.sock: only tgreader and the tgread group (the assistant) can reach it.
-RuntimeDirectory=tg-reader
+# /run/tg-writer/tg-write.sock: the daemon gives that directory to the tgwrite group (ampi-tools only) and
+# also checks the caller is the ampitools user. The assistant can't reach it.
+RuntimeDirectory=tg-reader tg-writer
 RuntimeDirectoryMode=0750
+SupplementaryGroups=tgwrite
 UMask=0077
 Restart=always
 RestartSec=30

@@ -20,6 +20,7 @@ from .permissions import PermissionBroker
 from .watchers import Watch
 from .claude_runner import BILLING_ENV_VARS, ClaudeRunner, clean_env
 from .config import Config, ConfigError, load_config
+from .services import ask
 from .store import Store
 from .telegram import TelegramAPI, TelegramError
 
@@ -89,6 +90,27 @@ async def check(config: Config) -> int:
     return 0 if ok else 1
 
 
+def protected_chats(config: Config, store: Store) -> tuple[list[int], bool]:
+    """Chats the assistant reads itself, where a message from the owner's account would count as the owner's
+    own command: every profile's bot, its groups, and the chats its Telegram watchers follow. Returns
+    (ids, complete); incomplete while a Telegram watcher hasn't learned its chat's id yet."""
+    ids: list[int] = []
+    complete = True
+    for p in config.profiles:
+        prefix = p.bot_token.split(":", 1)[0]
+        if prefix.isdigit():
+            ids.append(int(prefix))
+        ids += [g.chat_id for g in p.groups]
+        for w in p.watchers:
+            if w.kind == "telegram":
+                peer = (store.get_watch_state(p.name, w.name) or {}).get("peer_id")
+                if isinstance(peer, int) and not isinstance(peer, bool):
+                    ids.append(peer)
+                else:
+                    complete = False
+    return sorted(set(ids)), complete
+
+
 def make_undumpable() -> bool:
     """PR_SET_DUMPABLE=0: /proc/<pid>/environ, /mem etc. of this process become root-only, so the
     claude runs (same Unix user) can't read the bot token from the bridge's environment or memory,
@@ -143,8 +165,19 @@ async def serve(config: Config) -> None:
         pollers = [asyncio.create_task(b.poll_forever(), name=f"poll-{b.profile.name}") for b in bots]
         if config.tools.approvals:
             # Approval requests go to the first profile's owner chat (one relay, so no duplicates).
-            bots[0].approvals = ApprovalRelay(bots[0], config.tools.socket)
+            bots[0].approvals = ApprovalRelay(bots[0], config.tools.socket,
+                                              protected=lambda: protected_chats(config, store))
             pollers.append(asyncio.create_task(bots[0].approvals.run_forever(), name="approvals"))
+            # ampi-tools learns which process each claude run is and where it comes from.
+            socket_path = config.tools.socket
+
+            async def on_spawn(pid: int, origin: str) -> None:
+                await ask(socket_path, {"cmd": "runs.register", "pid": pid, "origin": origin}, timeout=10)
+
+            async def on_exit(pid: int) -> None:
+                await ask(socket_path, {"cmd": "runs.unregister", "pid": pid}, timeout=10)
+
+            runner.on_spawn, runner.on_exit = on_spawn, on_exit
         for b in bots:
             for w in b.profile.watchers:
                 watch = Watch(b, w, config.tools)

@@ -1,4 +1,5 @@
-"""The `tg-reader` daemon: holds the owner's Telegram login and answers read-only requests.
+"""The `tg-reader` daemon: holds the owner's Telegram login, answers read requests from the assistant and
+write requests from ampi-tools only.
 
     tg-reader login    once, interactively, as the tgreader user (you type the phone code yourself)
     tg-reader login-qr same, but you scan a QR code with your phone instead of typing a code
@@ -8,21 +9,28 @@ Settings come from the environment (deploy/tg-reader.env.example):
     TG_API_ID, TG_API_HASH   from https://my.telegram.org -> API development tools
     TG_SESSION               session file (default ~/tg-reader.session)
     TG_READER_SOCKET         Unix socket (default /run/tg-reader/tg-reader.sock)
+    TG_WRITER_SOCKET         write socket (default /run/tg-writer/tg-write.sock), group TG_WRITER_GROUP
+                             (default tgwrite), answering only the user TG_WRITER_USER (default ampitools)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
+import socket
+import struct
 import sys
 from pathlib import Path
 
 from .reader import Reader
+from .writer import Writer
 
 DEFAULT_SOCKET = "/run/tg-reader/tg-reader.sock"
+DEFAULT_WRITER_SOCKET = "/run/tg-writer/tg-write.sock"
 MAX_REQUEST = 64 * 1024
 log = logging.getLogger("tg-reader")
 
@@ -40,15 +48,18 @@ def _make_client():
     except (KeyError, ValueError):
         sys.exit("Set TG_API_ID and TG_API_HASH (from https://my.telegram.org -> API development tools).")
     session = os.environ.get("TG_SESSION") or str(Path.home() / "tg-reader.session")
-    return TelegramClient(
+    client = TelegramClient(
         session,
         api_id,
         api_hash,
-        device_model="Ampi reader (read-only)",
+        device_model="Ampi reader (read-only)",  # the name Telegram already shows; changes only on a new login
         system_version="Linux",
         app_version="1.0",
         receive_updates=False,
     )
+    # Never sleep through a flood wait while holding the lock: surface it as an error instead.
+    client.flood_sleep_threshold = 0
+    return client
 
 
 async def handle_connection(reader_obj: Reader, rd: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
@@ -71,6 +82,67 @@ async def handle_connection(reader_obj: Reader, rd: asyncio.StreamReader, wr: as
         wr.close()
 
 
+def peer_uid(wr: asyncio.StreamWriter) -> int | None:
+    sock = wr.get_extra_info("socket")
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", creds)[1]
+    except (AttributeError, OSError):
+        return None
+
+
+async def handle_write_connection(writer_obj: Writer, allowed_uid: int, rd: asyncio.StreamReader,
+                                  wr: asyncio.StreamWriter) -> None:
+    try:
+        if peer_uid(wr) != allowed_uid:
+            log.warning("write socket: refused a caller that isn't the tools user")
+            response = {"ok": False, "error": "not allowed"}
+        else:
+            try:
+                line = await asyncio.wait_for(rd.readline(), 10)
+                request = json.loads(line)
+                if not isinstance(request, dict):
+                    raise ValueError
+            except (ValueError, asyncio.TimeoutError):
+                response = {"ok": False, "error": "bad request"}
+            else:
+                log.info("write request: %s", request.get("cmd"))  # never the text, chat or ids
+                response = await writer_obj.handle(request)
+        wr.write(json.dumps(response).encode() + b"\n")
+        await wr.drain()
+    except Exception:
+        log.exception("write connection failed")
+    finally:
+        wr.close()
+
+
+async def serve_write_socket(writer_obj: Writer, path: str, uid: int, gid: int) -> asyncio.AbstractServer:
+    p = Path(path)
+    if p.exists() or p.is_symlink():
+        p.unlink()
+    server = await asyncio.start_unix_server(
+        lambda r, w: handle_write_connection(writer_obj, uid, r, w), path=path, limit=MAX_REQUEST + 1
+    )
+    # Only the tgwrite group (ampi-tools) may even reach it; the uid check above is the second lock.
+    for target, mode in ((p.parent, 0o750), (p, 0o660)):
+        os.chown(target, -1, gid)
+        os.chmod(target, mode)
+    return server
+
+
+def writer_identity() -> tuple[int, int] | None:
+    """(uid of the tools user, gid of the write group), or None when they don't exist (writing stays off)."""
+    import grp
+    import pwd
+
+    try:
+        uid = pwd.getpwnam(os.environ.get("TG_WRITER_USER") or "ampitools").pw_uid
+        gid = grp.getgrnam(os.environ.get("TG_WRITER_GROUP") or "tgwrite").gr_gid
+    except KeyError:
+        return None
+    return uid, gid
+
+
 async def serve_socket(reader_obj: Reader, path: str) -> asyncio.AbstractServer:
     p = Path(path)
     if p.exists() or p.is_symlink():
@@ -90,12 +162,25 @@ async def _serve() -> None:
     me = await client.get_me()
     log.info("logged in as %s (id %s)", getattr(me, "first_name", "?"), me.id)
     deny = frozenset(int(x) for x in os.environ.get("TG_READER_DENY", "").replace(" ", "").split(",") if x)
-    server = await serve_socket(Reader(client, deny=deny), socket_path())
+    reader_obj = Reader(client, deny=deny)
+    reader_obj.self_id = me.id
+    server = await serve_socket(reader_obj, socket_path())
     log.info("listening on %s", socket_path())
-    async with server:
-        serving = asyncio.ensure_future(server.serve_forever())
+    servers = [server]
+    identity = writer_identity()
+    if identity is None:
+        log.info("writing is off (no ampitools user or tgwrite group)")
+    else:
+        writer_obj = Writer(reader_obj, me.id, Path.home() / "tg-writer-state.json")
+        wpath = os.environ.get("TG_WRITER_SOCKET") or DEFAULT_WRITER_SOCKET
+        servers.append(await serve_write_socket(writer_obj, wpath, *identity))
+        log.info("write socket on %s", wpath)
+    async with contextlib.AsyncExitStack() as stack:
+        for s in servers:
+            await stack.enter_async_context(s)
+        serving = [asyncio.ensure_future(s.serve_forever()) for s in servers]
         disconnected = asyncio.ensure_future(client.disconnected)
-        await asyncio.wait([serving, disconnected], return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait([*serving, disconnected], return_when=asyncio.FIRST_COMPLETED)
     # Telethon gave up reconnecting (or the server stopped): exit so systemd restarts us cleanly.
     log.error("disconnected from Telegram; exiting")
     sys.exit(1)

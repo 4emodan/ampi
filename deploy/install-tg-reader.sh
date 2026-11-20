@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Installs or updates the read-only Telegram reader (tg-reader) next to the assistant.
+# Installs or updates the Telegram reader (tg-reader) next to the assistant.
 # Run as root from a checkout, after deploy/install.sh:  sudo bash deploy/install-tg-reader.sh
 #
 # Why a separate user: the reader logs in to Telegram as you, and that session could send or delete
 # anything. It lives in /home/tgreader, which the assistant can't see. The assistant only gets the
-# `tg-read` command, which talks to the reader over a Unix socket that answers read-only requests.
+# `tg-read` command, which talks to the reader over a Unix socket that answers read requests. Writing
+# (docs/SETUP.md 7b) has its own socket that only ampi-tools can use, with your approval rules.
 set -euo pipefail
 shopt -s nullglob
 
 READER_USER=tgreader
 READER_GROUP=tgread
+WRITE_GROUP=tgwrite
 READER_HOME=/home/$READER_USER
 APP_USER=assistant
 APP_HOME=/home/$APP_USER
@@ -26,7 +28,16 @@ if ! id "$READER_USER" >/dev/null 2>&1; then
   useradd --create-home --home-dir "$READER_HOME" --gid "$READER_GROUP" --shell /usr/sbin/nologin "$READER_USER"
 fi
 chmod 700 "$READER_HOME"
-usermod -aG "$READER_GROUP" "$APP_USER"   # lets the assistant connect to the socket
+usermod -aG "$READER_GROUP" "$APP_USER"   # lets the assistant connect to the read socket
+
+# Writing is only reachable by ampi-tools: group tgwrite on /run/tg-writer, plus a check of the caller's
+# user. The assistant is not in tgwrite. Without the ampitools user, writing stays off.
+echo "==> Group $WRITE_GROUP (tg-reader and ampi-tools only)"
+getent group "$WRITE_GROUP" >/dev/null || groupadd --system "$WRITE_GROUP"
+usermod -aG "$WRITE_GROUP" "$READER_USER"
+if id ampitools >/dev/null 2>&1; then
+  usermod -aG "$WRITE_GROUP" ampitools
+fi
 
 echo "==> Reader code -> $READER_HOME/app (with Telethon)"
 rsync -a --delete \
@@ -63,6 +74,7 @@ if [[ -f $READER_HOME/tg-reader.session ]]; then
   echo "==> Restarted tg-reader"
 fi
 # Group membership only applies to new processes.
+if systemctl is-active --quiet ampi-tools; then systemctl restart ampi-tools; fi
 systemctl is-active --quiet claude-assistant && systemctl restart claude-assistant
 
 cat <<EOF

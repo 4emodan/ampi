@@ -39,11 +39,18 @@ from .ops import (
 from .todoist import Todoist, ToolError
 from . import ops_social
 from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact
+from .ops_telegram import (
+    TG_PENDING_CAP, WRITE_OPS, RunRegistry, TelegramRules, TelegramSide, TelegramStore, TgWriterClient,
+    check_approval_size, grant_offer, needs_approval,
+)
 from .youtube import SCOPE_READ, SCOPE_WRITE, YouTube
 
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
 MAX_REQUEST = 1024 * 1024
-ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide"}
+# Only the bridge's main process may: answer approvals, post notices, say which claude runs exist and where
+# they come from, and say which chats the assistant reads itself.
+ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide", "notices.ack", "runs.register",
+         "runs.unregister", "telegram.protect"}
 WATCHER_ONLY = {"youtube.ids", "youtube.show"} | ops_social.WATCHER_ONLY
 log = logging.getLogger("ampi-tools")
 
@@ -72,8 +79,18 @@ def load_policy(path: Path) -> tuple[Policy, str]:
         unknown = set(raw.get(key, [])) - set(OPS)
         if unknown:
             sys.exit(f"{path}: unknown operations in {key}: {sorted(unknown)}")
+    if set(raw.get("auto_approve", [])) & set(WRITE_OPS):
+        sys.exit(f"{path}: Telegram writes can't be in auto_approve; allow chats in [telegram] instead")
     policy = Policy(frozenset(raw.get("auto_approve", [])), frozenset(raw.get("require_approval", [])))
     return policy, raw.get("trusted_unit", "claude-assistant.service")
+
+
+def load_telegram_rules(path: Path) -> TelegramRules:
+    raw = tomllib.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    try:
+        return TelegramRules.parse(raw.get("telegram"))
+    except ValueError as e:
+        sys.exit(f"{path}: {e}")
 
 
 def systemd_main_pid_check(unit: str) -> PidCheck:
@@ -103,11 +120,18 @@ def peer_pid(writer: asyncio.StreamWriter) -> int:
 
 
 class Daemon:
-    def __init__(self, services: Services, approvals: Approvals, policy: Policy, trusted: PidCheck):
+    def __init__(self, services: Services, approvals: Approvals, policy: Policy, trusted: PidCheck,
+                 runs: RunRegistry | None = None):
         self.services = services
         self.approvals = approvals
         self.policy = policy
         self.trusted = trusted
+        self.runs = runs or RunRegistry()
+
+    @property
+    def tg_store(self) -> TelegramStore | None:
+        side = self.services.telegram_side
+        return side.store if side is not None else None
 
     async def handle(self, request: dict, pid: int) -> dict:
         try:
@@ -119,19 +143,44 @@ class Daemon:
                 # The watchers' YouTube ops use their own reserve of quota and requests; only the bridge has it.
                 if any(o["op"] in WATCHER_ONLY for o in ops) and not await self.trusted(pid):
                     raise ToolError("youtube.ids/youtube.show are for watchers; use `youtube feed` / `youtube video`")
-                return await self.run(ops, request.get("reason"), request.get("origin"))
+                # Where the request really comes from: the claude run it descends from (never what it says).
+                origin = self.runs.origin_of(pid)
+                return await self.run(ops, request.get("reason"), request.get("origin"), origin)
             if cmd == "approvals.list":
                 return {"ok": True, "text": self.list_text()}
             if cmd == "approvals.pending":
-                return {"ok": True, "items": self.approvals.unnotified()}
+                store = self.tg_store
+                return {"ok": True, "items": self.approvals.unnotified(),
+                        "notices": store.unsent_notices() if store else []}
             if cmd == "approvals.notified":
                 self.approvals.mark_notified(_int(request.get("id")), _opt_int(request.get("message_id")))
+                return {"ok": True}
+            if cmd == "notices.ack":
+                if self.tg_store:
+                    self.tg_store.ack_notice(_int(request.get("id")))
                 return {"ok": True}
             if cmd == "approvals.decide":
                 return await self.decide(
                     _int(request.get("id")), request.get("approve") is True,
                     str(request.get("nonce") or ""), _opt_int(request.get("message_id")),
+                    always=request.get("always") is True,
                 )
+            if cmd == "runs.register":
+                origin = request.get("origin")
+                if not isinstance(origin, str) or not (origin == "private" or origin.startswith(("group:", "watcher:"))):
+                    raise ToolError("origin must be private, group:NAME or watcher:NAME")
+                self.runs.register(_int(request.get("pid")), origin[:100])
+                return {"ok": True}
+            if cmd == "runs.unregister":
+                self.runs.unregister(_int(request.get("pid")))
+                return {"ok": True}
+            if cmd == "telegram.protect":
+                ids = request.get("ids")
+                if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+                    raise ToolError("ids must be numbers")
+                if self.tg_store:
+                    self.tg_store.set_protected(ids, request.get("complete") is not False)
+                return {"ok": True}
             raise ToolError(f"unknown command {cmd!r}")
         except ToolError as e:
             return {"ok": False, "error": redact(e)}
@@ -139,24 +188,47 @@ class Daemon:
             log.exception("request failed")
             return {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
 
-    async def run(self, ops: list[dict], reason: Any, origin: Any = None) -> dict:
+    async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "private") -> dict:
+        """`origin` is where the request really came from ("private", "group:…", "watcher:…" or "unknown");
+        `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
         ops = await pre_resolve(self.services, ops)
+        for o in ops:
+            if o["op"] == "telegram.revoke":
+                o["args"]["origin_checked"] = origin
+        telegram = [o for o in ops if o["op"] in WRITE_OPS]
         critical = False
         for o in ops:
-            if self.policy.critical(o["op"]) or await shares_with_others(self.services, o):
+            if o["op"] in WRITE_OPS:
+                if o["op"] in self.policy.require_approval or needs_approval(self.services, o, origin):
+                    critical = True
+            elif self.policy.critical(o["op"]) or await shares_with_others(self.services, o):
                 critical = True
-                break
         if critical:
             if self.approvals.pending_count() >= MAX_PENDING:
                 raise ToolError(f"{MAX_PENDING} requests are already waiting for the owner; wait for their answer")
+            if telegram:
+                for o in telegram:
+                    check_approval_size(o)
+                if self.approvals.pending_count(telegram=True) >= TG_PENDING_CAP:
+                    raise ToolError(f"{TG_PENDING_CAP} Telegram requests are already waiting for the owner; wait for "
+                                    "their answer")
             ops = await prepare(self.services, ops)
             summary = await summarize(self.services, ops, self.policy)
-            if isinstance(origin, str) and origin.strip():
-                # Not the owner typing in chat: a watcher or group run that read outside content asked for this.
-                summary = (f"⚠ Asked for by {clean(origin, 80)} while handling outside content, not by you in "
+            who = None
+            if origin.startswith(("group:", "watcher:")):
+                who = origin
+            elif origin == "unknown":
+                if isinstance(claimed_origin, str) and claimed_origin.strip():
+                    who = claimed_origin
+                elif telegram:
+                    who = "a process outside any known chat run"
+            if who:
+                # Not the owner typing in chat: a run that read outside content (or an unknown process).
+                summary = (f"⚠ Asked for by {clean(who, 80)} while handling outside content, not by you in "
                            f"chat.\n{summary}")
+            grants = grant_offer(self.services, ops, origin) if telegram else None
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
-            approval_id = self.approvals.add(ops, summary, reason)
+            approval_id = self.approvals.add(ops, summary, reason, grants)
             log.info("approval #%s requested: %s", approval_id, [o["op"] for o in ops])
             return {
                 "ok": True,
@@ -167,10 +239,13 @@ class Daemon:
                     "owner briefly what you asked for; don't ask again or try another way.\n" + summary
                 ),
             }
+        for o in telegram:
+            o["args"]["resolved"]["auto"] = True
         ok, text, extra = await execute(self.services, ops)
         return {"ok": ok, "text": text, **extra} if ok else {"ok": False, "error": text}
 
-    async def decide(self, approval_id: int, approve: bool, nonce: str, message_id: int | None) -> dict:
+    async def decide(self, approval_id: int, approve: bool, nonce: str, message_id: int | None,
+                     always: bool = False) -> dict:
         current = self.approvals.get(approval_id)
         # The nonce is only ever given to the bridge (approvals.pending) and the button it sent; the
         # message id is the one the bridge recorded for that button. A forged button fails both.
@@ -178,6 +253,9 @@ class Daemon:
             raise ToolError("unknown or forged approval button")
         if current.get("message_id") is not None and message_id != current["message_id"]:
             raise ToolError("this button isn't the approval message that was sent for this request")
+        grants = json.loads(current.get("grants") or "null")
+        if always and not (approve and grants):
+            raise ToolError("this request has no “always” option")
         item = self.approvals.claim(approval_id, "approved" if approve else "rejected")
         if item is None:
             state = (self.approvals.get(approval_id) or {}).get("status", "unknown")
@@ -185,6 +263,10 @@ class Daemon:
         if not approve:
             log.info("approval #%s rejected", approval_id)
             return {"ok": True, "status": "rejected", "text": "Rejected; nothing was done."}
+        if always and self.tg_store:
+            for g in grants:  # from the stored request, never from the button
+                self.tg_store.grant(int(g["peer_id"]), g["action"], g["title"])
+            log.info("approval #%s approved with a standing permission", approval_id)
         ok, text, status = False, "interrupted", "failed"
         try:
             ok, text, _ = await execute(self.services, json.loads(item["ops"]))
@@ -296,7 +378,13 @@ async def _serve(home: Path) -> None:
         log.info("todoist: %s, gmail: %s, youtube: %s", "on" if services.todoist_client else "off",
                  "on" if services.gmail_client and services.gmail_client.auth.configured() else "off",
                  services.youtube.status())
-        daemon = Daemon(services, Approvals(home / "approvals.sqlite3"), policy, systemd_main_pid_check(unit))
+        store = TelegramStore(home / "telegram.sqlite3")
+        services.telegram_side = TelegramSide(TgWriterClient(store), store, load_telegram_rules(home / "config.toml"))
+        approvals = Approvals(home / "approvals.sqlite3")
+        for approval_id in approvals.recover():
+            store.notice(f"⚠️ Request #{approval_id} was approved, but the tools service stopped while running it; "
+                         "the outcome is unknown. Check before asking again.")
+        daemon = Daemon(services, approvals, policy, systemd_main_pid_check(unit))
         refresher = asyncio.create_task(refresh_meta_tokens(services))  # noqa: F841 (runs for the daemon's life)
         server = await serve_socket(daemon, socket_path())
         log.info("listening on %s", socket_path())

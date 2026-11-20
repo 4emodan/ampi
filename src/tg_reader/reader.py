@@ -1,7 +1,8 @@
-"""Answers read-only requests against a Telethon client.
+"""Answers read requests against a Telethon client (writing lives in writer.py, for ampi-tools only).
 
-Only `iter_dialogs` and `iter_messages` are ever called, neither of which marks anything as read.
-The client is duck-typed so tests can pass a fake.
+Reading only calls `iter_dialogs`, `iter_messages` and `get_messages`, none of which marks anything as
+read. Messages the assistant itself sent are labelled "Me (sent by Ampi)", so they are never mistaken for
+the owner's own words. The client is duck-typed so tests can pass a fake.
 """
 
 from __future__ import annotations
@@ -134,9 +135,9 @@ def _hidden_links(msg: Any) -> list[str]:
     return urls
 
 
-def format_message(msg: Any, chat_name: str | None = None) -> str:
+def format_message(msg: Any, chat_name: str | None = None, by_ampi: bool = False) -> str:
     when = msg.date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
-    who = "Me" if getattr(msg, "out", False) else (
+    who = ("Me (sent by Ampi)" if by_ampi else "Me") if getattr(msg, "out", False) else (
         getattr(msg, "post_author", None) or display_name(getattr(msg, "sender", None))
     )
     head = f"### {when} UTC · {who} (#{msg.id})"
@@ -175,6 +176,12 @@ class Reader:
         self._cooldown_until = 0.0
         self._resolves: deque[float] = deque()
         self._resolved: dict[str, int] = {}  # @username -> peer id, so repeat lookups cost nothing
+        self.ampi_sent: set[tuple[int, int]] = set()  # (peer id, message id) the assistant sent (writer.py)
+        self.self_id: int | None = None  # the account's own id (Saved Messages)
+
+    def _by_ampi(self, peer_id: int | None, msg: Any) -> bool:
+        peer = self.self_id if peer_id is None else peer_id
+        return (peer, msg.id) in self.ampi_sent
 
     async def handle(self, request: dict) -> dict:
         """Never raises: errors come back as {"ok": False, "error": ...}."""
@@ -336,7 +343,7 @@ class Reader:
         start = parse_when(since)
         end = parse_when(until, end_of_day=True)
         before = _opt_int(before_id, "before_id")
-        entity, name, _ = await self.resolve(chat)
+        entity, name, peer_id = await self.resolve(chat)
         kwargs: dict[str, Any] = {"limit": None if start else n + 1}  # one extra shows there are more
         if end:
             kwargs["offset_date"] = end
@@ -363,7 +370,7 @@ class Reader:
         body = [header]
         if more:
             body.append(f"(limit {n} reached; for older ones run again with --before-id {messages[0].id})")
-        body += [format_message(m) for m in messages]
+        body += [format_message(m, by_ampi=self._by_ampi(peer_id, m)) for m in messages]
         return "\n\n".join(body)
 
     async def since(self, chat: str, after_id: Any = None, limit: int = SINCE_BATCH) -> dict:
@@ -380,7 +387,7 @@ class Reader:
         more = len(fetched) > limit
         messages = fetched[:limit]
         last_id = max([after] + [m.id for m in messages])
-        text = "\n\n".join(format_message(m) for m in messages)
+        text = "\n\n".join(format_message(m, by_ampi=self._by_ampi(peer_id, m)) for m in messages)
         return {"text": text, "count": len(messages), "last_id": last_id, "chat": name, "peer_id": peer_id,
                 "more": more}
 
@@ -392,7 +399,8 @@ class Reader:
         async for m in self.client.iter_messages(None, search=query, limit=n):
             if getattr(m, "chat_id", None) in self.deny:
                 continue
-            found.append(format_message(m, chat_name=display_name(getattr(m, "chat", None))))
+            found.append(format_message(m, chat_name=display_name(getattr(m, "chat", None)),
+                                        by_ampi=self._by_ampi(getattr(m, "chat_id", None), m)))
         if not found:
             return f'Nothing found for "{query}".'
         return "\n\n".join([f'# {len(found)} messages matching "{query}" (newest first)'] + found)

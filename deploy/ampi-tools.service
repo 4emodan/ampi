@@ -37,6 +37,9 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictNamespaces=true
 RestrictSUIDSGID=true
+# Don't add ProtectProc=/ProcSubset=/PrivatePIDs= here: ampi-tools reads /proc/<pid>/stat of the assistant's
+# processes to tell which chat run a request comes from. Hiding them makes every request "unknown"
+# (safe, but then nothing could be sent to Telegram without asking).
 
 [Install]
 WantedBy=multi-user.target

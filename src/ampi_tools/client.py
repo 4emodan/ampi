@@ -461,6 +461,73 @@ def instagram_main(argv: list[str] | None = None) -> int:
     return _main("instagram", instagram_parser(), instagram_ops, argv)
 
 
+# --- telegram: writing as the owner (through ampi-tools) ----------------------------------------------
+
+DRAFT_MAX_AGE = 600  # a draft file must have been written in the last 10 minutes
+
+
+def telegram_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="telegram",
+        description="Write in the owner's Telegram AS THE OWNER (their own account): send, edit, delete. Without "
+                    "permission for a chat it files a one-time request the owner approves in Telegram. Reading is "
+                    "`tg-read`.")
+    p.add_argument("-m", "--reason", help="why (shown to the owner with requests)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("send", help="send a message as the owner")
+    s.add_argument("chat", help='exact chat name, @username, id from `tg-read chats`, or "me" (Saved Messages)')
+    s.add_argument("text", nargs="?", help="the message (better: -f FILE)")
+    s.add_argument("-f", "--file", help="read the text from this file in the workspace (written just before)")
+    s.add_argument("--reply-to", type=int, help="message id (#123 in tg-read history) to reply to")
+    e = sub.add_parser("edit", help="change one of the owner's text messages")
+    e.add_argument("chat")
+    e.add_argument("message", type=int, help="message id (#123 in tg-read history)")
+    e.add_argument("text", nargs="?")
+    e.add_argument("-f", "--file")
+    d = sub.add_parser("delete", help="delete the owner's messages for everyone (always asks the owner)")
+    d.add_argument("chat")
+    d.add_argument("messages", type=int, nargs="+", help="message ids")
+    sub.add_parser("permissions", help="what may be written where without asking")
+    sub.add_parser("log", help="recent writes").add_argument("-n", "--limit", type=int, default=20)
+    r = sub.add_parser("revoke", help="remove a permission the owner gave with “always” (only in the owner's chat)")
+    r.add_argument("chat")
+    r.add_argument("--action", choices=["send", "edit"])
+    sub.add_parser("approvals", help="recent approval requests and their outcome")
+    return p
+
+
+def draft_text(a: argparse.Namespace, now: float | None = None) -> str | None:
+    if getattr(a, "file", None):
+        text = workspace_file(a.file, 20_000)
+        age = (time.time() if now is None else now) - Path(a.file).stat().st_mtime
+        if age > DRAFT_MAX_AGE:
+            raise SystemExit(f"{a.file!r} was written {int(age // 60)} minutes ago; write the draft again (to a new "
+                             "file name) right before sending, so it is the text you mean")
+        return text.rstrip("\n")
+    return a.text
+
+
+def telegram_ops(a: argparse.Namespace) -> list[dict]:
+    c = a.cmd
+    if c == "send":
+        return _op("telegram.send", chat=a.chat, text=draft_text(a), reply_to_msg=a.reply_to)
+    if c == "edit":
+        return _op("telegram.edit", chat=a.chat, message=a.message, text=draft_text(a))
+    if c == "delete":
+        return _op("telegram.delete", chat=a.chat, messages=a.messages)
+    if c == "permissions":
+        return _op("telegram.permissions")
+    if c == "log":
+        return _op("telegram.log", limit=a.limit)
+    if c == "revoke":
+        return _op("telegram.revoke", chat=a.chat, action=a.action)
+    raise SystemExit(f"unknown command {c}")
+
+
+def telegram_main(argv: list[str] | None = None) -> int:
+    return _main("telegram", telegram_parser(), telegram_ops, argv)
+
+
 # --- browse: the sandboxed web browser (ampi-browser) -------------------------------------------------
 
 BROWSER_SOCKET = "/run/ampi-browser.sock"

@@ -89,6 +89,45 @@ The login session could do anything your account can, so it is kept away from th
 5. In `config.toml`, add `"Skill"` and `"Bash(tg-read:*)"` to `allowed_tools`, then `systemctl restart claude-assistant`.
 
 To revoke it: Telegram → Settings → Devices → **Ampi reader (read-only)** → Terminate session, and `systemctl disable --now tg-reader`.
+(Telegram keeps showing that device name from the original login, even now that it can also write; see 7b.)
+
+### 7b. Writing in Telegram as you: send, edit, delete (optional)
+
+With the `telegram` command Ampi can send messages, edit them and delete them **from your own account**.
+The reader's login does the writing, but the assistant never reaches it: requests go through ampi-tools,
+which alone can use the reader's second socket (`/run/tg-writer`, group `tgwrite`, and the reader also
+checks the caller is the `ampitools` user).
+
+- **By default every write is a one-time request**: you get the exact message, the chat (with its id, size and
+  whether it's public) and Approve / Reject buttons. For a single message to a person or a small group there is
+  also **✅ + always here**: approve it and let Ampi send there without asking for 30 days.
+- **Per-chat permissions** in `/home/ampitools/config.toml` (root-owned; Ampi can't change it):
+  ```toml
+  [telegram]
+  default = "ask"                  # or "never": Ampi can't even ask, except where allowed below
+  [[telegram.chats]]
+  chat = 123456789                 # the id from `tg-read chats` (ask Ampi); "me" = your Saved Messages
+  name = "Anna"                    # just a label for you
+  allow = ["send", "edit"]         # without asking (edit: only Ampi's own message within 10 minutes)
+  [[telegram.chats]]
+  chat = -1001234567890
+  never = true                     # never write here, not even asking
+  ```
+  then `systemctl restart ampi-tools`. Ask Ampi "what are your Telegram permissions?" or "stop sending to Anna
+  without asking" (it can remove "always" permissions, never add them).
+- **Even where allowed, Ampi asks first** for: anything a watcher, group run or unknown process wants, links,
+  @mentions, emails, phone numbers or 4+ digits, text starting with "/", channels, groups over 50 members, other
+  people's chats it isn't in, deleting, and editing your own (not Ampi's) messages. At most 10 automatic messages
+  per chat and 20 in total a day; **every automatic message is reported to you** in your chat with Ampi.
+- **Never possible**: writing to bots, to chats outside your chat list, to Telegram's login-code chat, or to
+  the chats Ampi reads itself (its groups and watched chats: a message from you there would count as your
+  command); formatting, files, forwarding, reactions, moderating other people's messages.
+- **Account safety**: at most 10 writes a minute, 150 a day and 10 different chats a day. If Telegram signals
+  spam or flood limits, writing pauses (24 hours after a spam signal) and you're told.
+- Ampi's messages show as "Me (sent by Ampi)" when it reads chats, so it never mistakes them for yours.
+
+Setup (after section 7 and section 8): re-run `deploy/install-tg-reader.sh` and `deploy/install-tools.sh`, then
+add `"Bash(telegram:*)"` to `allowed_tools` in `config.toml` and `systemctl restart claude-assistant`.
 
 ## 8. Todoist and Gmail (optional)
 

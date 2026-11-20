@@ -45,9 +45,14 @@ if [[ ! -f $TOOLS_HOME/config.toml ]]; then
   install -o root -g "$TOOLS_USER" -m 640 "$SRC_DIR/deploy/ampi-tools.config.example.toml" "$TOOLS_HOME/config.toml"
 fi
 
-echo "==> todoist, gmail, youtube, threads and instagram commands for $APP_USER"
+# Telegram writing goes through tg-reader's write socket (group tgwrite, made by install-tg-reader.sh).
+if getent group tgwrite >/dev/null; then
+  usermod -aG tgwrite "$TOOLS_USER"
+fi
+
+echo "==> todoist, gmail, youtube, threads, instagram and telegram commands for $APP_USER"
 install -d -o "$APP_USER" -g "$APP_USER" "$APP_HOME/.local/bin"
-for cmd in todoist gmail youtube threads instagram; do
+for cmd in todoist gmail youtube threads instagram telegram; do
   ln -sfn "$APP_HOME/app/.venv/bin/$cmd" "$APP_HOME/.local/bin/$cmd"
 done
 

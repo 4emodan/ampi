@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
@@ -44,17 +45,37 @@ def request_text(item: dict) -> str:
     text = f"🔐 Approve? (request #{item['id']})\n\n{item['summary']}"
     if item.get("reason"):
         text += f"\n\nThe assistant says why: {item['reason']}"
+    if item.get("grant_label"):
+        text += f"\n\n“✅ + always here” also allows: {item['grant_label']}."
     return text
 
 
+def buttons_for(item: dict) -> list[list[dict]]:
+    approval_id, nonce = item["id"], item.get("nonce") or ""
+    rows = [[
+        {"text": "✅ Approve", "callback_data": f"ap:{approval_id}:{nonce}:y"},
+        {"text": "❌ Reject", "callback_data": f"ap:{approval_id}:{nonce}:n"},
+    ]]
+    if item.get("grant_label"):  # its own row, so it isn't tapped by mistake
+        rows.append([{"text": "✅ + always here", "callback_data": f"ap:{approval_id}:{nonce}:a"}])
+    return rows
+
+
+PROTECT_EVERY = 300  # seconds; also right after (re)connecting
+
+
 class ApprovalRelay:
-    def __init__(self, bot: "ProfileBot", socket: str, ask_fn: Ask = ask, interval: float = 3.0):
+    def __init__(self, bot: "ProfileBot", socket: str, ask_fn: Ask = ask, interval: float = 3.0,
+                 protected: Callable[[], tuple[list[int], bool]] | None = None, clock=None):
         self.bot = bot
         self.socket = socket
         self.ask = ask_fn
         self.interval = interval
+        self.protected = protected
+        self._clock = clock or time.monotonic
         self._sent: set[int] = set()  # requests shown already in this process (never send one twice)
         self._down = False
+        self._protected_at: float | None = None
 
     async def run_forever(self) -> None:
         while True:
@@ -71,21 +92,40 @@ class ApprovalRelay:
                 log.exception("approval relay failed")
             await asyncio.sleep(self.interval)
 
+    async def send_protected(self) -> None:
+        """Tells ampi-tools which chats the assistant reads itself (Telegram writes there are refused)."""
+        if self.protected is None:
+            return
+        now = self._clock()
+        if self._protected_at is not None and not self._down and now - self._protected_at < PROTECT_EVERY:
+            return
+        ids, complete = self.protected()
+        resp = await self.ask(self.socket, {"cmd": "telegram.protect", "ids": ids, "complete": complete}, timeout=10)
+        if resp.get("ok"):
+            self._protected_at = now if complete else None  # incomplete: try again next tick
+
+    async def send_notices(self, notices: list[dict]) -> None:
+        for n in notices:
+            try:
+                await self.bot.notify(fit(str(n.get("text", "")), MAX_MESSAGE))
+            except TelegramError as e:
+                log.warning("could not send notice #%s: %s", n.get("id"), e)
+                return  # try again next tick
+            await self.ask(self.socket, {"cmd": "notices.ack", "id": n["id"]}, timeout=10)
+
     async def tick(self) -> None:
+        await self.send_protected()
         resp = await self.ask(self.socket, {"cmd": "approvals.pending"})
         if not resp.get("ok"):
             raise ServiceError(resp.get("error", "approvals.pending failed"))
+        await self.send_notices(resp.get("notices") or [])
         for item in resp.get("items", []):
             approval_id = item["id"]
             if approval_id in self._sent:
                 continue
-            nonce = item.get("nonce") or ""
             # The summary may be up to ~3300 characters; it is never cut (ampi-tools refuses bigger ones).
             text = request_text(item)
-            buttons = [[
-                {"text": "✅ Approve", "callback_data": f"ap:{approval_id}:{nonce}:y"},
-                {"text": "❌ Reject", "callback_data": f"ap:{approval_id}:{nonce}:n"},
-            ]]
+            buttons = buttons_for(item)
             try:
                 sent = await self.bot.api.send_buttons(self.bot.profile.owner_chat_id, text, buttons)
             except TelegramError as e:
@@ -131,10 +171,13 @@ class ApprovalRelay:
         except ValueError:
             await self.answer_quietly(cq)
             return
-        approve = answer == "y"
+        if answer not in ("y", "a", "n"):  # anything unexpected is ignored, never taken as an answer
+            await self.answer_quietly(cq)
+            return
+        approve = answer in ("y", "a")
         await self.answer_quietly(cq, "Working on it…" if approve else "Rejected")
         payload = {"cmd": "approvals.decide", "id": approval_id, "approve": approve, "nonce": nonce,
-                   "message_id": message.get("message_id")}
+                   "message_id": message.get("message_id"), "always": answer == "a"}
         try:
             resp = await self.ask(self.socket, payload, timeout=DECIDE_TIMEOUT)
         except ServiceUnavailable:

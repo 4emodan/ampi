@@ -97,7 +97,7 @@ def test_requests_become_buttons_with_a_nonce_and_answers_go_back(setup):
     run(relay.handle_callback(callback()))
     decide = [p for _, p in tools.requests if p["cmd"] == "approvals.decide"]
     assert decide == [{"cmd": "approvals.decide", "id": 5, "approve": True, "nonce": "abcdef0123456789",
-                       "message_id": 77}]
+                       "message_id": 77, "always": False}]
     (edit,) = bot.api.edits
     assert edit[1] == 77 and edit[2].endswith("✅ Done (request #5)\nCompleted 1.")
     log = (bot.profile.workspace / "chats" / "private" / "main").glob("*.md")

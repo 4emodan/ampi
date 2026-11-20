@@ -17,3 +17,15 @@ auto_approve = []
 # Safe operations you want to approve anyway, e.g. archiving email or creating YouTube playlists:
 require_approval = []
 # require_approval = ["gmail.archive"]
+
+# Telegram messages Ampi writes AS YOU (docs/SETUP.md 7b). Without a rule here, every send/edit/delete is a
+# one-time request you approve (or "✅ + always here" for 30 days). Telegram writes can't go in auto_approve.
+[telegram]
+default = "ask"            # "never": Ampi can't even ask, except in chats allowed below
+# [[telegram.chats]]
+# chat = 123456789         # id from `tg-read chats`; "me" = your Saved Messages
+# name = "Anna"            # a label for you
+# allow = ["send"]         # "send" and/or "edit" (edit: Ampi's own message within 10 min); deleting always asks
+# [[telegram.chats]]
+# chat = -1001234567890
+# never = true

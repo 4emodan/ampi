@@ -37,6 +37,7 @@ from .youtube import (
 log = logging.getLogger(__name__)
 Result = str | dict
 APPROVAL_TTL = 3 * 24 * 3600
+TELEGRAM_APPROVAL_TTL = 24 * 3600
 MAX_SUMMARY = 3300  # what fits in one Telegram message with the header; longer requests are refused
 MAX_MAIL_BODY = 3000  # longer emails can't be shown in full for approval: draft them instead
 MAX_PENDING = 10
@@ -49,6 +50,7 @@ class Services:
     youtube_client: YouTube | None = None
     threads_client: Any = None  # meta.MetaClient
     instagram_client: Any = None
+    telegram_side: Any = None  # ops_telegram.TelegramSide
 
     @property
     def todoist(self) -> Todoist:
@@ -1064,11 +1066,14 @@ PREPARE: dict[str, Callable[[Services, dict], Awaitable[dict]]] = {
     "youtube.subscribe": _prepare_subscribe, "youtube.unsubscribe": _prepare_unsubscribe,
 }
 YOUTUBE_FAN_OUT = {"youtube.feed", "youtube.ids"}
+# Ops whose target decides whether they need approval: resolved before that decision (ops_telegram adds its
+# own). Each returns the op's new args, normally {"resolved": {...}}.
+PRE_RESOLVE: dict[str, Callable[[Services, dict], Awaitable[dict]]] = {}
 
 
 async def pre_resolve(services: Services, ops: list[dict]) -> list[dict]:
     """Runs before deciding whether a request needs approval: per-request limits, and the target of
-    `youtube.add` (its playlist's privacy decides). Errors refuse the whole request."""
+    `youtube.add` (its playlist's privacy decides) and of Telegram writes. Errors refuse the whole request."""
     if sum(o["op"] == "youtube.search" for o in ops) > 3:
         raise ToolError("at most 3 YouTube searches per request (they use a lot of the daily quota)")
     if sum(o["op"] in YOUTUBE_FAN_OUT for o in ops) > 1:
@@ -1077,6 +1082,8 @@ async def pre_resolve(services: Services, ops: list[dict]) -> list[dict]:
     for o in ops:
         if o["op"] == "youtube.add":
             o = {"op": o["op"], "args": {"resolved": await _prepare_add(services, o["args"])}}
+        elif o["op"] in PRE_RESOLVE:
+            o = {"op": o["op"], "args": await PRE_RESOLVE[o["op"]](services, o["args"])}
         out.append(o)
     return out
 
@@ -1216,38 +1223,62 @@ class Approvals:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
         have = {r[1] for r in self.db.execute("PRAGMA table_info(approvals)")}
-        for column, kind in (("nonce", "TEXT"), ("message_id", "INTEGER")):
+        for column, kind in (("nonce", "TEXT"), ("message_id", "INTEGER"), ("grants", "TEXT")):
             if column not in have:  # databases created by older versions
                 self.db.execute(f"ALTER TABLE approvals ADD COLUMN {column} {kind}")
         # Requests from before nonces existed can never be answered safely.
         self.db.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND nonce IS NULL")
         self.db.commit()
 
-    def add(self, ops: list[dict], summary: str, reason: str | None) -> int:
+    def add(self, ops: list[dict], summary: str, reason: str | None, grants: list[dict] | None = None) -> int:
         cur = self.db.execute(
-            "INSERT INTO approvals (created, ops, summary, reason, nonce) VALUES (?, ?, ?, ?, ?)",
-            (time.time(), json.dumps(ops), summary, reason, secrets.token_hex(8)),
+            "INSERT INTO approvals (created, ops, summary, reason, nonce, grants) VALUES (?, ?, ?, ?, ?, ?)",
+            (time.time(), json.dumps(ops), summary, reason, secrets.token_hex(8),
+             json.dumps(grants) if grants else None),
         )
         self.db.commit()
         return int(cur.lastrowid)
 
     def expire(self) -> None:
-        self.db.execute(
-            "UPDATE approvals SET status='expired' WHERE status='pending' AND created < ?",
-            (time.time() - APPROVAL_TTL,),
-        )
+        now = time.time()
+        self.db.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND created < ?",
+                        (now - APPROVAL_TTL,))
+        # A Telegram message approved days later would be stale ("on my way"): those expire after a day.
+        self.db.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND created < ? AND "
+                        "ops LIKE '%\"op\": \"telegram.%'", (now - TELEGRAM_APPROVAL_TTL,))
         self.db.commit()
 
-    def pending_count(self) -> int:
+    def pending_count(self, telegram: bool = False) -> int:
         self.expire()
-        return self.db.execute("SELECT COUNT(*) FROM approvals WHERE status='pending'").fetchone()[0]
+        q = "SELECT COUNT(*) FROM approvals WHERE status='pending'"
+        if telegram:
+            q += " AND ops LIKE '%\"op\": \"telegram.%'"
+        return self.db.execute(q).fetchone()[0]
 
     def unnotified(self) -> list[dict]:
         self.expire()
         rows = self.db.execute(
-            "SELECT id, summary, reason, nonce, created FROM approvals WHERE status='pending' AND notified=0 ORDER BY id"
+            "SELECT id, summary, reason, nonce, created, grants FROM approvals WHERE status='pending' AND notified=0 "
+            "ORDER BY id"
         )
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            item = dict(r)
+            grants = json.loads(item.pop("grants") or "null")
+            if grants:  # what the "always" button would allow, shown in the request text
+                item["grant_label"] = "; ".join(f"{g['action']} in “{g['title']}” without asking for 30 days"
+                                                for g in grants)
+            out.append(item)
+        return out
+
+    def recover(self) -> list[int]:
+        """Requests that were approved but whose run never finished (the daemon stopped): outcome unknown."""
+        ids = [r[0] for r in self.db.execute("SELECT id FROM approvals WHERE status='approved' AND result IS NULL")]
+        self.db.executemany("UPDATE approvals SET status='unknown', result=? WHERE id=?",
+                            [("interrupted: the tools service stopped while running it; the outcome is unknown", i)
+                             for i in ids])
+        self.db.commit()
+        return ids
 
     def mark_notified(self, approval_id: int, message_id: int | None) -> None:
         self.db.execute("UPDATE approvals SET notified=1, message_id=? WHERE id=?", (message_id, approval_id))
@@ -1297,7 +1328,7 @@ async def prepare(services: Services, ops: list[dict]) -> list[dict]:
         elif o["op"] == "gmail.send_draft":
             d = await services.gmail.get_draft(a.get("id", ""))
             a["message_id"] = d.get("message", {}).get("id")
-        elif o["op"] == "youtube.add" and "resolved" in a:
+        elif (o["op"] == "youtube.add" or o["op"] in PRE_RESOLVE) and "resolved" in a:
             pass  # resolved by pre_resolve() in this same request; callers can't set `resolved`
         elif o["op"] in PREPARE:
             a = {"resolved": await PREPARE[o["op"]](services, a)}
@@ -1351,5 +1382,6 @@ async def summarize(services: Services, ops: list[dict], policy: Policy) -> str:
     return summary
 
 
-# Threads and Instagram register their operations here (they use the helpers above).
+# Threads, Instagram and Telegram register their operations here (they use the helpers above).
 from . import ops_social  # noqa: E402,F401
+from . import ops_telegram  # noqa: E402,F401
