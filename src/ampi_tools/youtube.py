@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .gmail import GoogleAuth
+from .gmail import IGNORABLE, GoogleAuth
 from .todoist import ToolError
 
 log = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ NO_WRITE = "write access to YouTube isn't set up yet (`ampi-tools youtube-login 
 
 VIDEO_RE = re.compile(r"[A-Za-z0-9_-]{11}")
 CHANNEL_RE = re.compile(r"UC[A-Za-z0-9_-]{22}")
-LEGACY_RE = re.compile(r"(c|user)/([A-Za-z0-9._-]{1,100})")  # old /c/name and /user/name channel URLs
+LEGACY_RE = re.compile(r"(c|user)/((?=[A-Za-z0-9._-]*[A-Za-z0-9])[A-Za-z0-9._-]{1,100})")  # old /c/name and /user/name channel URLs
 PLAYLIST_RE = re.compile(r"[A-Za-z0-9_-]{2,64}")
 SPECIAL_PLAYLIST = re.compile(r"(LL|WL|HL|FL|UU|RD|OL|UL|LM|TL)")  # likes, watch later, uploads, mixes, albums...
 HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be",
@@ -118,7 +118,7 @@ def _handle(s: str) -> str | None:
     bidi or zero-width characters."""
     h = unicodedata.normalize("NFKC", s)
     body = h[1:]
-    if not h.startswith("@") or not 3 <= len(body) <= 30:
+    if not h.startswith("@") or not 3 <= len(body) <= 30 or IGNORABLE.search(h):
         return None
     if all(ch.isalnum() or ch in "_.-" or unicodedata.category(ch) in ("Mn", "Mc") for ch in body):
         return h
@@ -341,32 +341,50 @@ class Limiter:
         self._next = 0.0
         self._lock = asyncio.Lock()
         self.paused_until = 0.0
-        self._hour: list[float] = []  # start times of the requests in the last hour
+        self._forbidden: dict[str, float] = {}
+        # Start times of the requests in the last hour, per priority (watchers and the assistant can't
+        # use up each other's allowance).
+        self._hour: dict[str, list[float]] = {p: [] for p in HOURLY}
+        self.sent = 0
 
     def check(self, priority: str = "normal") -> None:
         if time.monotonic() < self.paused_until:
             minutes = int((self.paused_until - time.monotonic()) / 60) + 1
             raise ToolError(f"YouTube refused requests from the server; paused for {minutes} more minute(s)")
         now = time.monotonic()
-        self._hour = [t for t in self._hour if now - t < 3600]
-        if len(self._hour) >= HOURLY[priority]:
+        self._hour[priority] = [t for t in self._hour[priority] if now - t < 3600]
+        if len(self._hour[priority]) >= HOURLY[priority]:
             raise ToolError("too many YouTube requests in the last hour; try again later")
 
     @contextlib.asynccontextmanager
     async def slot(self, priority: str = "normal") -> AsyncIterator[None]:
         self.check(priority)
-        self._hour.append(time.monotonic())
         async with self._sem:
             async with self._lock:
                 wait = self._next - time.monotonic()
                 self._next = max(time.monotonic(), self._next) + self._gap
             if wait > 0:
                 await asyncio.sleep(wait)
+            # Checked again right before sending: a request queued behind one that YouTube refused
+            # must not go out (a fan-out queues up to 200 of them).
+            self.check(priority)
+            self._hour[priority].append(time.monotonic())
+            self.sent += 1
             yield
 
-    def refused(self) -> None:
-        self.paused_until = time.monotonic() + BACKOFF
+    def refusal(self, status: int, path: str) -> bool:
+        """Returns True if this answer pauses everything: a 429 at once; 403s only from 3 different paths
+        within 10 minutes (one forbidden feed is about that feed, not about the server)."""
+        now = time.monotonic()
+        if status == 403:
+            self._forbidden = {p: t for p, t in self._forbidden.items() if now - t < 600}
+            self._forbidden[path] = now
+            if len(self._forbidden) < 3:
+                return False
+        self.paused_until = now + BACKOFF
+        self._forbidden = {}
         log.warning("youtube.com refused requests; pausing for %s minutes", BACKOFF // 60)
+        return True
 
 
 class Quota:
@@ -400,6 +418,11 @@ class Quota:
                             "it resets at midnight Pacific time)")
         self.used[kind] = self.used.get(kind, 0) + units
         self._save()
+
+    def left(self, kind: str) -> int:
+        if self.day != self.today():
+            return BUDGET[kind]
+        return max(0, BUDGET[kind] - self.used.get(kind, 0))
 
     def _save(self) -> None:
         if not self.path:
@@ -482,8 +505,7 @@ class YouTube:
                     status = resp.status_code
             except httpx.TransportError as e:
                 raise ToolError(f"YouTube unreachable ({type(e).__name__})") from e
-        if status in blocked:
-            self.limiter.refused()
+        if status in blocked and self.limiter.refusal(status, path):
             raise ToolError(f"YouTube refused the request ({status}); YouTube requests are paused for 30 minutes")
         return httpx.Response(status, content=b"".join(chunks))
 
@@ -516,23 +538,35 @@ class YouTube:
         self.entries.update({e["id"]: e for e in entries})
         return title, entries
 
-    async def recent(self, channel_ids: list[str], days: float, shorts: bool,
-                     priority: str = "normal") -> tuple[list[dict], list[str], int]:
-        """Uploads of these channels from the last `days` days, newest first, each with "src" (the channel
-        asked for). Returns (entries, channels read, channels that failed or ran out of time).
-        Channels fetched longest ago go first, so a deadline never leaves out the same channels every time."""
+    def _last_fetch(self, ref: str) -> float:
+        cid = ref if CHANNEL_RE.fullmatch(ref) else (self._channels.get(ref) or ("", 0.0))[0]
+        return self._fetched.get(f"c:{cid}", 0.0)
+
+    async def recent(self, refs: list[str], days: float, shorts: bool,
+                     priority: str = "normal") -> tuple[list[dict], list[str], int, int]:
+        """Uploads of these channels (UC… ids or other channel references) from the last `days` days, newest
+        first, each with "src" (its channel id). Returns (entries, channel ids read, channels that failed or
+        ran out of time, channels left for a later run).
+
+        At most MAX_CHANNELS per run, those read longest ago first, so with more channels (or a deadline)
+        every channel still gets its turn. Handles are looked up inside the deadline too, and a channel that
+        can't be found only counts as failed."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        wanted = list(dict.fromkeys(channel_ids))[:MAX_CHANNELS]
-        wanted.sort(key=lambda c: self._fetched.get(f"c:{c}", 0.0))
+        unique_refs = list(dict.fromkeys(refs))
+        unique_refs.sort(key=self._last_fetch)  # stable: never-read channels keep their order
+        wanted, skipped = unique_refs[:MAX_CHANNELS], max(0, len(unique_refs) - MAX_CHANNELS)
         self.limiter.check(priority)
 
-        async def one(cid: str) -> tuple[str, list[dict]]:
+        async def one(ref: str) -> tuple[str, list[dict]]:
+            cid = await self.channel_id(ref)
             return cid, (await self.feed(channel_id=cid, priority=priority))[1]
 
-        tasks = [asyncio.ensure_future(one(c)) for c in wanted]
+        tasks = [asyncio.ensure_future(one(r)) for r in wanted]
         done, pending = await asyncio.wait(tasks, timeout=FAN_OUT_DEADLINE) if tasks else (set(), set())
         for t in pending:
             t.cancel()
+        if pending:
+            await asyncio.wait(pending)  # let cancelled requests release the limiter before returning
         entries, ok = [], []
         for t in done:
             if t.cancelled() or t.exception() is not None:
@@ -545,7 +579,7 @@ class YouTube:
         unique = list({e["id"]: e for e in entries}.values())
         if not ok and wanted:
             self.limiter.check(priority)  # explains a pause, if that's why
-        return unique, ok, len(wanted) - len(ok)
+        return unique, ok, len(wanted) - len(ok), skipped
 
     async def oembed(self, vid: str) -> dict:
         """Title and channel of any public video, without the API (YouTube's official embed info)."""

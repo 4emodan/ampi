@@ -27,6 +27,7 @@ from typing import Any
 
 from .gmail import IGNORABLE, Gmail, format_full, headers
 from .todoist import Todoist, ToolError, api_priority
+from . import youtube as ytmod
 from .youtube import (
     CHANNEL_RE, MAX_CHANNELS, NO_WRITE, SPECIAL_PLAYLIST, YouTube, channel_ref, count, format_entry, format_video,
     one_line, playlist_id, seconds, source_ref, video_id, watch_url,
@@ -740,11 +741,13 @@ async def yt_uploads(s: Services, a: dict) -> Result:
         items = await s.youtube.playlist_items("UU" + cid[2:], limit)
         ids = [i.get("contentDetails", {}).get("videoId") for i in items]
         videos = await s.youtube.videos([i for i in ids if isinstance(i, str)])
-        note = "" if shorts else " (videos under a minute left out, as likely Shorts)"
-        if not shorts:
-            videos = [v for v in videos if seconds(v.get("contentDetails", {}).get("duration")) > 60]
-        return _yt_list(f"{len(videos)} latest uploads{note}:", [format_video(v, full=False) for v in videos],
-                        "No uploads.")
+        known_shorts = {i for i, e in s.youtube.entries.items() if e.get("short")}
+        if not shorts:  # Shorts known from the channel's feed are left out; others up to 3 minutes are marked
+            videos = [v for v in videos if v.get("id") not in known_shorts]
+        lines = [format_video(v, full=False) + ("\n  (3 minutes or less: may be a Short)"
+                                                if 0 < seconds(v.get("contentDetails", {}).get("duration")) <= 180
+                                                else "") for v in videos]
+        return _yt_list(f"{len(videos)} latest uploads:", lines, "No uploads.")
     title, entries = await s.youtube.feed(channel_id=cid)
     entries = [e for e in entries if shorts or not e["short"]][:limit]
     more = "" if limit <= 15 else "\n(The RSS feed only has the 15 newest uploads; more needs the YouTube API.)"
@@ -823,32 +826,34 @@ async def yt_liked(s: Services, a: dict) -> Result:
                     [format_video(v, full=False) for v in videos], "No liked videos.")
 
 
-async def _source_channels(s: Services, source: str, kind: str = "read") -> tuple[list[str], str]:
-    """Channel ids of a source, and a note if some were left out."""
+async def _source_channels(s: Services, source: str, kind: str = "read") -> list[str]:
+    """Channel references of a source: the subscriptions' UC… ids, or the given channels (looked up later,
+    inside the fan-out's deadline)."""
     if source == "subscriptions":
         subs = await s.youtube.subscriptions(kind=kind)
         ids = [x.get("snippet", {}).get("resourceId", {}).get("channelId") for x in subs]
-        ids = [i for i in ids if isinstance(i, str) and CHANNEL_RE.fullmatch(i)]
-    else:
-        ids = [await s.youtube.channel_id(ref) for ref in source.split(",")]
-    note = ""
-    if len(ids) > MAX_CHANNELS:
-        note = f"(Only the first {MAX_CHANNELS} of {len(ids)} channels are checked.)"
-        ids = ids[:MAX_CHANNELS]
-    return ids, note
+        return [i for i in ids if isinstance(i, str) and CHANNEL_RE.fullmatch(i)]
+    return source.split(",")
+
+
+def _fan_out_notes(total: int, failed: int, skipped: int) -> str:
+    notes = []
+    if failed:
+        notes.append(f"{failed} of {total} channels couldn't be checked this time.")
+    if skipped:
+        notes.append(f"{skipped} more channels are checked in later runs (at most {MAX_CHANNELS} at a time).")
+    return "\n(" + " ".join(notes) + ")" if notes else ""
 
 
 async def yt_feed(s: Services, a: dict) -> Result:
     source = a.get("source") or (a["channel"] if a.get("channel") else "subscriptions")
-    channels, note = await _source_channels(s, source)
+    channels = await _source_channels(s, source)
     days = a.get("days", 2)
-    entries, _, failed = await s.youtube.recent(channels, days, a.get("shorts", False))
+    entries, _, failed, skipped = await s.youtube.recent(channels, days, a.get("shorts", False))
     entries = entries[:min(a.get("limit", 100), 300)]
-    notes = [n for n in (note, f"({failed} of {len(channels)} channels couldn't be checked this time.)"
-                         if failed else "") if n]
     return _yt_list(f"{len(entries)} uploads in the last {days} day(s) from {len(channels)} channel(s), newest first:",
                     [format_entry(e) for e in entries], f"No new uploads in the last {days} day(s).") + \
-        ("\n" + "\n".join(notes) if notes else "")
+        _fan_out_notes(len(channels), failed, skipped)
 
 
 WATCH_DAYS = 3  # the watcher's window; see youtube.ids
@@ -859,13 +864,14 @@ async def yt_ids(s: Services, a: dict) -> Result:
     (an id it forgot is also too old to come back as new). `pairs` and `channels_ok` let the watcher take in
     channels it hasn't read before quietly instead of reporting their backlog."""
     (source,) = need(a, "source")
-    channels, _ = await _source_channels(s, source, kind="watch")
-    entries, ok, failed = await s.youtube.recent(channels, WATCH_DAYS, a.get("shorts", False), priority="watch")
+    channels = await _source_channels(s, source, kind="watch")
+    entries, ok, failed, skipped = await s.youtube.recent(channels, WATCH_DAYS, a.get("shorts", False),
+                                                          priority="watch")
     if channels and not ok:
         raise ToolError("none of the YouTube feeds could be read")
     entries = entries[:1000]
     return {"ids": [e["id"] for e in entries], "pairs": [[e["id"], e["src"]] for e in entries],
-            "channels_ok": ok, "failed": failed, "text": ""}
+            "channels_ok": ok, "failed": failed, "skipped": skipped, "text": ""}
 
 
 async def yt_show(s: Services, a: dict) -> Result:
@@ -891,7 +897,8 @@ def _q(s: Any, limit: int = 80) -> str:
 
 
 def _non_latin(s: str) -> str:
-    return " ⚠ non-Latin letters, check the id" if any(c.isalpha() and ord(c) > 0x24F for c in s) else ""
+    """Look-alike letters (Cyrillic а, dotless ı, ...) can imitate a known channel's name."""
+    return " ⚠ non-ASCII letters, check the id" if any(c.isalpha() and not c.isascii() for c in s) else ""
 
 
 async def _video_titles(s: Services, ids: list[str]) -> dict[str, str]:
@@ -905,12 +912,21 @@ async def _prepare_add(s: Services, a: dict) -> dict:
         raise ToolError(f"at most {MAX_WRITE_VIDEOS} videos per request")
     if not s.youtube.can_write:
         raise ToolError(s.youtube.status() + ": " + NO_WRITE)
+    _check_write_budget(s, len(ids))
     p = await _owner_playlist(s, a)
     titles = await _video_titles(s, ids)
     missing = [i for i in ids if i not in titles]
     if missing:
         raise ToolError(f"no such video(s): {', '.join(missing)}")
     return {"playlist": p, "videos": [{"id": i, "title": titles[i]} for i in ids]}
+
+
+def _check_write_budget(s: Services, n: int) -> None:
+    """All of a request's changes must fit today's budget, so it can't stop halfway for lack of quota."""
+    left = s.youtube.quota.left("write")
+    if n * ytmod.COST["write"] > left:
+        raise ToolError(f"today's YouTube budget allows {left // ytmod.COST['write']} more change(s), "
+                        f"this needs {n}; try again tomorrow (Pacific time) or with fewer videos")
 
 
 async def yt_add(s: Services, a: dict) -> Result:
@@ -920,9 +936,22 @@ async def yt_add(s: Services, a: dict) -> Result:
         if r["playlist"]["privacy"] != "private":
             raise ToolError("adding to a playlist that isn't private needs the owner's approval")
     p = r["playlist"]
-    for v in r["videos"]:
-        await s.youtube.add_to_playlist(p["id"], v["id"])
-    return f"Added {len(r['videos'])} video(s) to “{p['title']}” ({p['privacy']})."
+    # Videos already in the playlist are skipped, so repeating a request (e.g. after a failure) adds nothing twice.
+    present = {i.get("contentDetails", {}).get("videoId")
+               for i in await s.youtube.playlist_items(p["id"], 5000, account=True)}
+    todo = [v for v in r["videos"] if v["id"] not in present]
+    _check_write_budget(s, len(todo))
+    done: list[str] = []
+    for v in todo:
+        try:
+            await s.youtube.add_to_playlist(p["id"], v["id"])
+        except ToolError as e:
+            raise ToolError(f"added {len(done)} of {len(todo)} ({', '.join(done) or 'none'}) to “{p['title']}”, "
+                            f"then: {e}") from None
+        done.append(v["id"])
+    skipped = len(r["videos"]) - len(todo)
+    return (f"Added {len(todo)} video(s) to “{p['title']}” ({p['privacy']})."
+            + (f" {skipped} were already in it." if skipped else ""))
 
 
 async def _prepare_remove(s: Services, a: dict) -> dict:
@@ -994,8 +1023,9 @@ async def yt_unsubscribe(s: Services, a: dict) -> Result:
 async def describe_yt_add(s: Services, a: dict) -> str:
     r = a.get("resolved") or {}
     p = r.get("playlist", {})
+    shared = p.get("privacy") != "private"
     lines = [f"Add {len(r.get('videos', []))} video(s) to the {_q(p.get('privacy', '?')).upper()} playlist "
-             f"“{_q(p.get('title', '?'))}” [{p.get('id')}] (other people can see it):"]
+             f"“{_q(p.get('title', '?'))}” [{p.get('id')}]" + (" (other people can see it):" if shared else ":")]
     lines += [f"  {n}. {v['title']} {watch_url(v['id'])}" for n, v in enumerate(r.get("videos", []), 1)]
     return "\n".join(lines)
 
@@ -1131,7 +1161,7 @@ OPS: dict[str, Op] = {op.name: op for op in [
     Op("youtube.ids", False, yt_ids),
     Op("youtube.show", False, yt_show),
     Op("youtube.new_playlist", False, yt_new_playlist),
-    Op("youtube.add", False, yt_add, describe_yt_add, "Add to a NON-PRIVATE playlist"),
+    Op("youtube.add", False, yt_add, describe_yt_add, "Add to playlist"),
     Op("youtube.remove", True, yt_remove, describe_remove, "REMOVE from playlist"),
     Op("youtube.subscribe", True, yt_subscribe, describe_subscribe, "SUBSCRIBE"),
     Op("youtube.unsubscribe", True, yt_unsubscribe, describe_unsubscribe, "UNSUBSCRIBE"),

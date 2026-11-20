@@ -205,7 +205,8 @@ def test_channel_and_playlist_references():
     assert channel_ref(f"youtube.com/channel/{MKBHD}") == MKBHD
     assert channel_ref("https://www.youtube.com/c/Some.Name") == "c/Some.Name"
     assert channel_ref("https://www.youtube.com/@%CE%B1%CE%B2%CE%B3") == "@αβγ"  # decoded once, then checked
-    for bad in ("@a b", "@x‮yz", "@ab​cd", "mkbhd", "https://evil.com/@mkbhd", "@../../etc"):
+    for bad in ("@a b", "@x‮yz", "@ab​cd", "@abc️def", "mkbhd", "https://evil.com/@mkbhd",
+                "@../../etc", "https://www.youtube.com/c/..", "https://www.youtube.com/user/."):
         with pytest.raises(ToolError):
             channel_ref(bad)
     assert playlist_id("https://www.youtube.com/playlist?list=PLabcdefghij") == "PLabcdefghij"
@@ -307,11 +308,40 @@ def test_fan_out_returns_partial_results_at_the_deadline(yt, monkeypatch):
     monkeypatch.setattr(ytmod, "FAN_OUT_DEADLINE", 0.3)
     daemon, server, client = yt()
     server.slow.add(OTHER)
-    resp = ask(daemon, ("youtube.ids", {"source": f"{MKBHD},{OTHER}"}))
+    resp = ask(daemon, ("youtube.ids", {"source": f"{MKBHD},{OTHER}"}), pid=BRIDGE)
     assert resp["ok"] and resp["channels_ok"] == [MKBHD] and resp["failed"] == 1
     assert resp["pairs"] == [[V1, MKBHD]]  # the Short is left out
-    # Next time, the channel that ran out of time goes first.
-    assert sorted([MKBHD, OTHER], key=lambda c: client._fetched.get(f"c:{c}", 0.0))[0] == OTHER
+
+
+def test_watcher_ops_are_only_for_the_bridge(yt):
+    daemon, server, _ = yt()
+    resp = ask(daemon, ("youtube.ids", {"source": MKBHD}))
+    assert not resp["ok"] and "for watchers" in resp["error"] and server.calls == []
+
+
+def test_every_channel_gets_its_turn_beyond_the_per_run_cap(yt, monkeypatch):
+    monkeypatch.setattr(ytmod, "MAX_CHANNELS", 2)
+    daemon, server, client = yt()
+    chans = [f"UC{str(i) * 22}" for i in range(5)]
+    for c in chans:
+        server.feeds[c] = [(f"vid{c[2]}xxxxxx"[:11], "t", False)]
+    seen = []
+    for _ in range(3):
+        _, ok, failed, skipped = run(client.recent(chans, 3, False))
+        assert failed == 0 and skipped == 3
+        seen += ok
+        client._feeds.clear()  # past the cache
+    assert set(seen) == set(chans)
+
+
+def test_a_refusal_stops_requests_already_queued(yt):
+    daemon, server, client = yt()
+    client.limiter = Limiter(concurrent=2, per_second=20)  # real pacing: the rest wait in the queue
+    chans = [f"UC{chr(65 + i) * 22}" for i in range(10)]
+    server.status["/feeds/videos.xml"] = 429
+    with pytest.raises(ToolError, match="paused"):
+        run(client.recent(chans, 3, False))
+    assert len([c for c in server.calls if c[2] == "/feeds/videos.xml"]) <= 2  # the ones already in flight
 
 
 # --- changes and approvals ------------------------------------------------------------------
@@ -319,15 +349,24 @@ def test_fan_out_returns_partial_results_at_the_deadline(yt, monkeypatch):
 
 def test_adding_to_a_private_playlist_runs_at_once(yt):
     daemon, server, _ = yt(auth=FakeAuth())
-    resp = ask(daemon, ("youtube.add", {"playlist_name": "watch SOON", "videos": [V1]}))
+    resp = ask(daemon, ("youtube.add", {"playlist_name": "watch SOON", "videos": [V2, V1]}))
     assert resp["ok"] and "approval" not in resp, resp
-    assert writes(server) == [("POST", "/youtube/v3/playlistItems")]
-    assert server.calls[-1][4]["snippet"]["playlistId"] == "PLprivate000001"
+    assert writes(server) == [("POST", "/youtube/v3/playlistItems")]  # V1 is already in it: not added twice
+    assert server.calls[-1][4]["snippet"] == {"playlistId": "PLprivate000001",
+                                               "resourceId": {"kind": "youtube#video", "videoId": V2}}
+    assert "1 were already in it" in resp["text"]
+
+
+def test_a_request_must_fit_the_days_write_budget(yt):
+    daemon, server, client = yt(auth=FakeAuth())
+    client.quota.day, client.quota.used = Quota.today(), {"write": ytmod.BUDGET["write"] - 50}
+    resp = ask(daemon, ("youtube.add", {"playlist_name": "Watch soon", "videos": [V2, V3]}))
+    assert not resp["ok"] and "allows 1 more change" in resp["error"] and writes(server) == []
 
 
 def test_adding_to_a_public_playlist_needs_approval_and_runs_what_was_shown(yt):
     daemon, server, _ = yt(auth=FakeAuth(), policy=Policy(auto_approve=frozenset(OPS_ALL)))
-    resp = ask(daemon, ("youtube.add", {"playlist": "PLpublic0000001", "videos": [V1, V2]}))
+    resp = ask(daemon, ("youtube.add", {"playlist": "PLpublic0000001", "videos": [V2, V3]}))
     assert resp["ok"] and resp["approval"] == 1, resp
     assert "PUBLIC playlist “Faves”" in resp["text"] and "  1. “Title '" in resp["text"]
     assert "\n• " not in resp["text"].split("\n• ", 1)[1]  # a title can't fake another summary line
@@ -372,7 +411,7 @@ def test_removing_and_subscriptions_always_ask_even_if_the_policy_says_not_to(yt
     assert resp["ok"] and resp["approval"] == 1, resp
     text = resp["text"]
     assert "REMOVE from playlist" in text and "Remove 2 video(s) from the PUBLIC playlist" in text
-    assert f"id {MKBHD}" in text and "non-Latin letters" in text  # a Cyrillic look-alike name is flagged
+    assert f"id {MKBHD}" in text and "non-ASCII letters" in text  # a Cyrillic look-alike name is flagged
     assert writes(server) == []
     assert approve(daemon)["status"] == "done"
     assert writes(server) == [("DELETE", "/youtube/v3/playlistItems"), ("DELETE", "/youtube/v3/playlistItems"),

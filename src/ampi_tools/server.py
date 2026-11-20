@@ -42,6 +42,7 @@ from .youtube import SCOPE_READ, SCOPE_WRITE, YouTube
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
 MAX_REQUEST = 1024 * 1024
 ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide"}
+WATCHER_ONLY = {"youtube.ids", "youtube.show"}
 log = logging.getLogger("ampi-tools")
 
 PidCheck = Callable[[int], Awaitable[bool]]
@@ -112,7 +113,11 @@ class Daemon:
             if cmd in ADMIN and not await self.trusted(pid):
                 raise ToolError("only the owner can answer approval requests (Telegram buttons)")
             if cmd == "run":
-                return await self.run(validate(request.get("ops")), request.get("reason"))
+                ops = validate(request.get("ops"))
+                # The watchers' YouTube ops use their own reserve of quota and requests; only the bridge has it.
+                if any(o["op"] in WATCHER_ONLY for o in ops) and not await self.trusted(pid):
+                    raise ToolError("youtube.ids/youtube.show are for watchers; use `youtube feed` / `youtube video`")
+                return await self.run(ops, request.get("reason"))
             if cmd == "approvals.list":
                 return {"ok": True, "text": self.list_text()}
             if cmd == "approvals.pending":
@@ -333,6 +338,9 @@ async def _check(home: Path) -> None:
             ok, text, _ = await execute(services, [{"op": op, "args": {}}])
             print(f"{name}: {'OK' if ok else text}")
         yt = services.youtube
+        quota = yt.quota.summary()
+        # Its own counters: the running daemon owns youtube-quota.json, and two writers would lose counts.
+        yt = YouTube(client, yt.auth, yt.api_key)
         try:
             title, _ = await yt.feed(channel_id="UCBR8-60-B28hp2BmDPdntcQ")  # YouTube's own channel
             feeds = f"RSS OK ({title})"
@@ -345,7 +353,7 @@ async def _check(home: Path) -> None:
                 api = ", API OK"
             except ToolError as e:
                 api = f", API failed: {e}"
-        print(f"YouTube: {yt.status()}; {feeds}{api}; {yt.quota.summary()}")
+        print(f"YouTube: {yt.status()}; {feeds}{api}; {quota}")
 
 
 def main(argv: list[str] | None = None) -> None:
