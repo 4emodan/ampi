@@ -38,6 +38,7 @@ WRITES_PER_DAY = 150
 CHATS_PER_DAY = 10
 SPAM_BLOCK = 24 * 3600
 BOTFATHER = 93372553
+TELEGRAM_SERVICE = frozenset({777000, 333000, 42777})  # login codes, notifications, Telegram's own account
 MAX_SENT_KEPT = 5000
 SPAM_ERRORS = {"PeerFloodError", "FloodWaitError", "FloodPremiumWaitError"}
 LOCK_WAIT = 20  # seconds to wait behind a read before answering "busy, nothing was sent"
@@ -243,7 +244,7 @@ class Writer:
         raise UserError(f"unknown command {cmd!r}")
 
     def _allowed(self, peer: int, protected: set[int]) -> int:
-        if peer in self.reader.deny or peer == BOTFATHER:
+        if peer in self.reader.deny or peer == BOTFATHER or peer in TELEGRAM_SERVICE:
             raise UserError("that chat is off limits")
         if peer in protected:
             raise UserError("the assistant reads that chat itself (one of its groups or watched chats); a message "
@@ -267,8 +268,8 @@ class Writer:
             return {"peer_id": self.self_id, "title": "Saved Messages", "kind": "saved", "username": None,
                     "members": None, "admin": True, "forum": False, "last_date": None}
         dialogs = [d for d in await self.reader.dialogs()  # never suggest chats that are off limits
-                   if d.id not in self.reader.deny and d.id != BOTFATHER]
-        if s.lstrip("-").isdigit() and int(s) in self.reader.deny | {BOTFATHER}:
+                   if d.id not in self.reader.deny and d.id != BOTFATHER and d.id not in TELEGRAM_SERVICE]
+        if s.lstrip("-").isdigit() and int(s) in self.reader.deny | {BOTFATHER} | TELEGRAM_SERVICE:
             raise UserError("that chat is off limits")
         if s.lstrip("-").isdigit():
             matches = [d for d in dialogs if d.id == int(s)]
