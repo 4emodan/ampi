@@ -59,7 +59,7 @@ def redact(text: Any) -> str:
         if secret in s:
             s = s.replace(secret, "[redacted]")
     # Anything shaped like a Meta token, secret or code (URL, JSON or dict form), even if not registered (yet).
-    return re.sub(r"([\"']?(?:access_token|client_secret|code|fb_exchange_token|prev_token)[\"']?\s*[:=]\s*[\"']?)"
+    return re.sub(r"([\"']?\b(?:access_token|client_secret|code|fb_exchange_token|prev_token)[\"']?\s*[:=]\s*[\"']?)"
                   r"[^&\s\"',}]+", r"\1[redacted]", s)
 
 
@@ -411,6 +411,8 @@ def check_text(text: str, limit: int, emoji_bytes: bool) -> str:
             raise ToolError("use single spaces, and none at the start or end of a line")
     if "\n\n\n" in text or text.startswith("\n") or text.endswith("\n"):
         raise ToolError("at most one empty line between paragraphs, none at the start or end")
+    if unicodedata.normalize("NFC", text) != text:  # é and e+◌́ look the same: only one way to write each letter
+        raise ToolError("the text has letters written in an unusual (decomposed) form; retype them")
     in_tag = False
     for i, ch in enumerate(text):
         prev, nxt = text[i - 1] if i else "", text[i + 1] if i + 1 < len(text) else ""
@@ -434,7 +436,10 @@ def check_text(text: str, limit: int, emoji_bytes: bool) -> str:
         elif (unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp", "Zs", "Co", "Cn", "Cs")
               and not ch.isspace() and not IGNORABLE.match(ch) and ch not in _SNEAKY
               and not 0xFE00 <= o <= 0xFE0F and not 0xE0100 <= o <= 0xE01EF
-              and not (unicodedata.category(ch)[0] in "LN" and unicodedata.normalize("NFKC", ch) != ch)):
+              and not (unicodedata.category(ch) in ("Lu", "Ll", "Lt", "Lo", "Nd") and ch not in "ºª"
+                       and unicodedata.normalize("NFKC", ch) != ch)
+              and not (unicodedata.category(ch) in ("Mn", "Mc", "Me")
+                       and not (prev.isalpha() or unicodedata.category(prev or " ")[0] == "M"))):
             continue
         raise ToolError(f"the text contains an invisible, special-form or control character (U+{o:04X}); "
                         "use plain letters and spaces")
@@ -463,13 +468,24 @@ def _script(ch: str) -> str:
         return "?"
 
 
+_CJK = {"CJK", "HIRAGANA", "KATAKANA", "HANGUL"}
+
+
 def mixed_scripts(text: str) -> list[str]:
-    """Words mixing alphabets (Grеat with a Cyrillic е): a classic way to fake names or hide bits."""
+    """Words mixing alphabets (Grеat with a Cyrillic е), and look-alike words in an alphabet the rest of the
+    text doesn't use (аре among English words): classic ways to fake names or hide bits."""
+    words = re.findall(r"\w+", text)
+    per_word = [{_script(ch) for ch in w if ch.isalpha()} - ({"?"}) for w in words]
+    per_word = [s if not (s & _CJK) else {"CJK"} for s in per_word]  # Japanese mixes kana and kanji normally
+    counts: dict[str, int] = {}
+    for s in per_word:
+        if len(s) == 1:
+            counts[next(iter(s))] = counts.get(next(iter(s)), 0) + 1
+    main = max(counts, key=counts.get) if counts else None
     out = []
-    for word in re.findall(r"\w+", text):
-        scripts = {_script(ch) for ch in word if ch.isalpha()}
-        if len(scripts) > 1:
-            out.append(word)
+    for w, s in zip(words, per_word):
+        if len(s) > 1 or (main and s and s != {main} and counts.get(main, 0) >= 3 * counts.get(next(iter(s)), 0)):
+            out.append(w)
     return out
 
 

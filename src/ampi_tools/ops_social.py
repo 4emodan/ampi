@@ -109,7 +109,9 @@ async def _th_resolve(c: MetaClient, ref: str) -> dict:
         item = await c.call("GET", f"/{found['id']}", {"fields": REPLY_FIELDS})
     owned = str(item.get("username", "")).lower() == owner["username"].lower()
     root = (item.get("root_post") or {}).get("id") if isinstance(item.get("root_post"), dict) else None
-    root_owned = owned and item.get("is_reply") is False  # a missing field never counts as "top-level"
+    # Top-level only if Meta says so, or nothing points to a parent (a missing is_reply alone doesn't count).
+    root_owned = owned and (item.get("is_reply") is False
+                            or (item.get("is_reply") is None and not item.get("root_post") and not item.get("replied_to")))
     if root and not root_owned:
         r = await c.call("GET", f"/{root}", {"fields": "id,username"})
         root_owned = str(r.get("username", "")).lower() == owner["username"].lower()
@@ -242,26 +244,47 @@ async def th_publish(s: Services, a: dict) -> Result:
     if not ID_RE.fullmatch(post_id):
         raise ToolError(f"Threads didn't return an id{maybe}")
     what = "a reply" if r["target"] else "a post"
-    # auto_publish_text should publish at once; if Meta only made a container, publish that (first and only time).
+    async def permalink(pid: str) -> str:
+        try:
+            return str((await c.call("GET", f"/{pid}", {"fields": "id,permalink"})).get("permalink") or "")
+        except ToolError:
+            return ""
+
+    async def just_posted() -> str:
+        """The same text among the owner's newest posts/replies: the post went out even if Meta's answers were odd."""
+        try:
+            for p in await c.pages("/me/replies" if r["target"] else "/me/threads",
+                                   {"fields": "id,text,permalink"}, 5):
+                if p.get("text") == r["text"] and p.get("permalink"):
+                    return str(p["permalink"])
+        except ToolError:
+            pass
+        return ""
+
+    # auto_publish_text should publish at once; if Meta only made a container, publish that (once).
     try:
         status = (await c.call("GET", f"/{post_id}", {"fields": "status,error_message"})).get("status")
     except ToolError:
         status = None
-    if status in ("FINISHED", "IN_PROGRESS"):
+    if status == "IN_PROGRESS":
         for _ in range(6):
-            if status == "FINISHED":
-                break
             await asyncio.sleep(5)
             status = (await c.call("GET", f"/{post_id}", {"fields": "status"})).get("status")
-        if status != "FINISHED":
-            raise ToolError(f"Threads hasn't finished preparing {what} (status {status}); nothing was published")
-        post_id = str((await c.call("POST", f"/{uid}/threads_publish", {"creation_id": post_id})).get("id", post_id))
-    elif status in ("ERROR", "EXPIRED"):
+            if status != "IN_PROGRESS":
+                break
+    if status == "IN_PROGRESS":
+        raise ToolError(f"Threads is still preparing {what}{maybe}")
+    if status in ("ERROR", "EXPIRED"):
         raise ToolError(f"Threads didn't publish {what} (status {status}); nothing was posted")
-    try:
-        link = (await c.call("GET", f"/{post_id}", {"fields": "id,permalink"})).get("permalink", "")
-    except ToolError:
-        link = ""
+    if status == "FINISHED" and not await permalink(post_id):
+        try:
+            post_id = str((await c.call("POST", f"/{uid}/threads_publish", {"creation_id": post_id})).get("id", post_id))
+        except ToolError as e:
+            link = await just_posted()
+            if link:
+                return f"Posted {what} on Threads: {link}"
+            raise ToolError(f"{e}{maybe}") from None
+    link = await permalink(post_id) or await just_posted()
     if not link:
         raise ToolError(f"couldn't confirm that {what} was published{maybe}")
     return f"Posted {what} on Threads: {link}"

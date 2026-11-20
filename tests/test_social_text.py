@@ -69,13 +69,16 @@ def test_redaction_covers_json_and_dict_forms():
 
 def test_a_post_that_was_only_prepared_is_published_once(social):
     daemon, graph = social(policy=Policy())
-    statuses = iter(["FINISHED"])
     orig = graph.threads
+    published = []
 
     def threads(method, path, q):
         if path == "/501" and q.get("fields", "").startswith("status"):
-            return httpx.Response(200, json={"status": next(statuses, "PUBLISHED")})
+            return httpx.Response(200, json={"status": "PUBLISHED" if published else "FINISHED"})
+        if path == "/501" and not published:  # a container that isn't published has no permalink yet
+            return httpx.Response(400, json={"error": {"message": "x", "code": 100}})
         if path == "/111/threads_publish":
+            published.append(1)
             return httpx.Response(200, json={"id": "501"})
         return orig(method, path, q)
 

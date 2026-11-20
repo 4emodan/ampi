@@ -375,7 +375,7 @@ async def _meta_login(home: Path, service: MetaService, write: bool) -> None:
             prefix = service.name.upper()
             sys.exit(f"Set {prefix}_APP_ID and {prefix}_APP_SECRET in ~/env first (docs/SETUP.md, section 8c).")
         if auth.configured():
-            print(f"This replaces the current {service.name} login (@{auth.user['username']}).\n")
+            print(f"This replaces the current {service.name} login (@{auth.load().get('username') or '?'}).\n")
         url, state = auth.login_url(write)
         access = "read, and post/reply/delete with your approval" if write or not service.write_scopes else "read-only"
         print(f"1. Open this link in a browser where you're signed in to {service.name}, and allow access ({access}):\n")
