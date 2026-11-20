@@ -111,9 +111,41 @@ To revoke it: Telegram → Settings → Devices → **Ampi reader (read-only)** 
    `sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools check'`
 5. In `config.toml`, add `"Bash(todoist:*)"` and `"Bash(gmail:*)"` to `allowed_tools`, add a `[tools]` section with `approvals = true` (see `config.example.toml`), and `systemctl restart claude-assistant`.
 
+## 8b. YouTube (optional)
+
+The `youtube` command works right away for public channels: their newest uploads (RSS), and title and channel of
+any video. YouTube blocks video pages and transcripts from servers, so **transcripts aren't available**; the
+assistant summarizes from the description, chapters and comments. For details, search, comments and your own
+account, connect the official YouTube Data API (same Google Cloud project as Gmail):
+
+1. In the Cloud project: **APIs & Services → Library → YouTube Data API v3 → Enable**.
+2. **Public data (recommended first, 1 minute):** **APIs & Services → Credentials → Create credentials → API key**.
+   Edit the key: under **API restrictions**, choose **Restrict key → YouTube Data API v3**. Put it in
+   `YOUTUBE_API_KEY=` in `/home/ampitools/env`. This gives video details, search, comments and channel info.
+3. **Your account (optional):** playlists, subscriptions and liked videos. Under **Data access** of the consent
+   screen (section 8), add the scope `.../auth/youtube.readonly` (and `.../auth/youtube` if you want changes). Then:
+   ```bash
+   sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools youtube-login'
+   ```
+   It works like `gmail-login`; choose the channel if you have several. This is **read-only**. To let the assistant
+   create playlists, add to them and (with your approval) remove videos or change subscriptions, log in again with
+   `youtube-login --write`. That permission also covers things the assistant is never given (uploading, deleting
+   your videos), so use it only if you want those features. If the consent screen is still in "Testing", the login
+   expires after 7 days.
+4. `systemctl restart ampi-tools`, check with `ampi-tools check` (as in section 8), add `"Bash(youtube:*)"` to
+   `allowed_tools` in `config.toml`, and `systemctl restart claude-assistant`.
+
+**Approvals.** Reading, creating a (always private) playlist and adding to a private playlist happen directly.
+Adding to a public or unlisted playlist, removing from playlists, subscribing and unsubscribing always ask.
+"Private" playlists are still visible to collaborators you invited.
+
+**Limits.** The API allows 10,000 units a day. Ampi keeps separate daily budgets: about 30 searches, 40 changes,
+3,000 lookups, and 1,000 for watchers (`/home/ampitools/youtube-quota.json`). Requests to youtube.com itself
+(feeds, oEmbed) are rate-limited and pause for 30 minutes if YouTube starts refusing them.
+
 ## 9. Watchers and briefings (optional)
 
-Watchers let the assistant act without being asked. They check Gmail, Todoist, a Telegram chat, or the clock, and start Claude with instructions from `<workspace>/watchers/<name>.md`. Starter instructions are installed by `install-tools.sh` (from `templates/watchers/`). Ask the assistant to change them, or edit them yourself.
+Watchers let the assistant act without being asked. They check Gmail, Todoist, a Telegram chat, YouTube channels, or the clock, and start Claude with instructions from `<workspace>/watchers/<name>.md`. Starter instructions are installed by `install-tools.sh` (from `templates/watchers/`). Ask the assistant to change them, or edit them yourself.
 
 ```toml
 [[profiles]]
@@ -121,7 +153,7 @@ timezone = "Europe/Athens"
 
 [[profiles.watchers]]
 name = "gmail-inbox"        # instructions: watchers/gmail-inbox.md
-kind = "gmail"              # gmail | todoist | telegram | schedule
+kind = "gmail"              # gmail | todoist | telegram | youtube | schedule
 query = "in:inbox"          # Gmail search / Todoist filter / Telegram chat name, @username or id
 every_minutes = 15
 
@@ -136,6 +168,16 @@ days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 - Each run is a fresh Claude session. The report goes to your private chat, starting with 🔔 and the watcher's name, and only if there's something worth saying. Runs are logged in `chats/watch-<name>/`, and reports also go to the main chat's log, so you can reply to them normally.
 - If a watcher keeps failing (e.g. Gmail isn't connected yet), you get one ⚠️ message, then nothing more until it works again.
 - `telegram` watchers need the reader from section 7 (e.g. a channel you repost things to).
+- `youtube` watchers report new uploads (no Shorts) from channels. Channels added later are taken in quietly,
+  without their backlog. `subscriptions` needs `youtube-login`; a list of channels works without any setup:
+  ```toml
+  [[profiles.watchers]]
+  name = "youtube-uploads"    # instructions: watchers/youtube-uploads.md
+  kind = "youtube"
+  query = "@veritasium, @3blue1brown"   # or "subscriptions" (at most 200 channels are checked)
+  every_minutes = 60
+  allowed_tools = ["Read", "Bash(youtube:*)"]  # titles are written by strangers: no writing files, no web
+  ```
 
 ## Isolation and limits
 

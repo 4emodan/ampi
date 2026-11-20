@@ -37,16 +37,20 @@ SYSTEM_LABELS = {
 }
 
 
-class GmailAuth:
-    """OAuth client (installed app) with a stored refresh token."""
+class GoogleAuth:
+    """OAuth client (installed app) with a stored refresh token, for one Google API scope."""
 
-    def __init__(self, client_id: str, client_secret: str, token_file: Path, client: httpx.AsyncClient):
+    def __init__(self, client_id: str, client_secret: str, token_file: Path, client: httpx.AsyncClient,
+                 scope: str = SCOPE, service: str = "Gmail", login_command: str = "gmail-login"):
         self.client_id = client_id
         self.client_secret = client_secret
         self.token_file = token_file
         self._client = client
         self._access: str | None = None
         self._expires = 0.0
+        self.scope = scope
+        self.service = service
+        self.login_command = login_command
 
     def login_url(self) -> tuple[str, str, str]:
         """Returns (url, state, code_verifier) for the one-time login."""
@@ -57,7 +61,7 @@ class GmailAuth:
             "client_id": self.client_id,
             "redirect_uri": REDIRECT,
             "response_type": "code",
-            "scope": SCOPE,
+            "scope": self.scope,
             "access_type": "offline",
             "prompt": "consent",
             "state": state,
@@ -85,12 +89,20 @@ class GmailAuth:
         tmp = self.token_file.with_name(self.token_file.name + ".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
-            f.write(json.dumps({"refresh_token": data["refresh_token"]}))
+            # What Google actually granted (the owner can untick permissions), not what was asked for.
+            f.write(json.dumps({"refresh_token": data["refresh_token"], "scope": str(data.get("scope", ""))}))
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.token_file)
+        self._access = None
 
     def configured(self) -> bool:
         return self.token_file.is_file()
+
+    def scopes(self) -> set[str]:
+        try:
+            return set(str(json.loads(self.token_file.read_text()).get("scope", "")).split())
+        except (OSError, ValueError, AttributeError):
+            return set()
 
     async def token(self) -> str:
         if self._access and time.monotonic() < self._expires - 60:
@@ -98,27 +110,33 @@ class GmailAuth:
         try:
             refresh = json.loads(self.token_file.read_text())["refresh_token"]
         except (OSError, ValueError, KeyError):
-            raise ToolError("Gmail isn't connected yet (run `ampi-tools gmail-login` on the server)") from None
+            raise ToolError(
+                f"{self.service} isn't connected yet (run `ampi-tools {self.login_command}` on the server)"
+            ) from None
         try:
             resp = await self._client.post(TOKEN_URL, data={
                 "client_id": self.client_id, "client_secret": self.client_secret,
                 "refresh_token": refresh, "grant_type": "refresh_token",
             }, timeout=30)
         except httpx.TransportError as e:
-            raise ToolError(f"Google unreachable: {e!r}") from e
+            raise ToolError(f"Google unreachable ({type(e).__name__})") from e
         try:
             data = resp.json()
         except ValueError:
             raise ToolError(f"Google sent an unexpected reply (HTTP {resp.status_code})") from None
         if "access_token" not in data:
-            raise ToolError(f"Gmail login expired or was revoked ({data.get('error')}); run `ampi-tools gmail-login`")
+            raise ToolError(f"{self.service} login expired or was revoked ({data.get('error')}); "
+                            f"run `ampi-tools {self.login_command}`")
         self._access = data["access_token"]
         self._expires = time.monotonic() + float(data.get("expires_in", 3600))
         return self._access
 
 
+GmailAuth = GoogleAuth  # the defaults are Gmail's
+
+
 class Gmail:
-    def __init__(self, auth: GmailAuth, client: httpx.AsyncClient, base: str = API):
+    def __init__(self, auth: GoogleAuth, client: httpx.AsyncClient, base: str = API):
         self.auth = auth
         self._client = client
         self._base = base

@@ -2,9 +2,11 @@
 
     ampi-tools serve         run by systemd
     ampi-tools gmail-login   once, interactively: connect your Gmail account
+    ampi-tools youtube-login [--write]   connect your YouTube account (read-only unless --write)
     ampi-tools check         show what is configured and working
 
-Environment (/home/ampitools/env): TODOIST_TOKEN, GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET.
+Environment (/home/ampitools/env): TODOIST_TOKEN, GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET (also used for
+YouTube; GOOGLE_CLIENT_ID/SECRET work too), YOUTUBE_API_KEY.
 Policy (/home/ampitools/config.toml, optional):
     auto_approve = ["todoist.move"]          # critical ops to allow without asking
     require_approval = ["gmail.archive"]     # safe ops to ask about anyway
@@ -29,11 +31,13 @@ from typing import Any
 
 import httpx
 
-from .gmail import Gmail, GmailAuth
+from .gmail import Gmail, GmailAuth, GoogleAuth
 from .ops import (
-    MAX_PENDING, OPS, Approvals, Policy, Services, clean, execute, prepare, shares_with_others, summarize, validate,
+    MAX_PENDING, OPS, Approvals, Policy, Services, clean, execute, pre_resolve, prepare, shares_with_others, summarize,
+    validate,
 )
 from .todoist import Todoist, ToolError
+from .youtube import SCOPE_READ, SCOPE_WRITE, YouTube
 
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
 MAX_REQUEST = 1024 * 1024
@@ -129,6 +133,7 @@ class Daemon:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     async def run(self, ops: list[dict], reason: Any) -> dict:
+        ops = await pre_resolve(self.services, ops)
         critical = False
         for o in ops:
             if self.policy.critical(o["op"]) or await shares_with_others(self.services, o):
@@ -215,6 +220,20 @@ async def serve_socket(daemon: Daemon, path: str) -> asyncio.AbstractServer:
     return server
 
 
+def google_client() -> tuple[str, str]:
+    cid = (os.environ.get("GOOGLE_CLIENT_ID") or os.environ.get("GMAIL_CLIENT_ID") or "").strip()
+    secret = (os.environ.get("GOOGLE_CLIENT_SECRET") or os.environ.get("GMAIL_CLIENT_SECRET") or "").strip()
+    return cid, secret
+
+
+def youtube_auth(client: httpx.AsyncClient, home: Path, scope: str = SCOPE_READ) -> GoogleAuth | None:
+    cid, secret = google_client()
+    if not (cid and secret):
+        return None
+    return GoogleAuth(cid, secret, home / "youtube-token.json", client, scope=scope, service="YouTube",
+                      login_command="youtube-login")
+
+
 def build_services(client: httpx.AsyncClient, home: Path) -> Services:
     services = Services()
     token = os.environ.get("TODOIST_TOKEN", "").strip()
@@ -223,6 +242,9 @@ def build_services(client: httpx.AsyncClient, home: Path) -> Services:
     cid, secret = os.environ.get("GMAIL_CLIENT_ID", "").strip(), os.environ.get("GMAIL_CLIENT_SECRET", "").strip()
     if cid and secret:
         services.gmail_client = Gmail(GmailAuth(cid, secret, home / "gmail-token.json", client), client)
+    # RSS feeds and oEmbed work without any credentials, so YouTube is always there.
+    services.youtube_client = YouTube(client, youtube_auth(client, home),
+                                      os.environ.get("YOUTUBE_API_KEY", "").strip() or None, home=home)
     return services
 
 
@@ -230,8 +252,9 @@ async def _serve(home: Path) -> None:
     policy, unit = load_policy(home / "config.toml")
     async with httpx.AsyncClient() as client:
         services = build_services(client, home)
-        log.info("todoist: %s, gmail: %s", "on" if services.todoist_client else "off",
-                 "on" if services.gmail_client and services.gmail_client.auth.configured() else "off")
+        log.info("todoist: %s, gmail: %s, youtube: %s", "on" if services.todoist_client else "off",
+                 "on" if services.gmail_client and services.gmail_client.auth.configured() else "off",
+                 services.youtube.status())
         daemon = Daemon(services, Approvals(home / "approvals.sqlite3"), policy, systemd_main_pid_check(unit))
         server = await serve_socket(daemon, socket_path())
         log.info("listening on %s", socket_path())
@@ -260,21 +283,83 @@ async def _gmail_login(home: Path) -> None:
         print(f"Connected ({len(labels)} labels). Now: systemctl restart ampi-tools")
 
 
+async def _youtube_login(home: Path, write: bool) -> None:
+    async with httpx.AsyncClient() as client:
+        auth = youtube_auth(client, home, SCOPE_WRITE if write else SCOPE_READ)
+        if auth is None:
+            sys.exit("Set GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET in ~/env first (see docs/SETUP.md).")
+        before = None
+        if auth.configured():
+            old = YouTube(client, auth)
+            try:
+                before = await _my_channel(old)
+            except ToolError:
+                pass
+            print(f"This replaces the current YouTube login ({before or 'unknown channel'}; "
+                  f"{'read and write' if old.can_write else 'read-only'}).\n")
+        url, state, verifier = auth.login_url()
+        print("1. Open this link in a browser where you're signed in to YouTube, choose the channel, and allow "
+              + ("access (read and change playlists and subscriptions)" if write else "read-only access") + ":\n")
+        print(url)
+        print("\n2. The browser then goes to a localhost page that doesn't load. That's expected.")
+        print("   Copy the whole address from the address bar and paste it here.\n")
+        redirected = input("Address: ")
+        try:
+            await auth.finish_login(redirected, state, verifier)
+            yt = YouTube(client, auth)
+            channel = await _my_channel(yt)
+        except ToolError as e:
+            sys.exit(f"Failed: {e}")
+        if write and not yt.can_write:
+            print("Note: Google granted read-only access (a permission was unticked); changes won't work.")
+        if before and before != channel:
+            print(f"Note: this is a DIFFERENT channel than before ({before}).")
+        print(f"Connected to {channel} ({'read and write' if yt.can_write else 'read-only'}). "
+              "Now: systemctl restart ampi-tools")
+
+
+async def _my_channel(yt: YouTube) -> str:
+    data = await yt.api("GET", "/channels", {"part": "snippet", "mine": "true"}, account=True) or {}
+    items = data.get("items", [])
+    if not items:
+        return "an account without a YouTube channel"
+    return f"“{items[0].get('snippet', {}).get('title', '?')}” [{items[0].get('id')}]"
+
+
 async def _check(home: Path) -> None:
     async with httpx.AsyncClient() as client:
         services = build_services(client, home)
         for name, op in (("Todoist", "todoist.projects"), ("Gmail", "gmail.labels")):
             ok, text, _ = await execute(services, [{"op": op, "args": {}}])
             print(f"{name}: {'OK' if ok else text}")
+        yt = services.youtube
+        try:
+            title, _ = await yt.feed(channel_id="UCBR8-60-B28hp2BmDPdntcQ")  # YouTube's own channel
+            feeds = f"RSS OK ({title})"
+        except ToolError as e:
+            feeds = f"RSS failed: {e}"
+        api = ""
+        if yt.has_api:
+            try:
+                await yt.channels(["UCBR8-60-B28hp2BmDPdntcQ"])
+                api = ", API OK"
+            except ToolError as e:
+                api = f", API failed: {e}"
+        print(f"YouTube: {yt.status()}; {feeds}{api}; {yt.quota.summary()}")
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="ampi-tools", description="Todoist and Gmail for the assistant")
-    parser.add_argument("command", choices=["serve", "gmail-login", "check"])
+    parser = argparse.ArgumentParser(prog="ampi-tools", description="Todoist, Gmail and YouTube for the assistant")
+    parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "check"])
+    parser.add_argument("--write", action="store_true", help="youtube-login: also allow changes (playlists, "
+                        "subscriptions), each critical one still approved by you in Telegram")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
     home = Path(os.environ.get("AMPI_TOOLS_HOME") or Path.home())
+    if args.command == "youtube-login":
+        asyncio.run(_youtube_login(home, args.write))
+        return
     runner = {"serve": _serve, "gmail-login": _gmail_login, "check": _check}[args.command]
     asyncio.run(runner(home))
 

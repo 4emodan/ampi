@@ -1,4 +1,4 @@
-"""`todoist` and `gmail`: the assistant's commands (standard library only).
+"""`todoist`, `gmail` and `youtube`: the assistant's commands (standard library only).
 
 They send operations to the ampi-tools daemon, which holds the tokens. Critical operations come back
 as "waiting for the owner's approval" instead of running.
@@ -233,6 +233,95 @@ def gmail_ops(a: argparse.Namespace) -> list[dict]:
     raise SystemExit(f"unknown command {c}")
 
 
+# --- youtube ------------------------------------------------------------------------------
+
+
+def youtube_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="youtube", description="YouTube (public data and the owner's account).")
+    p.add_argument("-m", "--reason", help="why (shown to the owner with approval requests)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("search", help="search YouTube (expensive: at most ~30 a day)")
+    s.add_argument("query")
+    s.add_argument("-n", "--limit", type=int, default=10)
+    s.add_argument("--order", choices=["relevance", "date", "viewCount", "rating"])
+    s.add_argument("--days", type=int, help="only from the last N days")
+    s.add_argument("--channel", help="only this channel (@handle, link or UC… id)")
+    s.add_argument("--type", choices=["video", "channel", "playlist"])
+    sub.add_parser("video", help="details of videos (links or ids)").add_argument("videos", nargs="+")
+    s = sub.add_parser("comments", help="top comments of a video")
+    s.add_argument("video")
+    s.add_argument("-n", "--limit", type=int, default=20)
+    s.add_argument("--order", choices=["relevance", "time"])
+    sub.add_parser("channel", help="channel info and latest uploads").add_argument("channel")
+    s = sub.add_parser("uploads", help="a channel's latest uploads")
+    s.add_argument("channel")
+    s.add_argument("-n", "--limit", type=int, default=15)
+    s.add_argument("--shorts", action="store_true", help="include Shorts")
+    s = sub.add_parser("playlist", help="videos in a playlist")
+    s.add_argument("playlist", nargs="?", help="playlist link or id")
+    s.add_argument("--name", help="one of the owner's playlists, by name")
+    s.add_argument("-n", "--limit", type=int, default=50)
+    sub.add_parser("playlists", help="the owner's playlists")
+    sub.add_parser("subscriptions", help="the owner's subscriptions")
+    sub.add_parser("liked", help="videos the owner liked").add_argument("-n", "--limit", type=int, default=20)
+    s = sub.add_parser("feed", help="recent uploads from the owner's subscriptions or given channels")
+    s.add_argument("--channel", action="append", help="repeat for several (default: all subscriptions)")
+    s.add_argument("--days", type=int, default=2)
+    s.add_argument("--shorts", action="store_true")
+    s.add_argument("-n", "--limit", type=int, default=100)
+    sub.add_parser("new-playlist", help="create a private playlist").add_argument("name")
+    for name, help_text in (("add", "add videos to one of the owner's playlists (asks if it isn't private)"),
+                            ("remove", "remove videos from a playlist (needs approval)")):
+        s = sub.add_parser(name, help=help_text)
+        target = s.add_mutually_exclusive_group(required=True)
+        target.add_argument("--playlist", help="playlist link or id")
+        target.add_argument("--name", help="playlist name")
+        s.add_argument("videos", nargs="+")
+    sub.add_parser("subscribe", help="needs approval").add_argument("channel")
+    sub.add_parser("unsubscribe", help="needs approval").add_argument("channel")
+    sub.add_parser("apply", help="run a JSON plan of operations as one request").add_argument("file")
+    sub.add_parser("approvals", help="recent approval requests and their outcome")
+    return p
+
+
+def youtube_ops(a: argparse.Namespace) -> list[dict]:
+    c = a.cmd
+
+    def op(name: str, **args: object) -> list[dict]:
+        return [{"op": f"youtube.{name}", "args": {k: v for k, v in args.items() if v not in (None, False, [])}}]
+
+    if c == "search":
+        return op("search", query=a.query, limit=a.limit, order=a.order, days=a.days, channel=a.channel, type=a.type)
+    if c == "video":
+        return op("video", videos=a.videos)
+    if c == "comments":
+        return op("comments", video=a.video, limit=a.limit, order=a.order)
+    if c == "channel":
+        return op("channel", channel=a.channel)
+    if c == "uploads":
+        return op("uploads", channel=a.channel, limit=a.limit, shorts=a.shorts)
+    if c == "playlist":
+        if not a.playlist and not a.name:
+            raise SystemExit("youtube playlist: give a playlist link/id, or --name NAME")
+        return op("playlist", playlist=a.playlist, playlist_name=a.name, limit=a.limit)
+    if c in ("playlists", "subscriptions"):
+        return op(c)
+    if c == "liked":
+        return op("liked", limit=a.limit)
+    if c == "feed":
+        return op("feed", source=",".join(a.channel) if a.channel else None, days=a.days, shorts=a.shorts,
+                  limit=a.limit)
+    if c == "new-playlist":
+        return op("new_playlist", name=a.name)
+    if c in ("add", "remove"):
+        return op(c, playlist=a.playlist, playlist_name=a.name, videos=a.videos)
+    if c in ("subscribe", "unsubscribe"):
+        return op(c, channel=a.channel)
+    if c == "apply":
+        return _load_plan(a.file, "youtube")
+    raise SystemExit(f"unknown command {c}")
+
+
 def _main(prog: str, parser: argparse.ArgumentParser, to_ops, argv: list[str] | None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "approvals":
@@ -252,3 +341,7 @@ def todoist_main(argv: list[str] | None = None) -> int:
 
 def gmail_main(argv: list[str] | None = None) -> int:
     return _main("gmail", gmail_parser(), gmail_ops, argv)
+
+
+def youtube_main(argv: list[str] | None = None) -> int:
+    return _main("youtube", youtube_parser(), youtube_ops, argv)

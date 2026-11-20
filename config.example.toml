@@ -41,7 +41,7 @@ workspace = "profiles/personal"
 model = "sonnet"
 # Tools Claude may use without asking. Anything else is denied (nobody can approve prompts).
 # With the Telegram reader (docs/SETUP.md, section 7) also add "Skill" and "Bash(tg-read:*)";
-# with Todoist/Gmail (section 8) add "Bash(todoist:*)" and "Bash(gmail:*)".
+# with Todoist/Gmail (section 8) add "Bash(todoist:*)" and "Bash(gmail:*)"; with YouTube (8b) "Bash(youtube:*)".
 allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"]
 # Extra arguments passed to `claude` on every run (optional).
 extra_args = []
@@ -63,9 +63,16 @@ extra_args = []
 # Instructions for each live in <workspace>/watchers/<name>.md.
 # [[profiles.watchers]]
 # name = "gmail-inbox"
-# kind = "gmail"            # gmail | todoist | telegram | schedule
-# query = "in:inbox"        # Gmail search, Todoist filter, or Telegram chat
+# kind = "gmail"            # gmail | todoist | telegram | youtube | schedule
+# query = "in:inbox"        # Gmail search, Todoist filter, Telegram chat, or YouTube channels
 # every_minutes = 15
+#
+# [[profiles.watchers]]
+# name = "youtube-uploads"
+# kind = "youtube"
+# query = "@veritasium, @3blue1brown"   # or "subscriptions"
+# every_minutes = 60
+# allowed_tools = ["Read", "Bash(youtube:*)"]
 #
 # [[profiles.watchers]]
 # name = "morning-briefing"

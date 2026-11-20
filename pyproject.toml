@@ -16,6 +16,7 @@ tg-read = "tg_reader.client:main"
 tg-reader = "tg_reader.server:main"
 todoist = "ampi_tools.client:todoist_main"
 gmail = "ampi_tools.client:gmail_main"
+youtube = "ampi_tools.client:youtube_main"
 ampi-tools = "ampi_tools.server:main"
 
 [dependency-groups]

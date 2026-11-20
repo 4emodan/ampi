@@ -3,13 +3,15 @@
 #
 # Critical operations wait for your Approve/Reject in Telegram:
 #   todoist.update, todoist.move, todoist.complete, todoist.reopen, todoist.delete,
-#   gmail.send, gmail.send_draft, gmail.trash, gmail.delete_label
+#   gmail.send, gmail.send_draft, gmail.trash, gmail.delete_label,
+#   youtube.remove, youtube.subscribe, youtube.unsubscribe (always ask),
+#   youtube.add to a playlist that isn't private (always asks)
 # gmail.send, gmail.send_draft, gmail.trash and todoist.delete always ask, whatever is set here.
 
 # Critical operations to allow without asking, e.g. once you trust its inbox triage:
 auto_approve = []
 # auto_approve = ["todoist.move", "todoist.update"]
 
-# Safe operations you want to approve anyway, e.g. archiving email:
+# Safe operations you want to approve anyway, e.g. archiving email or creating YouTube playlists:
 require_approval = []
 # require_approval = ["gmail.archive"]

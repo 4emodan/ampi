@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Installs or updates ampi-tools (Todoist + Gmail with approvals) next to the assistant.
+# Installs or updates ampi-tools (Todoist, Gmail, YouTube with approvals) next to the assistant.
 # Run as root from a checkout, after deploy/install.sh:  sudo bash deploy/install-tools.sh
 #
 # The tokens live with a separate `ampitools` user whose home the assistant can't see. The assistant
-# gets the `todoist` and `gmail` commands, which send requests to the daemon over a Unix socket.
+# gets the `todoist`, `gmail` and `youtube` commands, which send requests to the daemon over a Unix socket.
 # Critical requests wait for your Approve/Reject in Telegram.
 set -euo pipefail
 shopt -s nullglob
@@ -38,22 +38,22 @@ sudo -u "$TOOLS_USER" -H bash -c "cd ~/app && { test -x .venv/bin/pip || python3
 
 if [[ ! -f $TOOLS_HOME/env ]]; then
   install -o "$TOOLS_USER" -g "$TOOLS_USER" -m 600 "$SRC_DIR/deploy/ampi-tools.env.example" "$TOOLS_HOME/env"
-  echo "    created $TOOLS_HOME/env (add TODOIST_TOKEN, GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET)"
+  echo "    created $TOOLS_HOME/env (add TODOIST_TOKEN, GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, YOUTUBE_API_KEY)"
 fi
 if [[ ! -f $TOOLS_HOME/config.toml ]]; then
   # Owned by root: the policy is yours, not something the tools user (or the assistant) can change.
   install -o root -g "$TOOLS_USER" -m 640 "$SRC_DIR/deploy/ampi-tools.config.example.toml" "$TOOLS_HOME/config.toml"
 fi
 
-echo "==> todoist and gmail commands for $APP_USER"
+echo "==> todoist, gmail and youtube commands for $APP_USER"
 install -d -o "$APP_USER" -g "$APP_USER" "$APP_HOME/.local/bin"
-for cmd in todoist gmail; do
+for cmd in todoist gmail youtube; do
   ln -sfn "$APP_HOME/app/.venv/bin/$cmd" "$APP_HOME/.local/bin/$cmd"
 done
 
 echo "==> Skills and watcher instructions in each profile workspace"
 for ws in "$APP_HOME"/profiles/*/; do
-  for skill in todoist gmail telegram; do
+  for skill in todoist gmail telegram youtube; do
     install -d -m 755 "$ws.claude/skills/$skill"
     install -m 644 "$SRC_DIR/templates/skills/$skill/SKILL.md" "$ws.claude/skills/$skill/SKILL.md"
   done
@@ -82,6 +82,8 @@ Done. To connect your accounts (see docs/SETUP.md, section 8):
   2. Connect Gmail (you approve in a browser): sudo -u $TOOLS_USER -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools gmail-login'
   3. systemctl restart ampi-tools
   4. Check:  sudo -u $TOOLS_USER -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools check'
-  5. In $APP_HOME/config.toml: [tools] approvals = true, and add "Bash(todoist:*)" and "Bash(gmail:*)"
-     to allowed_tools; then systemctl restart claude-assistant
+  5. YouTube (optional, docs/SETUP.md 8b): YOUTUBE_API_KEY in $TOOLS_HOME/env, and/or
+     sudo -u $TOOLS_USER -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools youtube-login'
+  6. In $APP_HOME/config.toml: [tools] approvals = true, and add "Bash(todoist:*)", "Bash(gmail:*)" and
+     "Bash(youtube:*)" to allowed_tools; then systemctl restart claude-assistant
 EOF

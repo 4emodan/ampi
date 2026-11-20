@@ -1,4 +1,4 @@
-"""Watchers: the bridge checks Gmail, Todoist, Telegram chats or the clock on its own, and lets Claude
+"""Watchers: the bridge checks Gmail, Todoist, Telegram chats, YouTube channels or the clock on its own, and lets Claude
 act on what's new (instructions in <workspace>/watchers/<name>.md).
 
 - The first check (and the first after the query changes) only records what already exists, so a new
@@ -141,7 +141,42 @@ class Watch:
             return self._schedule(state)
         if self.w.kind == "telegram":
             return await self._telegram(state)
+        if self.w.kind == "youtube":
+            return await self._youtube(state)
         return await self._listing(state)
+
+    # --- YouTube: new uploads; channels not read before are taken in quietly ----------------
+
+    async def _youtube(self, state: dict | None) -> tuple[str | None, dict]:
+        resp = await self._tool(self.tools.socket, {"cmd": "run", "ops": [
+            {"op": "youtube.ids", "args": {"source": self.w.query}}]})
+        pairs = [(p[0], p[1]) for p in resp.get("pairs", [])
+                 if isinstance(p, list) and len(p) == 2 and isinstance(p[0], str) and isinstance(p[1], str)]
+        ok = [c for c in resp.get("channels_ok", []) if isinstance(c, str)]
+        if state is None:
+            return None, {"seen": [v for v, _ in pairs][:SEEN_MAX], "channels": ok[:SEEN_MAX]}
+        old_seen = list(state.get("seen", []))
+        seen = set(old_seen)
+        known = list(state.get("channels", []))
+        # A channel read for the first time (a new subscription, or one whose feed failed until now): its
+        # recent uploads are the backlog, not news. Channels whose feed failed this time stay unknown.
+        fresh = set(ok) - set(known)
+        absorbed = [v for v, c in pairs if c in fresh and v not in seen]
+        new = list(dict.fromkeys(v for v, c in pairs if c not in fresh and v not in seen))[:MAX_ITEMS]
+        channels = list(dict.fromkeys(known + ok))[-SEEN_MAX:]
+        # New and absorbed ids go first, so the size cap only ever drops the oldest ones.
+        new_state = {"seen": list(dict.fromkeys(new + absorbed + old_seen))[:SEEN_MAX], "channels": channels}
+        if not new:
+            return None, new_state
+        listing = await self._tool(self.tools.socket, {"cmd": "run", "ops": [
+            {"op": "youtube.show", "args": {"ids": new}}]})
+        failed = resp.get("failed") or 0
+        note = f"\n({failed} channel(s) couldn't be checked this time.)" if failed else ""
+        prompt = (
+            f'Watcher "{self.w.name}": {len(new)} new YouTube upload(s) from `{self.w.query}`:\n\n'
+            + untrusted(listing.get("text", "")) + note
+        )
+        return prompt, new_state
 
     # --- Gmail / Todoist: new ids in a search or filter ---------------------------------
 

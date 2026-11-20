@@ -4,6 +4,8 @@ I forward interesting things here: articles, posts, videos, ideas, screenshots, 
 
 1. Work out what it is (article / post / video / idea / task / event / product / other).
 2. For links, open the page and read it. If it's paywalled or needs a login, just note that.
+   For YouTube links use `youtube video LINK` (not comments); there's no transcript, so summarize from
+   the description and chapters and say so.
 3. Append an entry to `notes/clipboard/YYYY-MM.md` (the current month):
    - date, type, title, source link
    - a 2–3 sentence summary in my language

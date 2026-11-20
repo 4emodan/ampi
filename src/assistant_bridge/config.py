@@ -36,7 +36,7 @@ def zone(name: str) -> tzinfo:
     return timezone.utc if name == "UTC" else ZoneInfo(name)
 
 
-WATCHER_KINDS =("gmail", "todoist", "telegram", "schedule")
+WATCHER_KINDS = ("gmail", "todoist", "telegram", "youtube", "schedule")
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
@@ -45,8 +45,10 @@ class Watcher:
     """Something the bridge checks on its own and lets Claude act on (see watchers.py)."""
 
     name: str  # instructions live in <workspace>/watchers/<name>.md
-    kind: str  # gmail | todoist | telegram | schedule
-    query: str  # gmail search, Todoist filter, or Telegram chat (name, @username or id)
+    kind: str  # gmail | todoist | telegram | youtube | schedule
+    # gmail search, Todoist filter, Telegram chat (name, @username or id), or YouTube channels
+    # ("subscriptions", or comma-separated @handles / channel links / UC… ids)
+    query: str
     every_minutes: float  # how often to check (not for schedule)
     at: tuple[str, ...] = ()  # schedule: local times "HH:MM"
     days: tuple[str, ...] = DAYS  # schedule: weekdays
@@ -175,7 +177,7 @@ def _parse_watchers(raw: object, where: str) -> tuple[Watcher, ...]:
             raise ConfigError(f"{ww}: kind must be one of {', '.join(WATCHER_KINDS)}")
         query = w.get("query", "")
         if not isinstance(query, str) or (kind != "schedule" and not query.strip()):
-            raise ConfigError(f"{ww}: query is required (gmail search, Todoist filter or Telegram chat)")
+            raise ConfigError(f"{ww}: query is required (gmail search, Todoist filter, Telegram chat or YouTube channels)")
         every = w.get("every_minutes", 10)
         if not isinstance(every, (int, float)) or isinstance(every, bool) or not 1 <= every <= 1440:
             raise ConfigError(f"{ww}: every_minutes must be between 1 and 1440")
