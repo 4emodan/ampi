@@ -5,6 +5,11 @@ Description=Claude Assistant checkout browser: the engine (Obscura, CDP on 127.0
 # (inet ampi_checkout, checked before start) lets it send only DNS to public resolvers, TCP 80/443 to public
 # addresses, and replies on connections it accepted; every local address is rejected for it, and only the
 # controller's user (ampicheckoutctl) may connect to its debugger port.
+# Started and stopped together with the controller (ampi-checkout.service, socket-activated): when the controller
+# exits after a session that paid, or after losing the engine, systemd stops this engine too, and the next request
+# starts both fresh, so card details never linger in a long-lived engine process. (BindsTo= without After=, since
+# the controller is ordered after the engine.)
+BindsTo=ampi-checkout.service
 Requires=ampi-checkout-net.service
 After=ampi-checkout-net.service
 
@@ -25,7 +30,7 @@ StandardOutput=null
 StandardError=null
 Restart=always
 RestartSec=2
-# A fresh engine every day (and the controller restarts it after each payment by closing the session).
+# Never older than a day even if the controller keeps running (a payment always restarts it, see above).
 RuntimeMaxSec=1d
 KillMode=control-group
 TimeoutStopSec=5
@@ -86,5 +91,4 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
 # are rejected by the nft table (only replies on accepted connections pass).
 IPAddressDeny=link-local multicast 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 198.18.0.0/15 240.0.0.0/4 fc00::/7 fec0::/10 64:ff9b::/96 2002::/16 2001::/32
 
-[Install]
-WantedBy=multi-user.target
+# No [Install]: it runs only while the controller does.

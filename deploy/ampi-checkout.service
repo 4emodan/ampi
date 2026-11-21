@@ -12,6 +12,8 @@ Group=ampicheckoutctl
 EnvironmentFile=/etc/ampi-checkout/ctl.env
 ExecStartPre=+/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout_net.py check
 ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout.py serve
+# A clean exit (after a payment or an engine failure) isn't restarted: the socket starts it again on the next
+# request, together with a fresh engine (ampi-checkout-engine.service has BindsTo= this unit).
 Restart=on-failure
 RestartSec=2
 # Logs carry only generic messages (never request contents).

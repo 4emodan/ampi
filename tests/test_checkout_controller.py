@@ -44,6 +44,10 @@ class FakeEngine:
         self.closed = False
         self.on_click = {}  # (frame_id, n) -> url to navigate to
         self.history: list[str] = []
+        self.fail: dict[str, int] = {}  # method -> how many more calls answer with a protocol error
+        self.dead = False  # the connection is gone: every call fails
+        self.die_after_click = False
+        self.disable_after_set: tuple[str, int] | None = None
 
     def navigate(self, url):
         self.history.append(url)
@@ -54,6 +58,11 @@ class FakeEngine:
 
     def call(self, method, params=None, session=None, timeout=30):
         params = params or {}
+        if self.dead:
+            raise co.CdpError("connection closed")
+        if self.fail.get(method):
+            self.fail[method] -= 1
+            raise co.CdpProtocolError(f"{method} failed")
         if method == "Target.createBrowserContext":
             return {"browserContextId": "ctx"}
         if method == "Target.createTarget":
@@ -87,7 +96,8 @@ class FakeEngine:
 
     def describe(self, n, e):
         d = {k: e[k] for k in ("kind", "tag", "type", "autocomplete", "name", "id", "label", "required")}
-        d.update(n=n, checked=e["checked"] if e["kind"] == "checkbox" else None, filled=bool(e["value"]))
+        d.update(n=n, checked=e["checked"] if e["kind"] == "checkbox" else None, filled=bool(e["value"]),
+                 disabled=bool(e.get("disabled")))
         if e["kind"] == "select":
             d["options"] = e["options"]
         return d
@@ -96,7 +106,8 @@ class FakeEngine:
         get = lambda n: f.els.get(n) if f.els.get(n, {}).get("connected") else None  # noqa: E731
         if a["op"] == "enumerate":
             out = {"href": f.url, "ready": "complete", "text": f.text,
-                   "elements": [self.describe(n, e) for n, e in f.els.items() if e["connected"]]}
+                   "elements": [self.describe(n, e) for n, e in f.els.items() if e["connected"] and not e.get("hidden")],
+                   "checked": [e["label"] for e in f.els.values() if e["connected"] and e["checked"]]}
             if a.get("main"):
                 out["title"] = f.title
             return out
@@ -107,8 +118,12 @@ class FakeEngine:
             e = get(a["n"])
             if not e:
                 return {"ok": False}
+            if e.get("vanish"):
+                return {"ok": False}
             e["value"] = a["value"]
             self.sets.append((f.id, a["n"], a["value"]))
+            if self.disable_after_set:
+                self.frame(self.disable_after_set[0]).els[self.disable_after_set[1]]["disabled"] = True
             return {"ok": True}
         if a["op"] == "click":
             e = get(a["n"])
@@ -117,6 +132,8 @@ class FakeEngine:
             self.clicks.append((f.id, a["n"]))
             if (f.id, a["n"]) in self.on_click:
                 self.navigate(self.on_click[(f.id, a["n"])])
+            if self.die_after_click:
+                self.dead = True
             return {"ok": True}
         if a["op"] == "choose":
             e = get(a["n"])
@@ -153,7 +170,8 @@ def checkout_page():
 
 
 def confirmation_page():
-    return [Frame("main2", f"{SHOP}/thanks", title="Thanks", text="Order 1234 confirmed")]
+    return [Frame("main2", f"{SHOP}/thanks", title="Thanks",
+                  text="Shop menu\nAccount\nHelp\n" + "nav item\n" * 40 + "Thank you! Order 1234 confirmed")]
 
 
 class Clock:
@@ -410,6 +428,180 @@ def test_pay_refuses_psp_not_on_the_list(env):
     assert not r["ok"] and not eng.sets
 
 
+def test_pay_phases_verify_refusal_is_definite(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    req = pay_request(c, sid, snap)
+    eng.frames[0].text = "Total: 59,90 €"
+    r = c.handle(req)
+    assert r["phase"] == "verify" and not eng.sets and not c.session.readonly
+
+
+def test_pay_field_vanishing_mid_fill_is_phase_filled_and_readonly(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    req = pay_request(c, sid, snap)
+    eng.frame("stripe").els[3]["vanish"] = True  # the CVC field goes away once the others are set
+    r = c.handle(req)
+    assert not r["ok"] and r["phase"] == "filled" and not eng.clicks
+    assert c.session.readonly  # no click/type can follow a half-filled card
+    assert "finished" in c.handle({"cmd": "click", "session": sid, "ref": ref(snap, "Pay 23,90 €")})["error"]
+
+
+def test_pay_button_disabled_after_fill_is_not_pressed(env):
+    c, eng, clock = env
+    sid, snap = opened(c)
+    req = pay_request(c, sid, snap)
+    eng.disable_after_set = ("main", 4)
+    t0 = clock.t
+    r = c.handle(req)
+    assert not r["ok"] and r["phase"] == "filled" and "NOT pressed" in r["error"] and not eng.clicks
+    assert clock.t - t0 >= co.PAY_FILL_SETTLE  # it waited for the provider before deciding
+
+
+def test_engine_dying_after_the_click_is_unknown(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.die_after_click = True
+    r = c.handle(pay_request(c, sid, snap))
+    assert not r["ok"] and r["phase"] == "sent" and "MAY have gone through" in r["error"]
+    assert c.session is None and c.retire and co.should_exit(c)
+
+
+def test_redirect_to_blocked_site_after_the_click_is_unknown(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.on_click[("main", 4)] = "https://www.youtube.com/x"
+    r = c.handle(pay_request(c, sid, snap))
+    assert not r["ok"] and r["phase"] == "sent" and "MAY have gone through" in r["error"]
+    assert c.retire and c.session is None
+
+
+def test_pay_reply_has_a_confirmation_excerpt(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.on_click[("main", 4)] = f"{SHOP}/thanks"
+    r = c.handle(pay_request(c, sid, snap))
+    assert r["ok"] and "Order 1234 confirmed" in r["snapshot"]["confirmation"]
+    assert len(r["snapshot"]["confirmation"]) <= 400
+
+
+def test_fill_refusal_before_writing_is_phase_verify(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    b = bound(c, sid, [ref(snap, "Email")])
+    eng.frames[0].els[1]["name"] = "evil"
+    r = c.handle({"cmd": "fill", "session": sid, "origin": SHOP,
+                  "fields": [{"ref": b["bindings"][0]["ref"], "binding": b["bindings"][0], "value": "x"}]})
+    assert r["phase"] == "verify" and not eng.sets
+
+
+def test_retire_only_after_a_paid_or_broken_session(env):
+    c, eng, _ = env
+    sid, _ = opened(c)
+    c.handle({"cmd": "close", "session": sid})
+    assert not c.retire and not co.should_exit(c)
+    sid, snap = opened(c)
+    eng.on_click[("main", 4)] = f"{SHOP}/thanks"
+    assert c.handle(pay_request(c, sid, snap))["ok"]
+    assert not co.should_exit(c)  # still open (read-only) until closed or expired
+    c.handle({"cmd": "close", "session": sid})
+    assert co.should_exit(c)
+
+
+# --- engine hiccups -------------------------------------------------------------------------------
+
+
+def test_protocol_error_is_retried_and_keeps_the_session(env):
+    c, eng, _ = env
+    sid, _ = opened(c)
+    eng.fail["Runtime.evaluate"] = 1  # "Cannot find context" once, e.g. while a frame remounts
+    r = c.handle({"cmd": "snapshot", "session": sid})
+    assert r["ok"] and c.session is not None and r["snapshot"]["title"] == "Checkout"
+
+
+def test_repeated_protocol_errors_say_page_changed_not_closed(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.fail["Runtime.evaluate"] = 5
+    r = c.handle({"cmd": "click", "session": sid, "ref": ref(snap, "Pay 23,90 €")})
+    assert not r["ok"] and "page changed" in r["error"] and c.session is not None and not c.retire
+
+
+def test_element_op_on_a_new_document_is_refused(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.fail["Runtime.evaluate"] = 1
+    eng.frames[0].loader += "x"  # the main frame navigated meanwhile
+    r = c.handle({"cmd": "type", "session": sid, "ref": ref(snap, "Email"), "text": "a@b.fi"})
+    assert not r["ok"] and not eng.sets and c.session is not None
+
+
+def test_lost_connection_ends_the_session_and_retires(env):
+    c, eng, _ = env
+    sid, _ = opened(c)
+    eng.dead = True
+    r = c.handle({"cmd": "snapshot", "session": sid})
+    assert not r["ok"] and c.session is None and co.should_exit(c)
+
+
+# --- elements -------------------------------------------------------------------------------------
+
+
+def test_disabled_elements_listed_and_not_clickable(env):
+    c, eng, _ = env
+    eng.pages[f"{SHOP}/checkout"] = lambda: (lambda fr: (fr[0].els[4].update(disabled=True), fr)[1])(checkout_page())
+    sid, snap = opened(c)
+    pay = next(e for e in snap["elements"] if e["label"] == "Pay 23,90 €")
+    assert pay["disabled"] is True
+    r = c.handle({"cmd": "click", "session": sid, "ref": pay["ref"]})
+    assert not r["ok"] and "disabled" in r["error"] and not eng.clicks
+
+
+def test_hidden_checked_risky_box_still_counts(env):
+    c, eng, _ = env
+
+    def page():
+        fr = checkout_page()
+        fr[0].els[3].update(checked=True, hidden=True, label="Subscribe and save 10%")
+        return fr
+    eng.pages[f"{SHOP}/checkout"] = page
+    _, snap = opened(c)
+    assert not any(e["label"].startswith("Subscribe") for e in snap["elements"])
+    assert snap["risky_checked"] == ["Subscribe and save 10%"]
+
+
+def test_three_digit_frame_refs():
+    assert co.REF_RE.fullmatch("f123:45") and not co.REF_RE.fullmatch("f1234:1")
+
+
+def test_page_js_lists_controls_before_links_and_checks_ancestors():
+    js = co.PAGE_JS
+    assert js.index("'input,textarea,select,button") < js.index("'a[href]'")
+    assert "parentElement" in js and "aria-checked" in js and "disabled: disabledOf(el)" in js
+
+
+def test_connect_engine_waits_for_the_listener_but_not_for_a_squatter(tmp_path):
+    p = tmp_path / "tcp"
+    header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+    p.write_text(header)
+    sleeps = []
+
+    def sleep(s):
+        sleeps.append(s)
+        if len(sleeps) == 3:  # the engine comes up, but as the wrong user: refused at once
+            p.write_text(header + "   0: 0100007F:4B85 00000000:0000 0A 00000000:00000000 00:00000000 00000000"
+                                  "   1000        0 1\n")
+    with pytest.raises(co.Refused):
+        co.connect_engine(991, (str(p),), wait=10, sleep=sleep)
+    assert len(sleeps) == 3
+    p.write_text(header)
+    sleeps.clear()
+    with pytest.raises(co.Refused):
+        co.connect_engine(991, (str(p),), wait=2, sleep=sleeps.append)  # never comes up: gives up
+    assert len(sleeps) == 4
+
+
 # --- sessions -----------------------------------------------------------------------------------
 
 
@@ -485,6 +677,11 @@ def test_bad_requests():
     ("Yhteensä\n12,00 €", [("12.00", "EUR")]),
     ("Att betala: 199 kr", [("199.00", "KR")]),
     ("Order total USD 5", [("5.00", "USD")]),
+    ("Total CA$12.50", [("12.50", "CAD")]),
+    ("Total: A$ 9.95", [("9.95", "AUD")]),
+    ("Total US$100", [("100.00", "USD")]),
+    ("Total NZ$7", [("7.00", "NZD")]),
+    ("Total $3.00", [("3.00", "USD")]),
     ("Total (2 items)", []),
     ("Subtotal 10.00 EUR\nTotal 12,50 EUR", [("10.00", "EUR"), ("12.50", "EUR")]),
 ])

@@ -718,8 +718,9 @@ def is_browse_rule(rule: str) -> bool:
     if not m:
         return False
     first = re.split(r"[\s:]", m.group(1).strip(), maxsplit=1)[0]
-    return (bool(re.search(r"(^|[\s/])browse([\s:]|$)", m.group(1))) or "*" in first or first == ""
-            or first.rsplit("/", 1)[-1] in COMMAND_RUNNERS)
+    # Also the owner's personal info, the checkout browser and payments (refused server-side for these runs too).
+    return (bool(re.search(r"(^|[\s/])(browse|info|checkout|payment)([\s:]|$)", m.group(1))) or "*" in first
+            or first == "" or first.rsplit("/", 1)[-1] in COMMAND_RUNNERS)
 
 
 # Commands that run other commands: any of them would let a run start `browse` (and drop AMPI_ORIGIN).

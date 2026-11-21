@@ -471,8 +471,10 @@ def _wait_for(approval: int, wait: float, poll: float = 3.0) -> dict:
         st = request({"cmd": "approvals.status", "id": approval})
         if not st.get("ok") or st.get("status") not in ("pending", "approved"):
             return st
-        if time.monotonic() >= deadline:
-            return {"ok": True, "status": "pending", "text": ""}
+        # Approved means it's running now (e.g. filling and paying): give it up to 50 s more, but stay inside
+        # the Bash tool's 600 s limit.
+        if time.monotonic() >= deadline + (50 if st.get("status") == "approved" else 0):
+            return {"ok": True, "status": st.get("status"), "text": ""}
         time.sleep(poll)
 
 
@@ -491,6 +493,10 @@ def _run_waiting(prog: str, ops: list[dict], reason: str | None, wait: float, co
     print(f"Waiting for the owner's answer to request #{approval} (up to {int(wait)} s)…", flush=True)
     st = _wait_for(approval, wait)
     status = st.get("status")
+    if status == "approved":
+        print(f"The owner approved request #{approval} and it's still running. Check with `{prog} status {approval}` "
+              "in a minute; don't start it again.")
+        return 0
     if status == "pending":
         print(f"No answer yet. The request (#{approval}) stays open for a while; check later with "
               f"`{prog} status {approval}`. Don't ask again.")

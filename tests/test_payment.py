@@ -185,6 +185,7 @@ def test_grant_is_for_the_exact_site(tmp_path):
     d, side, ctl = make(tmp_path)
     side.vault.grant(SHOP, ["email"])
     ctl.origin = "https://shop.example.evil.com"
+    ctl.elements["f0:4"]["frame_origin"] = ctl.origin
     res = run(d.run(req("checkout.fill", fills=[{"ref": "f0:4", "field": "email"}]), None, origin="private"))
     assert res.get("approval")
 
@@ -243,7 +244,7 @@ def test_pay_never_offers_always(tmp_path):
 
 
 @pytest.mark.parametrize("change,err", [
-    (lambda c: setattr(c, "totals", [{"amount": "99.00", "currency": "EUR", "label": "Total"}]), "doesn't show a total"),
+    (lambda c: setattr(c, "totals", [{"amount": "99.00", "currency": "EUR", "label": "Total"}]), "page's total is 99.00"),
     (lambda c: setattr(c, "risky", ["Save my card for later"]), "subscription or cost"),
 ])
 def test_pay_refusals_from_the_page(tmp_path, change, err):
@@ -381,6 +382,116 @@ def test_end_to_end_with_the_real_controller(tmp_path):
     assert controller.handle({"cmd": "status"})["state"] == "readonly"
     texts = json.dumps([r["result"] for r in d.approvals.recent(10)] + [out["text"]])
     assert CARD not in texts and "anna.virtanen" not in texts
+
+
+def test_stated_amount_must_be_the_grand_total(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.totals = [{"amount": "9.00", "currency": "EUR", "label": "Subtotal"},
+                  {"amount": "109.00", "currency": "EUR", "label": "Total"},
+                  {"amount": "0.00", "currency": "EUR", "label": "Total incl. VAT 0.00"}]
+    with pytest.raises(ToolError, match="page's total is 109.00"):
+        run(d.run(req("checkout.pay", **{**PAY, "amount": "9.00"}), None, origin="private"))
+    with pytest.raises(ToolError, match="per-purchase limit"):
+        run(d.run(req("checkout.pay", **{**PAY, "amount": "109.00"}), None, origin="private"))
+
+
+def test_kr_counts_as_the_card_currency(tmp_path):
+    d, _, ctl = make(tmp_path, currency="SEK")
+    ctl.totals = [{"amount": "23.90", "currency": "KR", "label": "Totalt"}]
+    res = run(d.run(req("checkout.pay", **{**PAY, "currency": "SEK"}), None, origin="private"))
+    assert res.get("approval")
+
+
+def test_failure_after_filling_is_unknown_and_counted(tmp_path):
+    d, side, ctl = make(tmp_path)
+    ctl.fail_pay = "the checkout browser failed; the session was closed"  # no "verify" phase: may have gone through
+    res = run(d.run(req("checkout.pay", **PAY), None, origin="private"))
+    out = approve(d, res)
+    assert out["status"] == "failed" and "MAY have gone through" in out["text"]
+    assert side.vault.purchases()[0]["status"] == "unknown" and side.vault.purchases_today() == 1
+
+
+def test_definite_refusal_is_not_logged(tmp_path):
+    from ampi_tools.ops_checkout import CheckoutRefused
+    d, side, ctl = make(tmp_path)
+
+    async def refuse(req, timeout=None):
+        if req["cmd"] == "pay":
+            raise CheckoutRefused("checkout: the page changed; nothing was filled")
+        return await FakeCtl.call(ctl, req, timeout)
+    res = run(d.run(req("checkout.pay", **PAY), None, origin="private"))
+    ctl.call = refuse
+    out = approve(d, res)
+    assert out["status"] == "failed" and "nothing was filled or paid" in out["text"] and not side.vault.purchases()
+
+
+def test_stale_pay_request_doesnt_block(tmp_path):
+    d, side, ctl = make(tmp_path)
+    run(d.run(req("checkout.pay", **PAY), None, origin="private"))
+    t0 = side.clock()
+    side.clock = lambda: t0 + 700  # the first request's 10 minutes are over
+    res = run(d.run(req("checkout.pay", **PAY), None, origin="private"))
+    assert res.get("approval")
+
+
+@pytest.mark.parametrize("label", ["Place order", "Pay now", "Tilaa ja maksa", "Complete purchase"])
+def test_plain_click_on_an_order_button_is_refused(tmp_path, label):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"] = label
+    out = run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))
+    assert not out["ok"] and "places the order" in out["error"]
+    assert not [c for c in ctl.calls if c["cmd"] == "click"]
+
+
+def test_plain_click_on_continue_is_fine(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"] = "Continue to shipping"
+    assert run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]
+
+
+def test_fill_refuses_selects_widgets_and_http(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:6"] = {"ref": "f0:6", "frame": "f0", "frame_origin": SHOP, "kind": "select", "tag": "select",
+                            "autocomplete": "country", "name": "country", "label": "Country"}
+    with pytest.raises(ToolError, match="checkout choose"):
+        run(d.run(req("checkout.fill", fills=[{"ref": "f0:6", "field": "address.country"}]), None, origin="private"))
+    ctl.elements["f4:1"] = {**ctl.elements["f0:4"], "ref": "f4:1", "frame": "f4", "frame_origin": "https://chat.widget"}
+    with pytest.raises(ToolError, match="not the shop's own page"):
+        run(d.run(req("checkout.fill", fills=[{"ref": "f4:1", "field": "email"}]), None, origin="private"))
+    ctl.origin = "http://shop.example"
+    with pytest.raises(ToolError, match="https"):
+        run(d.run(req("checkout.fill", fills=[{"ref": "f0:4", "field": "email"}]), None, origin="private"))
+
+
+def test_a_grant_needs_fields_that_say_what_they_are(tmp_path):
+    d, side, ctl = make(tmp_path)
+    side.vault.grant(SHOP, ["email"])
+    ctl.elements["f0:4"]["autocomplete"] = ""
+    ctl.elements["f0:4"]["type"] = "text"  # only its label says "Email": ask instead of filling silently
+    res = run(d.run(req("checkout.fill", fills=[{"ref": "f0:4", "field": "email"}]), None, origin="private"))
+    assert res.get("approval")
+
+
+@pytest.mark.parametrize("field,binding", [
+    ("address.line1", {"label": "Email address"}), ("name", {"type": "search", "label": "Search by name"}),
+    ("phone", {"label": "Hotel"}), ("email", {"label": "Subscribe to our newsletter (email)"}),
+    ("address.line1", {"autocomplete": "email", "label": "Address"}),
+])
+def test_field_matches_refuses_lookalikes(field, binding):
+    assert not field_matches(field, binding)
+
+
+@pytest.mark.parametrize("op,args", [("info.fields", {}), ("payment.log", {}), ("info.revoke", {"site": "all"})])
+def test_read_ops_are_private_too(tmp_path, op, args):
+    d, _, _ = make(tmp_path)
+    with pytest.raises(ToolError, match="own chat"):
+        run(d.run(req(op, **args), None, origin="watcher:x"))
+
+
+def test_masking_separators_and_encodings():
+    out = mask_text("4242/4242/4242/4242 · anna%40x.fi · Anna+Virtanen · 4000 0566 5566 5556",
+                    ["anna@x.fi", "Anna Virtanen"], CARD)
+    assert "4242" not in out and "anna%40" not in out and "Anna+" not in out and "5556" not in out
 
 
 def test_cli_parsers():

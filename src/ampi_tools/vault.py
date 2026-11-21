@@ -283,24 +283,47 @@ class Vault:
         return [dict(r) for r in self.db.execute("SELECT * FROM purchases ORDER BY id DESC LIMIT ?", (limit,))]
 
 
-def mask_text(text: str, values: list[str], card_number: str | None) -> str:
-    """Replaces vault values (exact, case-insensitive) and the card number with any separators by `[vault]`."""
+def _loose(value: str) -> str:
+    """A pattern for a value as pages may print it: any whitespace run (incl. no-break spaces, `+`, `%20`), and
+    `@` also as `%40`."""
+    parts = []
+    for ch in value:
+        if ch.isspace():
+            parts.append(r"(?:\s|\+|%20|&nbsp;)+")
+        elif ch == "@":
+            parts.append(r"(?:@|%40)")
+        else:
+            parts.append(re.escape(ch))
+    return "".join(parts).replace(r"(?:\s|\+|%20|&nbsp;)+(?:\s|\+|%20|&nbsp;)+", r"(?:\s|\+|%20|&nbsp;)+")
+
+
+def mask_text(text: str, values: list[str], card_number: str | None, keep: list[str] | None = None) -> str:
+    """Replaces vault values (case-insensitive, loose spacing) and card numbers by `[vault]`: the stored card with
+    any separators between digits, and any other Luhn-valid 13–19 digit run. Values in `keep` (allowed on this
+    site) stay whole even when a masked value (e.g. the first name) occurs inside them."""
     out = text
+    kept: list[str] = []
+    for v in sorted(keep or [], key=len, reverse=True):
+        if v:
+            def stash(m: re.Match) -> str:
+                kept.append(m.group(0))
+                return f"\x00{len(kept) - 1}\x00"
+            out = re.sub(_loose(v), stash, out, flags=re.I)
     if card_number:
-        pattern = r"[ \-.]?".join(re.escape(d) for d in card_number)
-        out = re.sub(pattern, "[vault]", out)
+        out = re.sub(r"[^0-9]{0,3}".join(re.escape(d) for d in card_number), "[vault]", out)
+    out = CARD_RUN.sub(lambda m: "[vault]" if luhn_ok(re.sub(r"\D", "", m.group(0))) else m.group(0), out)
     for v in sorted(values, key=len, reverse=True):
         if v:
-            out = re.sub(re.escape(v), "[vault]", out, flags=re.I)
-    return out
+            out = re.sub(_loose(v), "[vault]", out, flags=re.I)
+    return re.sub("\x00(\\d+)\x00", lambda m: kept[int(m.group(1))], out) if kept else out
 
 
-def mask_obj(obj: Any, values: list[str], card_number: str | None) -> Any:
+def mask_obj(obj: Any, values: list[str], card_number: str | None, keep: list[str] | None = None) -> Any:
     """mask_text applied to every string inside a snapshot (labels, options, placeholders too)."""
     if isinstance(obj, str):
-        return mask_text(obj, values, card_number)
+        return mask_text(obj.replace("\x00", ""), values, card_number, keep)
     if isinstance(obj, list):
-        return [mask_obj(x, values, card_number) for x in obj]
+        return [mask_obj(x, values, card_number, keep) for x in obj]
     if isinstance(obj, dict):
-        return {k: mask_obj(v, values, card_number) for k, v in obj.items()}
+        return {k: mask_obj(v, values, card_number, keep) for k, v in obj.items()}
     return obj

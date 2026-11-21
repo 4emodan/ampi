@@ -26,6 +26,7 @@ import os
 import socket
 import struct
 import sys
+import time
 import tomllib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -273,6 +274,8 @@ class Daemon:
                         {"cmd": "hold", "session": ops[0]["args"]["resolved"]["session"],
                          "until": ops[0]["args"]["resolved"]["expires"]})
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
+            if ops[0]["op"] == "checkout.pay" and self._pending_pay():  # again: another may have arrived meanwhile
+                raise ToolError("a payment is already waiting for the owner's answer")
             approval_id = self.approvals.add(ops, summary, reason, grants)
             for o in telegram:
                 if o["op"] == "telegram.send":  # the duplicate guard also sees requests that are waiting
@@ -345,15 +348,29 @@ class Daemon:
             log.info("approval #%s approved with a standing permission", approval_id)
         return {"ok": True, "status": status, "text": text}
 
-    def _pending_pay(self) -> bool:
+    def _expire_checkout(self) -> None:
+        """Fill/pay requests are only good for 10 minutes (and their session): mark older ones expired, so a request
+        the owner never answered doesn't block new ones or count as waiting."""
         self.approvals.expire()
+        side = self.services.checkout_side
+        now = side.clock() if side is not None else time.time()
+        for row_id, ops in self.approvals.db.execute("SELECT id, ops FROM approvals WHERE status='pending'").fetchall():
+            for o in json.loads(ops):
+                r = o.get("args", {}).get("resolved") if o.get("op") in ("checkout.fill", "checkout.pay") else None
+                if isinstance(r, dict) and r.get("expires", now + 1) < now:
+                    self.approvals.db.execute("UPDATE approvals SET status='expired' WHERE id=? AND status='pending'",
+                                              (row_id,))
+        self.approvals.db.commit()
+
+    def _pending_pay(self) -> bool:
+        self._expire_checkout()
         rows = self.approvals.db.execute("SELECT ops FROM approvals WHERE status='pending'").fetchall()
         return any(o["op"] == "checkout.pay" for (ops,) in rows for o in json.loads(ops))
 
     def status_of(self, approval_id: int) -> dict:
         """For a CLI waiting on its own request: pending / approved / done / failed / rejected / expired, and the
         result text (never contains vault values: those ops scrub their results)."""
-        self.approvals.expire()
+        self._expire_checkout()
         row = self.approvals.get(approval_id)
         if row is None:
             raise ToolError("no such request")

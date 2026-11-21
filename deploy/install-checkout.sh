@@ -62,17 +62,15 @@ for unit in ampi-checkout-net.service ampi-checkout-engine.service ampi-checkout
   install -m 644 "$SRC_DIR/deploy/$unit" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
-systemctl enable ampi-checkout-net.service ampi-checkout-engine.service ampi-checkout.socket >/dev/null 2>&1
+# The engine has no [Install]: it runs only together with the controller (BindsTo=), which the socket starts.
+systemctl disable ampi-checkout-engine.service >/dev/null 2>&1 || true
+systemctl enable ampi-checkout-net.service ampi-checkout.socket >/dev/null 2>&1
+systemctl stop ampi-checkout.service ampi-checkout-engine.service 2>/dev/null || true
 systemctl restart ampi-checkout-net.service
-systemctl restart ampi-checkout-engine.service
-systemctl stop ampi-checkout.service 2>/dev/null || true
 systemctl restart ampi-checkout.socket
 
 echo "==> Check"
-sleep 2
-systemctl is-active --quiet ampi-checkout-engine.service || {
-  echo "The engine didn't start; see: journalctl -u ampi-checkout-engine -n 30" >&2; exit 1; }
-# As ampitools, through the real socket (also starts the controller).
+# As ampitools, through the real socket: starts the controller, and with it the engine.
 if ! out=$(sudo -u "$TOOLS_USER" /usr/bin/python3 -I -c '
 import json, socket
 s = socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect("/run/ampi-checkout.sock")
@@ -81,6 +79,12 @@ s.sendall(b"{\"cmd\": \"status\"}\n"); print(s.recv(4096).decode().strip())' 2>&
   exit 1
 fi
 echo "    controller: $out"
+for _ in $(seq 1 30); do
+  ss -Hltn 'sport = :19333' | grep -q . && break
+  sleep 0.5
+done
+systemctl is-active --quiet ampi-checkout-engine.service || {
+  echo "The engine didn't start with the controller; see: journalctl -u ampi-checkout-engine -n 30" >&2; exit 1; }
 # Nobody else may reach the engine's port: try as the assistant's user (expect a refusal).
 if id assistant >/dev/null 2>&1; then
   if sudo -u assistant /usr/bin/python3 -I -c '

@@ -31,8 +31,18 @@ REVEAL_TTL = 600             # revealed values can be collected for 10 minutes, 
 DEFAULT_PSP = ("https://js.stripe.com", "https://checkout.stripe.com", "https://checkoutshopper-live.adyen.com",
                "https://checkoutshopper-live-us.adyen.com", "https://assets.braintreegateway.com",
                "https://checkout.shopifycs.com", "https://pay.paytrail.com", "https://services.paytrail.com")
-PRIVATE_ONLY = {"info.reveal", "info.collect", "checkout.open", "checkout.snapshot", "checkout.click", "checkout.type",
-                "checkout.choose", "checkout.back", "checkout.close", "checkout.fill", "checkout.pay"}
+PRIVATE_ONLY = {"info.fields", "info.reveal", "info.collect", "info.revoke", "payment.log", "checkout.open",
+                "checkout.snapshot", "checkout.click", "checkout.type", "checkout.choose", "checkout.back",
+                "checkout.close", "checkout.fill", "checkout.pay"}
+# Buttons that place an order: a plain click on them could complete an invoice / pay-later / saved-payment order
+# without the payment approval, so `checkout click` refuses them (the owner finishes such orders, or `checkout pay`).
+ORDER_BUTTON = re.compile(r"\b(pay|buy|order|purchase|place|confirm|complete|submit order|checkout now|book now)\b|"
+                          r"tilaa|maksa|osta|vahvista|köp|betala|bestill|kaufen|bezahlen|bestellen|zahlungspflichtig",
+                          re.I)
+NOT_ORDER = re.compile(r"add to (cart|bag|basket)|lisää (ostoskoriin|koriin)|continue|jatka|next|seuraava|"
+                       r"go to checkout|proceed to checkout|siirry kassalle|view (cart|bag)", re.I)
+TOTAL_EXCLUDE = re.compile(r"sub|vat|alv|tax|vero|incl|sis\.|shipping|delivery|toimitus|discount|alennus|saved|säästä",
+                           re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,5}")
 
 
@@ -56,6 +66,10 @@ class PaymentRules:
                    max_per_day=max(0, min(int(raw.get("max_per_day", 3)), 20)), psp_origins=DEFAULT_PSP + extra)
 
 
+class CheckoutRefused(ToolError):
+    """The controller refused before writing any value (phase "verify"): definitely nothing was filled or sent."""
+
+
 class CheckoutClient:
     """One JSON line to the controller's socket, one JSON line back."""
 
@@ -66,12 +80,14 @@ class CheckoutClient:
         try:
             rd, wr = await asyncio.wait_for(asyncio.open_unix_connection(self.path, limit=8 * 1024 * 1024), 5)
         except (OSError, asyncio.TimeoutError):
-            raise ToolError("the checkout browser isn't running (install-checkout.sh / systemctl start ampi-checkout)")
+            # Nothing reached the controller.
+            raise CheckoutRefused("the checkout browser isn't running (install-checkout.sh / systemctl start "
+                                  "ampi-checkout)") from None
         try:
             wr.write(json.dumps(req).encode() + b"\n")
             await wr.drain()
             line = await asyncio.wait_for(rd.readline(), timeout or self.timeout)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, OSError):
             raise ToolError("the checkout browser didn't answer in time") from None
         finally:
             wr.close()
@@ -80,7 +96,10 @@ class CheckoutClient:
         except ValueError:
             raise ToolError("the checkout browser sent a broken reply") from None
         if not resp.get("ok"):
-            raise ToolError(f"checkout: {str(resp.get('error') or 'failed')[:300]}")
+            msg = f"checkout: {str(resp.get('error') or 'failed')[:300]}"
+            if resp.get("phase") == "verify":
+                raise CheckoutRefused(msg)
+            raise ToolError(msg)
         return resp
 
 
@@ -96,24 +115,33 @@ class CheckoutSide:
 
     def mask(self, obj: Any, session: str | None, origin: str) -> Any:
         ok = set(self.allowed.get(session or "", {}).get(origin, set())) | self.vault.granted_fields(origin)
+        if ok & {"name", "first_name", "last_name"}:
+            ok |= {"name", "first_name", "last_name"}
         values = [v for f, v in self._profile_values() if f not in ok]
+        keep = [v for f, v in self._profile_values() if f in ok]
         card = None
         try:
             card = self.vault.value("card.number")
         except ToolError:
             pass
-        return mask_obj(obj, values, card)
+        return mask_obj(obj, values, card, keep)
 
     def _profile_values(self) -> list[tuple[str, str]]:
         out = []
-        for f in ("name", "email", "phone", "address.line1", "address.line2", "address.full"):
+        for f in ("name", "first_name", "last_name", "email", "phone", "address.line1", "address.line2",
+                  "address.full"):
             try:
                 v = self.vault.value(f)
             except ToolError:
                 continue
-            if len(v) >= 6:
+            if len(v) >= (4 if f in ("first_name", "last_name") else 6):
                 out.append((f, v))
         return out
+
+    def prune(self) -> None:
+        now = self.clock()
+        for k in [k for k, (t, _) in self.released.items() if now - t > REVEAL_TTL]:
+            del self.released[k]
 
     def scrub(self, text: str) -> str:
         """For texts that go to the owner's chat log or approvals: every vault value masked, whatever the site."""
@@ -221,6 +249,7 @@ async def info_reveal(s: Services, a: dict) -> Result:
 async def info_collect(s: Services, a: dict) -> Result:
     side = cs(s)
     (aid,) = need(a, "approval")
+    side.prune()
     hit = side.released.pop(aid, None)
     if not hit or side.clock() - hit[0] > REVEAL_TTL:
         raise ToolError("nothing to collect for that request (not approved, already collected, or expired)")
@@ -256,7 +285,7 @@ def render(snap: dict, session: str) -> str:
                      "type or click in it.")
     if snap.get("totals"):
         lines.append("Totals on the page: " + "; ".join(f"{clean(t.get('label'), 30)} {t.get('amount')} {t.get('currency')}"
-                                                       for t in snap["totals"][:6]))
+                                                       for t in snap["totals"][:10]))
     if snap.get("risky_checked"):
         lines.append("⚠ Checked boxes that may add costs or subscriptions: " +
                      "; ".join(clean(x, 80) for x in snap["risky_checked"][:5]))
@@ -271,7 +300,7 @@ def render(snap: dict, session: str) -> str:
             if e.get(k):
                 bits.append(f"{k}={clean(e[k], 30)}")
         flags = (" required" if e.get("required") else "") + (" filled" if e.get("filled") else "") + \
-            (" checked" if e.get("checked") else "")
+            (" checked" if e.get("checked") else "") + (" disabled" if e.get("disabled") else "")
         opts = f" options: {', '.join(clean(o, 40) for o in e['options'][:15])}" if e.get("options") else ""
         lines.append(f"  [{e.get('ref')}] {' '.join(bits)} “{MARKERS.sub('', clean(e.get('label'), 120))}”{flags}{where}{opts}")
     return "\n".join(lines)
@@ -295,6 +324,15 @@ def _simple(cmd: str, *keys: str):
             raise ToolError("no checkout session; start one with `checkout open URL`")
         for k in keys:
             req[{"field_text": "text"}.get(k, k)] = a.get(k)
+        if cmd == "click":
+            # A plain click must not place an order (invoice, pay later, a saved card at the shop...): those buttons
+            # go through `checkout pay`, or the owner presses them.
+            b = await side.client.call({"cmd": "bind", "session": req["session"], "refs": [a.get("ref")]})
+            bd = next(iter(b.get("bindings") or []), {})
+            label = " ".join(str(bd.get(k) or "") for k in ("label", "name", "id"))
+            if ORDER_BUTTON.search(label) and not NOT_ORDER.search(label):
+                raise ToolError(f"“{side.scrub(clean(bd.get('label'), 60))}” looks like it places the order. Card "
+                                "payments go through `checkout pay`; for any other way of paying, tell the owner")
         resp = await side.client.call(req, timeout=90)
         if cmd == "close":
             side.allowed.pop(req.get("session", ""), None)
@@ -307,24 +345,24 @@ def _simple(cmd: str, *keys: str):
 
 
 FIELD_HINTS = {
-    "email": r"e-?mail|sähköposti",
-    "phone": r"phone|tel|puhelin|mobile|gsm",
-    "name": r"\bname\b|nimi|full.?name|recipient",
-    "first_name": r"first|given|etunimi|fname",
-    "last_name": r"last|family|surname|sukunimi|lname",
-    "address.line1": r"address|street|osoite|katu|line.?1",
-    "address.line2": r"address|line.?2|apartment|apt|suite|unit|c/o",
-    "address.postal": r"postal|zip|post.?code|postinumero",
-    "address.city": r"city|town|kaupunki|postitoimipaikka|locality",
-    "address.region": r"region|state|province|county|maakunta",
-    "address.country": r"country|maa\b",
-    "address.full": r"address|osoite",
-    "card.number": r"card.?number|cardnumber|cc-number|kortin.?numero|\bnumber\b",
-    "card.exp": r"exp|valid|voimassa|mm\s*/\s*yy",
-    "card.exp_month": r"exp.*month|month|kuukausi",
-    "card.exp_year": r"exp.*year|year|vuosi",
-    "card.cvc": r"cvc|cvv|csc|security.?code|turvakoodi",
-    "card.name": r"name|cardholder|haltija",
+    "email": r"\be-?mail\b|sähköposti",
+    "phone": r"\b(phone|telephone|tel|puhelin|mobile|gsm|matkapuhelin)\b",
+    "name": r"\b(name|full.?name|recipient)\b|\bnimi\b",
+    "first_name": r"\b(first.?name|given.?name|fname|firstname)\b|etunimi",
+    "last_name": r"\b(last.?name|family.?name|surname|lname|lastname)\b|sukunimi",
+    "address.line1": r"\b(address|street|address.?line.?1|address1)\b|osoite|katuosoite",
+    "address.line2": r"\b(address.?line.?2|address2|apartment|apt|suite|unit)\b|c/o",
+    "address.postal": r"\b(postal|zip|post.?code|postcode|zipcode)\b|postinumero",
+    "address.city": r"\b(city|town|locality)\b|kaupunki|postitoimipaikka",
+    "address.region": r"\b(region|state|province|county)\b|maakunta",
+    "address.country": r"\bcountry\b|\bmaa\b",
+    "address.full": r"\baddress\b|osoite",
+    "card.number": r"card.?number|cardnumber|cc-number|kortin.?numero",
+    "card.exp": r"\bexp|valid|voimassa|mm\s*/\s*yy",
+    "card.exp_month": r"exp.*month|\bmonth\b|kuukausi",
+    "card.exp_year": r"exp.*year|\byear\b|vuosi",
+    "card.cvc": r"\b(cvc|cvv|csc|cvc2|security.?code)\b|turvakoodi",
+    "card.name": r"\b(name|cardholder|card.?holder)\b|haltija",
 }
 AUTOCOMPLETE = {
     "email": {"email"}, "phone": {"tel", "tel-national"}, "name": {"name", "cc-name"}, "first_name": {"given-name"},
@@ -336,22 +374,53 @@ AUTOCOMPLETE = {
 }
 
 
-def field_matches(fld: str, b: dict) -> bool:
+NOT_A_FORM_FIELD = re.compile(r"search|haku|hae|share|friend|ystävä|comment|kommentti|message|viesti|note|"
+                              r"review|arvostelu|question|kysymys|newsletter|uutiskirje|coupon|promo|gift|lahja",
+                              re.I)
+
+
+def field_matches(fld: str, b: dict, strict: bool = False) -> bool:
     """The page field must look like the vault field going into it (so an approval for 'email' can't be pointed
-    at a search box that echoes it, or the card number at a 'notes' field)."""
+    at a search box that echoes it, or the card number at a 'notes' field). `strict` (fills that don't ask the
+    owner): only the field's own autocomplete/type count, not its name or label."""
     ac = str(b.get("autocomplete") or "").lower().split()
+    typ = str(b.get("type") or "").lower()
+    if typ in ("search", "url", "number", "password", "hidden", "date", "file", "range", "color"):
+        return False
     if any(t in AUTOCOMPLETE.get(fld, set()) for t in ac):
         return True
-    if fld == "email" and str(b.get("type") or "").lower() == "email":
-        return True
-    if fld == "phone" and str(b.get("type") or "").lower() == "tel":
-        return True
+    known = set().union(*AUTOCOMPLETE.values())
+    if any(t in known for t in ac):  # the field says what it is, and it's something else
+        return False
+    if typ == "email":
+        return fld == "email"
+    if typ == "tel":
+        return fld == "phone"
+    if strict:
+        return False
     hay = " ".join(str(b.get(k) or "") for k in ("name", "id", "label")).lower()
+    if NOT_A_FORM_FIELD.search(hay) or str(b.get("tag") or "").lower() == "textarea":
+        return False
+    if fld.startswith("address.") and re.search(r"mail", hay):  # "Email address"
+        return False
     return bool(re.search(FIELD_HINTS.get(fld, r"$^"), hay))
 
 
 def is_psp(origin: str, rules: PaymentRules) -> bool:
     return origin in rules.psp_origins
+
+
+TEXT_TYPES = {"", "text", "email", "tel"}
+
+
+def _is_text_field(b: dict) -> bool:
+    return str(b.get("kind") or b.get("tag") or "").lower() in ("input", "textarea") \
+        and str(b.get("type") or "").lower() in TEXT_TYPES
+
+
+def _is_button(b: dict) -> bool:
+    kind = str(b.get("kind") or b.get("tag") or "").lower()
+    return kind == "button" or (kind == "input" and str(b.get("type") or "").lower() in ("submit", "button"))
 
 
 async def _bind(s: Services, a: dict, pay: bool) -> dict:
@@ -365,23 +434,30 @@ async def _bind(s: Services, a: dict, pay: bool) -> dict:
         raise ToolError("this session already paid; it's read-only")
     refs = [f["ref"] for f in fills] + ([a["button"]] if pay else [])
     b = await side.client.call({"cmd": "bind", "session": session, "refs": refs})
-    bindings = {x["ref"]: x for x in b.get("bindings") or b.get("refs") or []}
+    bindings = {x["ref"]: x for x in b.get("bindings") or []}
     origin = str(b.get("origin") or "")
-    if not origin.startswith("https://") and not origin.startswith("http://"):
-        raise ToolError("this page has no usable origin")
+    if not re.fullmatch(r"https://[a-z0-9.-]+(:\d+)?", origin):
+        raise ToolError("details and payments are filled only on https pages")
     for f in fills:
         bd = bindings.get(f["ref"])
         if not bd:
             raise ToolError(f"element {f['ref']} isn't on the page anymore; take a new snapshot")
-        if str(bd.get("frame_origin") or "") in ("", "opaque", "null"):
+        label = side.scrub(clean(bd.get("label"), 60))
+        if not _is_text_field(bd):
+            hint = " (for a list, use `checkout choose` with the option you want)" if bd.get("kind") == "select" else ""
+            raise ToolError(f"element {f['ref']} (“{label}”) isn't a text field{hint}")
+        fo = str(bd.get("frame_origin") or "")
+        if fo in ("", "opaque", "null"):
             raise ToolError(f"element {f['ref']} is in a frame without a real origin; refusing")
+        if not f["field"].startswith("card.") and fo != origin and not is_psp(fo, side.rules):
+            # Not into third-party widgets (chat, reviews, ads) embedded in the shop's page.
+            raise ToolError(f"element {f['ref']} is in a frame from {fo}, not the shop's own page; refusing")
         if not field_matches(f["field"], bd):
-            raise ToolError(f"element {f['ref']} (“{clean(bd.get('label'), 60)}”, {bd.get('autocomplete') or bd.get('type')}) "
+            raise ToolError(f"element {f['ref']} (“{label}”, {bd.get('autocomplete') or bd.get('type') or 'text'}) "
                             f"doesn't look like a {f['field']} field")
         if f["field"].startswith("card."):
             if not pay:
                 raise ToolError("card fields are filled only by `checkout pay` (with the owner's approval of the purchase)")
-            fo = str(bd.get("frame_origin"))
             in_main = bool(bd.get("main")) if "main" in bd else bd.get("frame") == "f0"
             if not (is_psp(fo, side.rules) and (not in_main or is_psp(origin, side.rules))):
                 raise ToolError(f"card details go only into a payment provider's field (Stripe, Adyen, …); "
@@ -391,9 +467,12 @@ async def _bind(s: Services, a: dict, pay: bool) -> dict:
            "expires": side.clock() + REQUEST_TTL, "totals": b.get("totals") or [],
            "risky": b.get("risky_checked") or []}
     if pay:
-        if a["button"] not in bindings:
+        bd = bindings.get(a["button"])
+        if not bd:
             raise ToolError("the pay button isn't on the page anymore")
-        out["button"] = {"ref": a["button"], "binding": bindings[a["button"]]}
+        if not _is_button(bd) or bd.get("disabled"):
+            raise ToolError(f"{a['button']} isn't an enabled button; give the pay button's ref")
+        out["button"] = {"ref": a["button"], "binding": bd}
     return out
 
 
@@ -403,8 +482,28 @@ async def _resolve_fill(s: Services, a: dict) -> dict:
     r = await _bind(s, a, pay=False)
     side = cs(s)
     r["fields"] = sorted({f["field"] for f in r["fills"]})
-    r["granted"] = side.vault.granted(r["origin"], r["fields"])
+    # A site permission covers only fields whose own autocomplete/type says what they are.
+    strict_ok = all(field_matches(f["field"], f["binding"], strict=True) for f in r["fills"])
+    r["granted"] = strict_ok and side.vault.granted(r["origin"], r["fields"])
     return {"resolved": r}
+
+
+def grand_total(totals: list[dict], currency: str, card_currency: str) -> Decimal | None:
+    """The amount that will be charged: the largest total-like amount in the card's currency, leaving out
+    subtotals, VAT/tax, shipping and discount lines. `kr` counts as the card's currency for SEK/NOK/DKK."""
+    best = None
+    for t in totals:
+        cur = str(t.get("currency") or "").upper()
+        if cur == "KR" and card_currency in ("SEK", "NOK", "DKK"):
+            cur = card_currency
+        if cur != currency or TOTAL_EXCLUDE.search(str(t.get("label") or "")):
+            continue
+        try:
+            amount = Decimal(str(t.get("amount")))
+        except InvalidOperation:
+            continue
+        best = amount if best is None or amount > best else best
+    return best
 
 
 async def _resolve_pay(s: Services, a: dict) -> dict:
@@ -414,30 +513,37 @@ async def _resolve_pay(s: Services, a: dict) -> dict:
         raise ToolError("a payment needs at least card.number (plus card.exp, card.cvc as the page asks)")
     if currency != side.rules.currency:
         raise ToolError(f"the card is set up for {side.rules.currency} payments ([payment] currency)")
-    if Decimal(amount) > side.rules.max_amount:
-        raise ToolError(f"{amount} {currency} is over the per-purchase limit ({side.rules.max_amount} {currency}, "
-                        "[payment] max_amount); tell the owner")
     if side.vault.purchases_today() >= side.rules.max_per_day:
         raise ToolError(f"today's purchase limit ({side.rules.max_per_day}) is reached")
     r = await _bind(s, a, pay=True)
     if r["risky"]:
-        raise ToolError("checked boxes may add a subscription or cost: " + "; ".join(clean(x, 60) for x in r["risky"][:3])
-                        + ". Uncheck them first (or ask the owner)")
-    amounts = {(str(t.get("amount")), str(t.get("currency"))) for t in r["totals"]}
-    if (amount, currency) not in amounts:
-        shown = "; ".join(f"{t.get('amount')} {t.get('currency')}" for t in r["totals"][:5]) or "none found"
-        raise ToolError(f"the page doesn't show a total of {amount} {currency} (it shows: {shown}); check the cart")
+        raise ToolError("checked boxes may add a subscription or cost: "
+                        + "; ".join(side.scrub(clean(x, 60)) for x in r["risky"][:3]) + ". Uncheck them first (or ask the owner)")
+    total = grand_total(r["totals"], currency, side.rules.currency)
+    shown = "; ".join(f"{side.scrub(clean(t.get('label'), 30))} {t.get('amount')} {t.get('currency')}"
+                      for t in r["totals"][:10]) or "none found"
+    if total is None:
+        raise ToolError(f"no order total in {currency} found on the page (it shows: {shown}); go to the step that "
+                        "shows the final total")
+    if Decimal(amount) != total:
+        raise ToolError(f"the page's total is {total:.2f} {currency}, not {amount} (it shows: {shown}); check the cart")
+    for limit_amount in (total,):
+        if limit_amount > side.rules.max_amount:
+            raise ToolError(f"{limit_amount:.2f} {currency} is over the per-purchase limit ({side.rules.max_amount} "
+                            f"{currency}, [payment] max_amount); tell the owner")
     r.update(amount=amount, currency=currency, what=what)
     return {"resolved": r}
 
 
 async def describe_fill(s: Services, a: dict) -> str:
+    side = cs(s)
     r = a.get("resolved") or {}
     lines = [f"Fill your {', '.join(r.get('fields') or [])} on {r.get('origin')}"]
     for f in r.get("fills") or []:
         b = f["binding"]
-        lines.append(f"  {f['field']} → “{clean(b.get('label'), 60)}” ({b.get('autocomplete') or b.get('type') or b.get('tag')})"
-                     + ("" if b.get("frame") == "f0" else f" in {b.get('frame_origin')}"))
+        lines.append(side.scrub(f"  {f['field']} → “{clean(b.get('label'), 60)}” "
+                                f"({b.get('autocomplete') or b.get('type') or b.get('tag')})"
+                                + ("" if b.get("frame") == "f0" else f" in {b.get('frame_origin')}")))
     lines.append("A site you allow can show these values on its pages, where Ampi can read them.")
     return "\n".join(lines)
 
@@ -446,18 +552,18 @@ async def describe_pay(s: Services, a: dict) -> str:
     side = cs(s)
     r = a.get("resolved") or {}
     card_frames = sorted({f["binding"].get("frame_origin") for f in r.get("fills") or [] if f["field"].startswith("card.")})
-    page = "; ".join(f"{clean(t.get('label'), 30)} {t.get('amount')} {t.get('currency')}" for t in (r.get("totals") or [])[:4])
+    page = "; ".join(f"{clean(t.get('label'), 30)} {t.get('amount')} {t.get('currency')}" for t in (r.get("totals") or [])[:10])
     profile = sorted({f["field"] for f in r.get("fills") or [] if not f["field"].startswith("card.")})
-    return "\n".join([
+    return side.scrub("\n".join([
         f"PAY {r.get('amount')} {r.get('currency')} at {r.get('origin')}",
         f"For: {clean(r.get('what'), 200)}",
         f"Card: {side.vault.card_mask()} (into {', '.join(card_frames)})",
-        f"Page says: {clean(page, 200) or '?'}",
+        f"Page says: {clean(page, 400) or '?'}",
         *([f"Also fills: {', '.join(profile)}"] if profile else []),
         f"Then presses “{clean((r.get('button') or {}).get('binding', {}).get('label'), 60)}”.",
         "The page's totals and boxes are checked again first. Your bank app / 3-D Secure shows the real amount "
         "and merchant: if they differ, decline there.",
-    ])
+    ]))
 
 
 def _values(side: CheckoutSide, fills: list[dict]) -> list[dict]:
@@ -471,6 +577,8 @@ async def _check_live(side: CheckoutSide, r: dict) -> None:
     st = await side.client.call({"cmd": "status"})
     if st.get("session") != r["session"]:
         raise ToolError("the checkout session it was for has ended; nothing was filled")
+    if st.get("state") == "readonly":
+        raise ToolError("that session already paid; nothing was filled")
 
 
 async def checkout_fill(s: Services, a: dict) -> Result:
@@ -479,12 +587,27 @@ async def checkout_fill(s: Services, a: dict) -> Result:
     if not isinstance(r, dict):
         raise ToolError("internal: not checked first")
     await _check_live(side, r)
-    resp = await side.client.call({"cmd": "fill", "session": r["session"], "origin": r["origin"],
-                                   "fields": _values(side, r["fills"]), "psp_origins": list(side.rules.psp_origins)},
-                                  timeout=60)
+    try:
+        await side.client.call({"cmd": "fill", "session": r["session"], "origin": r["origin"],
+                                "fields": _values(side, r["fills"]), "psp_origins": list(side.rules.psp_origins)},
+                               timeout=60)
+    except CheckoutRefused:
+        raise
+    except ToolError as e:
+        side.allowed.setdefault(r["session"], {}).setdefault(r["origin"], set()).update(r["fields"])
+        raise ToolError(f"{e} (some fields may have been filled)") from None
     side.allowed.setdefault(r["session"], {}).setdefault(r["origin"], set()).update(r["fields"])
-    snap = resp.get("snapshot") or {}
-    return {"text": f"Filled {', '.join(r['fields'])} on {r['origin']}.", "snapshot_title": clean(snap.get("title"), 80)}
+    return f"Filled {', '.join(r['fields'])} on {r['origin']}."
+
+
+def _excerpt(snap: dict) -> str:
+    conf = snap.get("confirmation")
+    if conf:
+        return clean(conf, 400)
+    text = str(snap.get("text") or "")
+    m = re.search(r"order|confirm|thank|kiitos|tilaus|vahvist|receipt|kuitti", text, re.I)
+    start = max(0, m.start() - 100) if m else 0
+    return clean(text[start:start + 400], 400)
 
 
 async def checkout_pay(s: Services, a: dict) -> Result:
@@ -494,26 +617,25 @@ async def checkout_pay(s: Services, a: dict) -> Result:
         raise ToolError("internal: not checked first")
     await _check_live(side, r)
     expect = [{"amount": t.get("amount"), "currency": t.get("currency")} for t in r["totals"]]
-    status = "unknown"
+    log = lambda status: side.vault.log_purchase(  # noqa: E731
+        r["origin"], r["amount"], r["currency"], r["what"], status, a.get("approval_id"))
     try:
         resp = await side.client.call({"cmd": "pay", "session": r["session"], "origin": r["origin"],
                                        "fields": _values(side, r["fills"]), "button": r["button"],
                                        "expect_totals": expect,
                                        "psp_origins": list(side.rules.psp_origins)}, timeout=90)
-        status = "submitted"
+    except CheckoutRefused as e:
+        raise ToolError(f"{e} — nothing was filled or paid") from None  # a definite refusal before any value
     except ToolError as e:
-        # Refusals before anything was sent are definite; a timeout during the click is not.
-        status = "unknown" if "didn't answer" in str(e) else "refused"
-        if status == "refused":
-            raise
-        side.vault.log_purchase(r["origin"], r["amount"], r["currency"], r["what"], status, a.get("approval_id"))
-        raise ToolError("the payment step timed out: it MAY have gone through. Check the shop's confirmation e-mail "
-                        "and the bank app before trying again") from None
-    side.vault.log_purchase(r["origin"], r["amount"], r["currency"], r["what"], status, a.get("approval_id"))
+        # Anything else (filled but not clicked, failed after the click, timeouts, broken replies): unknown.
+        log("unknown")
+        raise ToolError("the payment step didn't finish cleanly: it MAY have gone through. Check the shop's "
+                        "confirmation e-mail and the bank app before trying again; never pay again first") from None
+    log("submitted")
     snap = side.mask(resp.get("snapshot") or {}, r["session"], r["origin"])
-    after = clean(f"{snap.get('title', '')} — {str(snap.get('text', ''))[:300]}", 400)
     note = " 3-D Secure is asking: confirm in your bank app." if snap.get("threeds") else ""
-    return side.scrub(f"Pressed pay at {r['origin']} ({r['amount']} {r['currency']}). The page now shows: {after}.{note}")
+    return side.scrub(f"Pressed pay at {r['origin']} ({r['amount']} {r['currency']}). "
+                      f"{clean(snap.get('title'), 100)}: {_excerpt(snap)}.{note}")
 
 
 # --- registration ---------------------------------------------------------------------------------

@@ -54,6 +54,7 @@ HARD_MAX = 30 * 60
 MIN_MEM_MB = 900
 NAV_TIMEOUT = 25
 PAY_SETTLE = 30
+PAY_FILL_SETTLE = 1.5  # seconds between filling the card and pressing Pay
 MAX_REQUEST = 262_144
 MAX_TEXT = 60_000
 MAX_FRAMES = 20
@@ -68,12 +69,18 @@ RISKY = re.compile(r"subscri|recurring|membership|auto-?renew|save (my )?card|re
                    r"tilaus|jäsenyys|kestotilaus", re.I)
 TOTAL_WORDS = re.compile(r"\b(grand total|order total|total|subtotal|to pay|amount due|summa|yhteensä|maksettava|"
                          r"totalt|att betala|gesamt|summe)\b", re.I)
-CURRENCY_CODES = {"EUR", "USD", "GBP", "SEK", "NOK", "DKK", "PLN", "CHF", "CZK", "HUF", "ISK", "CAD", "AUD", "JPY"}
-SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP", "kr": "KR", "zł": "PLN"}
+CURRENCY_CODES = {"EUR", "USD", "GBP", "SEK", "NOK", "DKK", "PLN", "CHF", "CZK", "HUF", "ISK", "CAD", "AUD", "NZD",
+                  "JPY"}
+# "kr" stays "KR" (Swedish, Norwegian, Danish, Icelandic krona all print as kr): the daemon maps it to the card's.
+SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP", "kr": "KR", "zł": "PLN", "CA$": "CAD", "C$": "CAD", "A$": "AUD",
+           "AU$": "AUD", "US$": "USD", "NZ$": "NZD"}
+_CUR = r"(?:CA|AU|US|NZ|A|C)\$|€|\$|£"
+CONFIRMATION = re.compile(r"order|confirm|thank|kiitos|tilaus|vahvist", re.I)
+REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 AMOUNT = re.compile(
-    r"(?P<pre>€|\$|£|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|JPY|kr)\b)?\s?"
+    rf"(?P<pre>{_CUR}|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr)\b)?\s?"
     r"(?P<num>\d{1,3}(?:[  .,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
-    r"\s?(?P<post>€|\$|£|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|JPY|kr|zł)\b)?")
+    rf"\s?(?P<post>{_CUR}|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr|zł)\b)?")
 CAPTCHA_FRAME = re.compile(r"hcaptcha\.com/captcha/.*frame=challenge|recaptcha/(api2|enterprise)/bframe|"
                            r"challenges\.cloudflare\.com|captcha-delivery\.com|arkoselabs\.com|funcaptcha", re.I)
 THREEDS_FRAME = re.compile(r"3ds|threeds|three-d|/acs\b|acs\.|/challenge|authenticat", re.I)
@@ -87,7 +94,15 @@ class Refused(Exception):
 
 
 class CdpError(Exception):
-    """The engine failed or the connection broke; the session is closed."""
+    """The connection to the engine broke; the session is closed."""
+
+
+class CdpProtocolError(Exception):
+    """The engine answered a command with an error (e.g. "Cannot find context" while a page navigates). Routine
+    during redirects and frame remounts: the session stays; the caller retries or asks for a new snapshot."""
+
+
+PAGE_CHANGED = "the page changed; take a new snapshot"
 
 
 # --- small helpers ------------------------------------------------------------------------------
@@ -291,7 +306,7 @@ class Cdp:
                 r = json.loads(self.ws.recv())
                 if r.get("id") == self.n:  # events (console, network, …) are dropped unread
                     if "error" in r:
-                        raise CdpError(f"{method} failed")
+                        raise CdpProtocolError(f"{method} failed")
                     return r.get("result") or {}
         except (OSError, ValueError) as e:
             raise CdpError("engine connection failed") from e
@@ -300,11 +315,24 @@ class Cdp:
         self.ws.close()
 
 
-def connect_engine(engine_uid: int | None, proc_paths: tuple[str, ...] = ("/proc/net/tcp",)) -> Cdp:
-    """Only to the engine's own listener: refuse if anything else owns the port (a squatter)."""
-    owner = listener_uid(CDP_PORT, proc_paths)
-    if engine_uid is None or owner != engine_uid:
-        raise Refused("the checkout browser isn't running right now; try again in a minute")
+ENGINE_WAIT = 15  # seconds for the engine's listener to appear after (re)start
+
+
+def connect_engine(engine_uid: int | None, proc_paths: tuple[str, ...] = ("/proc/net/tcp",),
+                   wait: float = ENGINE_WAIT, sleep: Callable[[float], None] = time.sleep) -> Cdp:
+    """Only to the engine's own listener: refuse at once if anything else owns the port (a squatter); while
+    nothing listens yet (the engine is starting with the controller), wait a little."""
+    if engine_uid is None:
+        raise Refused("the checkout browser isn't set up (no engine user)")
+    waited = 0.0
+    while True:
+        owner = listener_uid(CDP_PORT, proc_paths)
+        if owner == engine_uid:
+            break
+        if owner is not None or waited >= wait:
+            raise Refused("the checkout browser isn't running right now; try again in a minute")
+        sleep(0.5)
+        waited += 0.5
     conn = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=5)
     try:
         conn.request("GET", "/json/version")
@@ -327,14 +355,20 @@ PAGE_JS = r"""
     const els = new Map(), ids = new WeakMap();
     let next = 1;
     const txt = (s, n) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, n || 120);
-    const visible = (el) => {
-      if (el.hidden || el.disabled) return false;
-      if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'hidden') return false;
-      try { const st = getComputedStyle(el); if (st && (st.display === 'none' || st.visibility === 'hidden')) return false; } catch (e) {}
+    const shown = (n) => {
+      if (n.hidden) return false;
+      try { const st = getComputedStyle(n); if (st && (st.display === 'none' || st.visibility === 'hidden')) return false; } catch (e) {}
       return true;
     };
+    const visible = (el) => {  // the element and its ancestors (a hidden mega-menu hides its links)
+      if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'hidden') return false;
+      let n = el, depth = 0;
+      while (n && n.nodeType === 1 && depth < 40) { if (!shown(n)) return false; n = n.parentElement; depth++; }
+      return true;
+    };
+    const disabledOf = (el) => !!el.disabled || el.getAttribute('aria-disabled') === 'true';
     const kindOf = (el) => {
-      const t = el.tagName, ty = (el.type || '').toLowerCase();
+      const t = el.tagName, ty = (el.type || '').toLowerCase(), role = el.getAttribute('role');
       if (t === 'INPUT') {
         if (ty === 'checkbox') return 'checkbox';
         if (ty === 'radio') return 'radio';
@@ -343,10 +377,12 @@ PAGE_JS = r"""
       }
       if (t === 'TEXTAREA') return 'textarea';
       if (t === 'SELECT') return 'select';
-      if (t === 'BUTTON' || el.getAttribute('role') === 'button') return 'button';
+      if (role === 'switch' || role === 'checkbox') return 'checkbox';
+      if (t === 'BUTTON' || role === 'button') return 'button';
       if (t === 'A' && el.hasAttribute('href')) return 'link';
       return null;
     };
+    const isChecked = (el) => el.tagName === 'INPUT' ? !!el.checked : el.getAttribute('aria-checked') === 'true';
     const labelOf = (el, kind) => {
       let s = el.getAttribute('aria-label') || '';
       const lb = el.getAttribute('aria-labelledby');
@@ -363,8 +399,9 @@ PAGE_JS = r"""
       const kind = kindOf(el);
       const d = { n: idOf(el), kind: kind, tag: el.tagName.toLowerCase(), type: (el.type || '').toLowerCase(),
         autocomplete: txt(el.getAttribute('autocomplete'), 60), name: txt(el.getAttribute('name'), 80),
-        id: txt(el.id, 80), label: labelOf(el, kind), required: !!el.required, checked: null, filled: false };
-      if (kind === 'checkbox' || kind === 'radio') d.checked = !!el.checked;
+        id: txt(el.id, 80), label: labelOf(el, kind), required: !!el.required, checked: null, filled: false,
+        disabled: disabledOf(el) };
+      if (kind === 'checkbox' || kind === 'radio') d.checked = isChecked(el);
       if (kind === 'input' || kind === 'textarea') d.filled = (el.value || '') !== '';
       if (kind === 'select') { d.options = Array.from(el.options).slice(0, 30).map(o => txt(o.text, 60));
         const o = el.options[el.selectedIndex]; d.selected = o ? txt(o.text, 60) : null; }
@@ -383,9 +420,20 @@ PAGE_JS = r"""
       const get = (n) => { const el = els.get(n); return el && el.isConnected ? el : null; };
       if (a.op === 'enumerate') {
         const list = [];
-        const all = document.querySelectorAll('input,textarea,select,button,a[href],[role=button]');
-        for (const el of all) { if (list.length >= 400) break; if (kindOf(el) && visible(el)) list.push(describe(el)); }
-        const out = { href: String(location.href), ready: document.readyState, elements: list };
+        // Form controls first, links after: on big shops the cap must not cut off the inputs and buttons.
+        for (const sel of ['input,textarea,select,button,[role=button],[role=switch],[role=checkbox]', 'a[href]']) {
+          for (const el of document.querySelectorAll(sel)) {
+            if (list.length >= 400) break;
+            if (kindOf(el) && visible(el)) list.push(describe(el));
+          }
+        }
+        // Every checked box, shown or not (a hidden one is still sent with the form), for the risky check.
+        const checked = [];
+        for (const el of document.querySelectorAll('input[type=checkbox],[role=switch],[role=checkbox]')) {
+          if (checked.length >= 100) break;
+          if (isChecked(el)) checked.push(labelOf(el, 'checkbox'));
+        }
+        const out = { href: String(location.href), ready: document.readyState, elements: list, checked: checked };
         let body = '';
         if (document.body) {  // without script/style text (the engine's innerText includes it)
           body = String(document.body.innerText || '');
@@ -450,10 +498,24 @@ class Controller:
         self.clock, self.mem_mb, self.sleep = clock, mem_mb, sleep
         self.check_url = check_url or br.check_url
         self.session: Session | None = None
+        # True once a session paid or lost its engine connection: when no session is left, the controller exits,
+        # systemd stops the engine with it (BindsTo=), and the next request starts both fresh (no card details
+        # left in a long-lived engine process).
+        self.retire = False
+        # Where a fill/pay got to, reported with every error: "verify" (nothing written: a definite refusal),
+        # "filled" (values written, Pay not pressed), "sent" (Pay was pressed: outcome unknown).
+        self._phase: str | None = None
 
     # --- request entry -------------------------------------------------------------------
 
+    def _error(self, text: str) -> dict:
+        out: dict[str, Any] = {"ok": False, "error": text}
+        if self._phase:
+            out["phase"] = self._phase
+        return out
+
     def handle(self, req: Any) -> dict:
+        self._phase = None
         try:
             self.expire()
             if not isinstance(req, dict) or not isinstance(req.get("cmd"), str):
@@ -466,15 +528,19 @@ class Controller:
                 raise Refused("unknown command")
             return fn(req)
         except Refused as e:
-            return {"ok": False, "error": str(e)}
+            return self._error(str(e))
         except br.Refused as e:  # check_url's messages name no values
-            return {"ok": False, "error": str(e)}
+            return self._error(str(e))
+        except CdpProtocolError:  # the page was changing under us; the session stays
+            return self._error(PAGE_CHANGED)
         except CdpError:
+            self.retire = True
             self.drop()
-            return {"ok": False, "error": "the checkout browser failed; the session was closed"}
+            return self._error("the checkout browser failed; the session was closed")
         except Exception:  # never echo request contents
+            self.retire = True
             self.drop()
-            return {"ok": False, "error": "internal error in the checkout browser; the session was closed"}
+            return self._error("internal error in the checkout browser; the session was closed")
 
     # --- lifecycle -----------------------------------------------------------------------
 
@@ -490,6 +556,8 @@ class Controller:
         s, self.session = self.session, None
         if s is None:
             return
+        if s.readonly:
+            self.retire = True  # it paid: start over with a fresh engine
         try:
             s.cdp.call("Target.disposeBrowserContext", {"browserContextId": s.context}, timeout=5)
         except Exception:
@@ -625,20 +693,38 @@ class Controller:
         s.worlds[frame["frame_id"]] = (frame["loader"], ctx)
         return ctx
 
-    def _run(self, s: Session, frame: dict, op: dict, quiet: bool = False) -> dict | None:
+    ELEMENT_OPS = ("inspect", "set", "click", "choose")
+
+    def _eval(self, s: Session, frame: dict, op: dict) -> dict | None:
+        ctx = self._world(s, frame)
+        r = s.cdp.call("Runtime.evaluate", {"expression": page_call(op), "contextId": ctx, "returnByValue": True},
+                       s.cdp_session)
+        value = (r.get("result") or {}).get("value")
         try:
-            ctx = self._world(s, frame)
-            r = s.cdp.call("Runtime.evaluate", {"expression": page_call(op), "contextId": ctx, "returnByValue": True},
-                           s.cdp_session)
-            value = (r.get("result") or {}).get("value")
             data = json.loads(value) if isinstance(value, str) else None
-            return data if isinstance(data, dict) else None
-        except CdpError:
-            if quiet:
-                return None
-            raise
         except ValueError:
             return None
+        return data if isinstance(data, dict) else None
+
+    def _run(self, s: Session, frame: dict, op: dict, quiet: bool = False) -> dict | None:
+        """One page op in the frame's isolated world. An engine error (the context went away while the page
+        navigated or a frame remounted) is retried once in a fresh world, but an element op only if the frame
+        still holds the same document (its elements are gone otherwise). Connection loss raises CdpError."""
+        try:
+            return self._eval(s, frame, op)
+        except CdpProtocolError:
+            s.worlds.pop(frame["frame_id"], None)
+        try:
+            fresh = next((f for f in self._frames(s) if f["frame_id"] == frame["frame_id"]), None)
+            if fresh is None or (op.get("op") in self.ELEMENT_OPS and fresh["loader"] != frame["loader"]):
+                raise CdpProtocolError("document changed")
+            frame.update(loader=fresh["loader"], url=fresh["url"], origin=fresh["origin"])
+            return self._eval(s, frame, op)
+        except CdpProtocolError:
+            s.worlds.pop(frame["frame_id"], None)
+            if quiet:
+                return None
+            raise Refused(PAGE_CHANGED) from None
 
     # --- snapshot ------------------------------------------------------------------------
 
@@ -649,6 +735,7 @@ class Controller:
                                 "frames": [], "elements": [], "readonly": s.readonly}
         frame_urls = []
         texts = []
+        checked_labels: list[str] = []
         for f in frames:
             snap["frames"].append({"id": f["name"], "origin": f["origin"], "url": f["url"][:200]})
             frame_urls.append(f["url"])
@@ -664,6 +751,8 @@ class Controller:
                 texts.append(str(data.get("text") or ""))
             if f["origin"] == "opaque":
                 continue
+            checked_labels += [br.MARKERS.sub("", br.clean(str(x)))[:120] for x in (data.get("checked") or [])[:100]
+                               if isinstance(x, str)]
             for e in (data.get("elements") or [])[:MAX_ELEMENTS]:
                 if not isinstance(e, dict) or not isinstance(e.get("n"), int) or e.get("kind") not in (
                         "input", "textarea", "select", "button", "link", "checkbox", "radio"):
@@ -675,13 +764,15 @@ class Controller:
                 item["required"] = bool(e.get("required"))
                 item["checked"] = e.get("checked") if isinstance(e.get("checked"), bool) else None
                 item["filled"] = bool(e.get("filled"))
+                item["disabled"] = bool(e.get("disabled"))
                 if e["kind"] == "select":
                     item["options"] = [br.MARKERS.sub("", br.clean(str(o)))[:60] for o in (e.get("options") or [])[:30]]
                     item["selected"] = br.clean(str(e.get("selected") or ""))[:60] or None
                 snap["elements"].append(item)
         snap["totals"] = extract_totals(snap["text"])
-        snap["risky_checked"] = [el["label"] for el in snap["elements"]
-                                 if el["kind"] == "checkbox" and el["checked"] and RISKY.search(el["label"] or "")]
+        # Every checked box counts, also hidden ones and role=switch toggles (they're sent with the form too).
+        labels = [el["label"] for el in snap["elements"] if el["kind"] == "checkbox" and el["checked"]] + checked_labels
+        snap["risky_checked"] = list(dict.fromkeys(x for x in labels if RISKY.search(x or "")))
         snap["captcha"] = any(CAPTCHA_FRAME.search(u) for u in frame_urls) or br.looks_like_bot_check(
             snap["text"], snap["title"])
         snap["threeds"] = any(THREEDS_FRAME.search(urllib.parse.urlsplit(u).netloc + urllib.parse.urlsplit(u).path)
@@ -698,7 +789,7 @@ class Controller:
 
     def _element(self, s: Session, ref: Any, frames: list[dict] | None = None) -> tuple[dict, dict, int]:
         """(frame, current description, number) for a ref like 'f1:12'; refuses anything not actionable."""
-        if not isinstance(ref, str) or not re.fullmatch(r"f\d{1,2}:\d{1,6}", ref):
+        if not isinstance(ref, str) or not REF_RE.fullmatch(ref):
             raise Refused("unknown element")
         name, num = ref.split(":")
         fid = s.frame_id(name)
@@ -723,6 +814,8 @@ class Controller:
         frame, d, n = self._element(s, req.get("ref"))
         if d.get("kind") not in ("button", "link", "checkbox", "radio", "input"):
             raise Refused("that element can't be clicked")
+        if d.get("disabled"):
+            raise Refused("that element is disabled right now (the page may want something filled first)")
         r = self._run(s, frame, {"op": "click", "n": n}) or {}
         if not r.get("ok"):
             raise Refused("that element is gone (the page changed); take a new snapshot")
@@ -738,6 +831,8 @@ class Controller:
         frame, d, n = self._element(s, req.get("ref"))
         if d.get("kind") not in ("input", "textarea") or (d.get("kind") == "input" and d.get("type") not in TEXT_TYPES):
             raise Refused("that element isn't a text field")
+        if d.get("disabled"):
+            raise Refused("that field is disabled right now")
         if any(SECRET_FIELD.search(str(d.get(k) or "")) for k in ("type", "autocomplete", "name", "id")):
             raise Refused("that field is for card, password or code details; those are only filled with approval")
         r = self._run(s, frame, {"op": "set", "n": n, "value": text}) or {}
@@ -773,7 +868,7 @@ class Controller:
         for ref in refs:
             frame, d, _ = self._element(s, ref, frames)
             item = {"ref": ref, "frame": frame["name"], "frame_id": frame["frame_id"], "frame_origin": frame["origin"],
-                    "main": frame is frames[0], "kind": d.get("kind")}
+                    "main": frame is frames[0], "kind": d.get("kind"), "disabled": bool(d.get("disabled"))}
             for k in self.BOUND + ("label",):
                 item[k] = str(d.get(k) or "")[:120]
             out.append(item)
@@ -819,8 +914,11 @@ class Controller:
 
     def fill(self, req: dict) -> dict:
         s = self._session(req)
+        self._phase = "verify"
         _, plan = self._verify(s, req, req.get("fields"), allow_card=False)
+        self._phase = "filled"
         self._set_all(s, plan)
+        self._phase = None  # done: later problems (settling, the snapshot) are ordinary errors
         return self._after_action(s)
 
     def _set_all(self, s: Session, plan: list[tuple]) -> None:
@@ -829,33 +927,59 @@ class Controller:
             if not r.get("ok"):
                 raise Refused("a field disappeared while filling; check the page before trying again")
 
-    def pay(self, req: dict) -> dict:
-        s = self._session(req)
-        frames, plan = self._verify(s, req, req.get("fields"), allow_card=True)
-        button = req.get("button")
+    def _pay_button(self, s: Session, button: Any, frames: list[dict]) -> tuple[dict, int]:
+        changed = Refused("the page changed since the approval; nothing was filled")
         if not isinstance(button, dict) or not isinstance(button.get("binding"), dict):
             raise Refused("bad pay button")
         b = button["binding"]
         try:
             bframe, bd, bn = self._element(s, b.get("ref"), frames)
         except Refused:
-            raise Refused("the page changed since the approval; nothing was filled") from None
+            raise changed from None
         if (button.get("ref") != b.get("ref") or bframe["frame_id"] != b.get("frame_id")
                 or bframe["origin"] != b.get("frame_origin") or bd.get("kind") != "button"
                 or any(str(bd.get(k) or "")[:120] != str(b.get(k) or "") for k in self.BOUND)):
-            raise Refused("the page changed since the approval; nothing was filled")
+            raise changed
+        return bframe, bn
+
+    def pay(self, req: dict) -> dict:
+        s = self._session(req)
+        # 1. verify: nothing has been written; any refusal here is definite.
+        self._phase = "verify"
+        frames, plan = self._verify(s, req, req.get("fields"), allow_card=True)
+        bframe, bn = self._pay_button(s, req.get("button"), frames)
         snap = self.snapshot(s)
         if totals_key(snap["totals"]) != totals_key(req.get("expect_totals") or []):
             raise Refused("the totals on the page changed since the approval; nothing was filled or paid")
         if snap["risky_checked"]:
             raise Refused("a subscription / save-card / Link box is ticked; nothing was filled or paid")
+        # 2. filled: from the first value on, this session only looks (no click or type can follow a half fill).
+        s.readonly = True
+        self._phase = "filled"
         self._set_all(s, plan)
-        r = self._run(s, bframe, {"op": "click", "n": bn}) or {}
-        s.readonly = True  # from here on: look, don't touch (3-D Secure belongs to the owner)
-        if not r.get("ok"):
-            raise Refused("the pay button disappeared after filling; check the page (it may not have been sent)")
+        self.sleep(PAY_FILL_SETTLE)  # let the provider's frame report the card as complete before pressing Pay
+        cur = self._run(s, bframe, {"op": "inspect", "n": bn}) or {}
+        if not cur.get("connected") or cur.get("disabled"):
+            raise Refused("the card was filled but the pay button is gone or still disabled; Pay was NOT pressed. "
+                          "Check the page")
+        # 3. sent: Pay is pressed. Whatever happens after this, the outcome is unknown, never a definite refusal.
+        self._phase = "sent"
+        try:
+            r = self._run(s, bframe, {"op": "click", "n": bn}) or {}
+            if not r.get("ok"):
+                return self._error("the pay button vanished while being pressed; the payment MAY have gone through")
+            return self._after_pay(s, frames[0]["url"])
+        except Refused:
+            self.drop()
+            return self._error("after pressing Pay the page went somewhere the checkout browser doesn't open (or "
+                               "changed); the payment MAY have gone through")
+        except Exception:
+            self.retire = True
+            self.drop()
+            return self._error("the checkout browser failed after pressing Pay; the payment MAY have gone through")
+
+    def _after_pay(self, s: Session, before: str) -> dict:
         start = self.clock()
-        before = frames[0]["url"]
         self.sleep(2)
         while self.clock() - start < PAY_SETTLE:
             main = self._frames(s)[0]
@@ -864,7 +988,10 @@ class Controller:
                 break
             self.sleep(1)
         self._check_top(s)
-        return self._reply(s)
+        snap = self.snapshot(s)
+        m = CONFIRMATION.search(snap["text"])
+        snap["confirmation"] = snap["text"][max(0, m.start() - 150):m.start() + 250].strip()[:400] if m else ""
+        return {"ok": True, "session": s.id, "snapshot": snap}
 
 
 # --- the socket server -------------------------------------------------------------------------
@@ -947,6 +1074,16 @@ def main() -> int:
         if ready:
             conn, _ = srv.accept()
             serve_one(controller, conn, allowed)
+        if should_exit(controller):
+            # A session paid or lost the engine: exit, so systemd stops the engine too (BindsTo=) and the next
+            # request on the socket starts both fresh. The socket (Accept=no) keeps listening meanwhile.
+            print("ampi-checkout controller: session over after a payment or engine failure; restarting fresh",
+                  file=sys.stderr)
+            return 0
+
+
+def should_exit(controller: Controller) -> bool:
+    return controller.retire and controller.session is None
 
 
 if __name__ == "__main__":
