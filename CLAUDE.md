@@ -58,8 +58,12 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
                         rate limiter and daily quota budgets
   meta.py, ops_social.py Threads + Instagram (Meta's official APIs: own posts and replies/comments only);
                         token refresh, secret redaction, checks on published text
-  client.py             `todoist` / `gmail` / `youtube` / `threads` / `instagram` / `browse` commands the assistant
-                        runs (skills: templates/skills/)
+  maps.py, ops_maps.py  Google Maps via Google's agent API (mapstools.googleapis.com, MAPS_API_KEY): places,
+                        routes, weather, link resolving; local daily/monthly budget; answers carry source links
+  wolt.py, ops_wolt.py  Wolt via wolt.com's own (unofficial) web API, owner's choice: venues, menus, orders,
+                        filling the basket; never places/pays an order; polite limiter, pause on any block
+  client.py             `todoist` / `gmail` / `youtube` / `threads` / `instagram` / `maps` / `wolt` / `browse`
+                        commands the assistant runs (skills: templates/skills/)
   browser.py            stdlib-only; one sandboxed `ampi-browser@` instance per page (socket-activated, user
                         `ampibrowser`) running the Obscura engine read-only; not part of the ampi-tools daemon
   browser_net.py        root: nft egress table for the browser user + generated resolv.conf/hosts/passwd

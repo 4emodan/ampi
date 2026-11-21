@@ -191,6 +191,60 @@ Adding to a public or unlisted playlist, removing from playlists, subscribing an
 3,000 lookups, and 1,000 for watchers (`/home/ampitools/youtube-quota.json`). Requests to youtube.com itself
 (feeds, oEmbed) are rate-limited and pause for 30 minutes if YouTube starts refusing them.
 
+## 8b-2. Google Maps (optional)
+
+The `maps` command uses Google's API for AI assistants ("Maps Experience agent tools"): place search with a
+summary (ratings, address, open now), travel times (drive, walk, bike, public transport), weather, and explaining
+Google Maps links you send. Without a key, the assistant can still give you Google Maps search and directions links.
+
+1. In a Google Cloud project (the Gmail one is fine): **Billing → link a billing account**. Google requires it,
+   but its free monthly allowance (10,000 basic and 5,000 detailed requests) covers personal use.
+2. **APIs & Services → Library → "Maps Experience agent tools" → Enable.**
+3. **Set hard caps so it can never cost money:** **APIs & Services → Maps Experience agent tools → Quotas &
+   System Limits**, and lower the per-day limits to about **300** requests. Budgets alone only send e-mails;
+   quotas stop requests.
+4. **Credentials → Create credentials → API key.** Edit it: **API restrictions → Restrict key → Maps Experience
+   agent tools**, and **Application restrictions → IP addresses →** the server's IPv4 and IPv6.
+5. In `/home/ampitools/env`:
+   ```
+   MAPS_API_KEY=AIza...
+   MAPS_LANGUAGE=en          # language of the answers
+   MAPS_REGION=FI            # your country (two letters), for ambiguous names
+   MAPS_NEAR=60.1699,24.9384 # optional: your home area, searches prefer places near it
+   MAPS_TIMEZONE=Europe/Helsinki
+   ```
+6. `systemctl restart ampi-tools`, `ampi-tools check`, add `"Bash(maps:*)"` to `allowed_tools`, restart
+   `claude-assistant`.
+
+Ampi keeps its own budget below Google's free allowance (`/home/ampitools/maps-budget.json`, see `maps status`):
+about 250 basic and 40 detailed requests a day. Answers always end with Google Maps source links, as Google's terms
+require. Google Maps and Wolt pages are not opened in the web browser; they have their own commands.
+
+## 8b-3. Wolt (optional)
+
+Wolt has no public API for customers, so the `wolt` command uses the same interface wolt.com's website uses.
+That is **unofficial and against Wolt's terms for automated use**: Wolt may change it at any time or block the
+server. Ampi keeps it gentle (about one request a second, a few hundred an hour, an honest user agent) and stops
+for an hour at the first refusal.
+
+Without logging in, the assistant can find venues and dishes near you and read menus, opening hours and delivery
+estimates. Set your area in `/home/ampitools/env` (else `MAPS_NEAR` is used):
+```
+WOLT_NEAR=60.1699,24.9384
+WOLT_LANGUAGE=en
+```
+
+**Your account (optional):** your orders, order status, and filling your basket. **Ampi never places or pays for an
+order** (Wolt requires a device fingerprint for that, which we don't fake): it fills the basket, and you check out
+in the Wolt app. Replacing a basket you already have at that venue, or a basket requested from a group or watcher
+run, asks you first. To connect:
+```bash
+sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools wolt-login'
+```
+It asks for the `__wrtoken` cookie from a private browser window where you logged in to wolt.com (instructions are
+printed). Wolt changes this token on every use; the newest is kept in `/home/ampitools/wolt-token.json`. If it ever
+stops working, run `wolt-login` again. Then add `"Bash(wolt:*)"` to `allowed_tools` and restart both services.
+
 ## 8c. Threads and Instagram (optional)
 
 Meta's official APIs only give an app **your own posts and the replies/comments under them** (plus stats).

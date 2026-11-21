@@ -31,7 +31,11 @@ DENY6 = ("::/96","::ffff:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48", "100::/64", 
 # YouTube is only reached through the youtube command (official API/feeds); never via the browser.
 BLOCKED_NAMES = ("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be",
                  "www.youtu.be", "youtube-nocookie.com", "www.youtube-nocookie.com", "youtubei.googleapis.com",
-                 "youtube.googleapis.com", "gaming.youtube.com", "tv.youtube.com")
+                 "youtube.googleapis.com", "gaming.youtube.com", "tv.youtube.com",
+                 # Wolt and Google Maps: the wolt and maps commands.
+                 "wolt.com", "www.wolt.com", "consumer-api.wolt.com", "restaurant-api.wolt.com",
+                 "authentication.wolt.com", "explore.wolt.com", "maps.google.com", "maps.app.goo.gl",
+                 "mapstools.googleapis.com")
 
 
 def own_networks(ip_json: str) -> tuple[list[str], list[str]]:

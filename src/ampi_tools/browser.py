@@ -45,6 +45,12 @@ YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com", "googlevideo
 # Country domains (youtube.de, youtube.co.uk…) only redirect to www.youtube.com, which the unit's
 # /etc/hosts blocks; refusing them here too gives a clearer message.
 YOUTUBE_COUNTRY = re.compile(r"(.+\.)?youtube\.(com?\.)?[a-z]{2,3}")
+# Wolt and Google Maps have their own commands (one rate-limited way in each).
+WOLT_HOSTS = ("wolt.com", "wolt.fi", "woltapp.com", "wolt.app")
+MAPS_HOSTS = {"maps.app.goo.gl", "maps.googleapis.com", "mapstools.googleapis.com", "places.googleapis.com",
+              "routes.googleapis.com"}
+MAPS_COUNTRY = re.compile(r"maps\.google\.(com?\.)?[a-z]{2,3}")
+GOOGLE_SITE = re.compile(r"(www\.)?google\.(com?\.)?[a-z]{2,3}")
 LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa", ".intranet", ".corp", ".private")
 NAT64 = ipaddress.ip_network("64:ff9b::/96")
 NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
@@ -109,6 +115,10 @@ def check_host(host: str) -> str:
     if any(ascii_host == h or ascii_host.endswith("." + h) for h in YOUTUBE_HOSTS) \
             or YOUTUBE_COUNTRY.fullmatch(ascii_host):
         raise Refused("YouTube pages aren't opened in the browser; use the youtube command")
+    if any(ascii_host == h or ascii_host.endswith("." + h) for h in WOLT_HOSTS):
+        raise Refused("Wolt isn't opened in the browser; use the wolt command")
+    if ascii_host in MAPS_HOSTS or MAPS_COUNTRY.fullmatch(ascii_host):
+        raise Refused("Google Maps isn't opened in the browser; use the maps command")
     return ascii_host
 
 
@@ -135,6 +145,9 @@ def check_url(url: str) -> str:
     if port not in (None, 80, 443):
         raise Refused("only the normal web ports (80 and 443) are opened")
     host = check_host(parts.hostname or "")
+    if (GOOGLE_SITE.fullmatch(host) and re.match(r"/+maps(/|$)", parts.path, re.I)) \
+            or (host == "goo.gl" and re.match(r"/+maps(/|$)", parts.path, re.I)):
+        raise Refused("Google Maps isn't opened in the browser; use the maps command")
     netloc = host if port is None else f"{host}:{port}"
     safe = "/:?#[]@!$&'()*+,;=%~-._"
     path = urllib.parse.quote(parts.path, safe=safe) or "/"
@@ -486,7 +499,7 @@ def _select_result(raw: str) -> tuple[str, str | None]:
         final = urllib.parse.urlsplit(href)
         if final.scheme not in ("http", "https"):
             raise Refused("the page ended up somewhere that isn't a web page")
-        check_host(final.hostname or "")  # e.g. a redirect to YouTube or a private address
+        check_url(href)  # e.g. a redirect to YouTube, Google Maps or a private address
     raw_items = data.get("items") if isinstance(data.get("items"), list) else []
     items = [" ".join(clean(str(i)).split())[:2000] for i in raw_items[:MAX_ITEMS]
              if isinstance(i, (str, int, float))]

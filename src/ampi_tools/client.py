@@ -328,6 +328,136 @@ def youtube_ops(a: argparse.Namespace) -> list[dict]:
     raise SystemExit(f"unknown command {c}")
 
 
+# --- maps ------------------------------------------------------------------------------------
+
+
+def maps_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="maps", description="Google Maps (places, routes, weather).")
+    p.add_argument("-m", "--reason", help=argparse.SUPPRESS)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("search", help="find places (a summary with Google Maps links)")
+    s.add_argument("query")
+    s.add_argument("--near", help="address, place or lat,lng to search around")
+    s.add_argument("--radius", type=int, help="meters around --near lat,lng")
+    s.add_argument("-n", "--limit", type=int, default=5, help="1-10 (more than 5 uses the small daily Pro budget)")
+    s.add_argument("--details", action="store_true", help="reviews and more detail (Pro budget)")
+    s = sub.add_parser("route", help="travel time and distance")
+    s.add_argument("origin")
+    s.add_argument("destination")
+    s.add_argument("--mode", choices=["drive", "walk", "bicycle", "transit"], default="drive")
+    s.add_argument("--via", action="append", help="a stop on the way (repeat; not for transit)")
+    t = s.add_mutually_exclusive_group()
+    t.add_argument("--depart", help="HH:MM or YYYY-MM-DD HH:MM (owner's time zone)")
+    t.add_argument("--arrive", help="HH:MM or YYYY-MM-DD HH:MM")
+    s.add_argument("--alternatives", action="store_true")
+    s = sub.add_parser("weather", help="weather (and air quality / pollen) at a place")
+    s.add_argument("place")
+    s.add_argument("--date", help="YYYY-MM-DD (up to 9 days ahead)")
+    s.add_argument("--hour", type=int, help="0-23, with --date")
+    s.add_argument("--air", action="store_true", help="air quality too")
+    s.add_argument("--pollen", action="store_true", help="pollen too (Pro budget)")
+    sub.add_parser("place", help="what Google Maps links point at").add_argument("links", nargs="+")
+    s = sub.add_parser("link", help="a Google Maps link to search or get directions (no API needed)")
+    s.add_argument("query", nargs="?")
+    s.add_argument("--from", dest="origin")
+    s.add_argument("--to", dest="destination")
+    s.add_argument("--mode", choices=["drive", "walk", "bicycle", "transit"])
+    sub.add_parser("status", help="setup and today's budget")
+    return p
+
+
+def maps_ops(a: argparse.Namespace) -> list[dict]:
+    c = a.cmd
+    if c == "search":
+        return _op("maps.search", query=a.query, near=a.near, radius=a.radius, limit=a.limit, details=a.details)
+    if c == "route":
+        return _op("maps.route", origin=a.origin, destination=a.destination, mode=a.mode, via=a.via,
+                   depart=a.depart, arrive=a.arrive, alternatives=a.alternatives)
+    if c == "weather":
+        return _op("maps.weather", place=a.place, date=a.date, hour=a.hour, air=a.air, pollen=a.pollen)
+    if c == "place":
+        return _op("maps.place", links=a.links)
+    if c == "link":
+        if not a.query and not (a.origin and a.destination):
+            raise SystemExit("maps link: give a search text, or --from and --to")
+        return _op("maps.link", query=a.query, origin=a.origin, destination=a.destination, mode=a.mode)
+    if c == "status":
+        return _op("maps.status")
+    raise SystemExit(f"unknown command {c}")
+
+
+def maps_main(argv: list[str] | None = None) -> int:
+    return _main("maps", maps_parser(), maps_ops, argv)
+
+
+# --- wolt ------------------------------------------------------------------------------------
+
+
+def wolt_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="wolt", description="Wolt: venues, menus, the owner's orders and baskets.")
+    p.add_argument("-m", "--reason", help="why (shown to the owner if a request needs approval)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("venues", help="restaurants and shops delivering near the owner")
+    s.add_argument("query", nargs="?", help="e.g. sushi, pizza, pharmacy")
+    s.add_argument("--near", help="lat,lng (default: the owner's home area)")
+    s.add_argument("--open", action="store_true", help="only venues taking orders now")
+    s.add_argument("-n", "--limit", type=int, default=15)
+    s = sub.add_parser("dishes", help="search dishes and products across venues")
+    s.add_argument("query")
+    s.add_argument("--near")
+    s.add_argument("-n", "--limit", type=int, default=20)
+    s = sub.add_parser("venue", help="hours, open now, delivery estimate, minimum order, fees")
+    s.add_argument("venue", help="slug or wolt.com link")
+    s.add_argument("--near")
+    s = sub.add_parser("menu", help="a venue's menu (shops: --search)")
+    s.add_argument("venue")
+    s.add_argument("--search")
+    s = sub.add_parser("item", help="one item with all its choices")
+    s.add_argument("venue")
+    s.add_argument("item")
+    sub.add_parser("orders", help="the owner's recent orders").add_argument("-n", "--limit", type=int, default=10)
+    sub.add_parser("order", help="status of one order").add_argument("order_id")
+    s = sub.add_parser("basket", help="put items into the owner's Wolt basket (they check out in the app)")
+    s.add_argument("venue")
+    s.add_argument("-f", "--file", required=True, help='JSON list: [{"id": ITEM_ID, "count": 1, "options": {...}}]')
+    s.add_argument("--replace", action="store_true", help="replace an existing basket there (asks the owner)")
+    sub.add_parser("status", help="setup")
+    sub.add_parser("approvals", help="recent approval requests and their outcome")
+    return p
+
+
+def wolt_ops(a: argparse.Namespace) -> list[dict]:
+    c = a.cmd
+    near = getattr(a, "near", None)
+    if c == "venues":
+        return _op("wolt.venues", query=a.query, lat_lng=near, open=a.open, limit=a.limit)
+    if c == "dishes":
+        return _op("wolt.dishes", query=a.query, lat_lng=near, limit=a.limit)
+    if c == "venue":
+        return _op("wolt.venue", venue=a.venue, lat_lng=near)
+    if c == "menu":
+        return _op("wolt.menu", venue=a.venue, search=a.search)
+    if c == "item":
+        return _op("wolt.item", venue=a.venue, item=a.item)
+    if c == "orders":
+        return _op("wolt.orders", limit=a.limit)
+    if c == "order":
+        return _op("wolt.order", order_id=a.order_id)
+    if c == "basket":
+        try:
+            items = json.loads(workspace_file(a.file, 20_000))
+        except ValueError:
+            raise SystemExit(f"wolt basket: {a.file} isn't valid JSON") from None
+        return _op("wolt.basket_replace" if a.replace else "wolt.basket", venue=a.venue, items=items)
+    if c == "status":
+        return _op("wolt.status")
+    raise SystemExit(f"unknown command {c}")
+
+
+def wolt_main(argv: list[str] | None = None) -> int:
+    return _main("wolt", wolt_parser(), wolt_ops, argv)
+
+
 # --- threads and instagram ----------------------------------------------------------------
 
 

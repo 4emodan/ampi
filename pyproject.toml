@@ -21,6 +21,8 @@ threads = "ampi_tools.client:threads_main"
 instagram = "ampi_tools.client:instagram_main"
 browse = "ampi_tools.client:browse_main"
 telegram = "ampi_tools.client:telegram_main"
+maps = "ampi_tools.client:maps_main"
+wolt = "ampi_tools.client:wolt_main"
 ampi-tools = "ampi_tools.server:main"
 
 [dependency-groups]

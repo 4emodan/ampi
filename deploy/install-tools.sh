@@ -50,15 +50,15 @@ if getent group tgwrite >/dev/null; then
   usermod -aG tgwrite "$TOOLS_USER"
 fi
 
-echo "==> todoist, gmail, youtube, threads, instagram and telegram commands for $APP_USER"
+echo "==> todoist, gmail, youtube, threads, instagram, telegram, maps and wolt commands for $APP_USER"
 install -d -o "$APP_USER" -g "$APP_USER" "$APP_HOME/.local/bin"
-for cmd in todoist gmail youtube threads instagram telegram; do
+for cmd in todoist gmail youtube threads instagram telegram maps wolt; do
   ln -sfn "$APP_HOME/app/.venv/bin/$cmd" "$APP_HOME/.local/bin/$cmd"
 done
 
 echo "==> Skills and watcher instructions in each profile workspace"
 for ws in "$APP_HOME"/profiles/*/; do
-  for skill in todoist gmail telegram youtube threads instagram; do
+  for skill in todoist gmail telegram youtube threads instagram maps wolt; do
     install -d -m 755 "$ws.claude/skills/$skill"
     install -m 644 "$SRC_DIR/templates/skills/$skill/SKILL.md" "$ws.claude/skills/$skill/SKILL.md"
   done
@@ -90,6 +90,6 @@ Done. To connect your accounts (see docs/SETUP.md, section 8):
   5. YouTube (optional, docs/SETUP.md 8b): YOUTUBE_API_KEY in $TOOLS_HOME/env, and/or
      sudo -u $TOOLS_USER -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools youtube-login'
   6. In $APP_HOME/config.toml: [tools] approvals = true, and add "Bash(todoist:*)", "Bash(gmail:*)",
-     "Bash(youtube:*)" (and "Bash(telegram:*)" to write in Telegram as you, docs/SETUP.md 7b) to
+     "Bash(youtube:*)", "Bash(maps:*)", "Bash(wolt:*)" (8b-2, 8b-3) (and "Bash(telegram:*)" to write in Telegram as you, docs/SETUP.md 7b) to
      allowed_tools; then systemctl restart claude-assistant
 EOF

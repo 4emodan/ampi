@@ -6,7 +6,8 @@
     ampi-tools check         show what is configured and working
 
 Environment (/home/ampitools/env): TODOIST_TOKEN, GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET (also used for
-YouTube; GOOGLE_CLIENT_ID/SECRET work too), YOUTUBE_API_KEY.
+YouTube; GOOGLE_CLIENT_ID/SECRET work too), YOUTUBE_API_KEY, MAPS_API_KEY (+ MAPS_LANGUAGE, MAPS_REGION,
+MAPS_NEAR "lat,lng", MAPS_TIMEZONE).
 Policy (/home/ampitools/config.toml, optional):
     auto_approve = ["todoist.move"]          # critical ops to allow without asking
     require_approval = ["gmail.archive"]     # safe ops to ask about anyway
@@ -38,7 +39,10 @@ from .ops import (
 )
 from .todoist import Todoist, ToolError
 from . import ops_social
-from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact
+from .maps import Maps, latlng
+from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
+from .wolt import Wolt, WoltAuth
+from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact, register_secret
 from .ops_telegram import (
     TG_PENDING_CAP, WRITE_OPS, RunRegistry, TelegramRules, TelegramSide, TelegramStore, TgWriterClient,
     check_approval_size, grant_offer, needs_approval, note_requested,
@@ -202,7 +206,9 @@ class Daemon:
             raise ToolError("one Telegram write per request (send them one at a time)")
         critical = False
         for o in ops:
-            if o["op"] in WRITE_OPS:
+            if o["op"] in WOLT_BASKET_OPS and origin != "private":
+                critical = True  # a basket wanted by something other than the owner in chat: ask them
+            elif o["op"] in WRITE_OPS:
                 ask = needs_approval(self.services, o, origin)  # also refuses "never" chats
                 if ask or o["op"] in self.policy.require_approval:
                     critical = True
@@ -389,6 +395,26 @@ def build_services(client: httpx.AsyncClient, home: Path) -> Services:
     # RSS feeds and oEmbed work without any credentials, so YouTube is always there.
     services.youtube_client = YouTube(client, youtube_auth(client, home),
                                       os.environ.get("YOUTUBE_API_KEY", "").strip() or None, home=home)
+    # Keyless Google Maps links work without a key, so Maps is always there too.
+    maps_key = os.environ.get("MAPS_API_KEY", "").strip() or None
+    register_secret(maps_key)
+    try:
+        services.maps_client = Maps(client, maps_key, home, language=os.environ.get("MAPS_LANGUAGE", "en").strip(),
+                                    region=os.environ.get("MAPS_REGION", "").strip(),
+                                    near=os.environ.get("MAPS_NEAR", "").strip(),
+                                    tz=os.environ.get("MAPS_TIMEZONE", "").strip() or "UTC")
+    except ToolError as e:
+        log.warning("MAPS_NEAR: %s; ignoring it", e)
+        services.maps_client = Maps(client, maps_key, home)
+    near = None
+    for var in ("WOLT_NEAR", "MAPS_NEAR"):
+        try:
+            near = latlng(os.environ.get(var, "").strip())
+        except ToolError:
+            log.warning("%s isn't a valid lat,lng; ignoring it", var)
+        if near:
+            break
+    services.wolt_client = Wolt(client, home, near=near, language=os.environ.get("WOLT_LANGUAGE", "en").strip())
     return services
 
 
@@ -522,6 +548,18 @@ async def _check(home: Path) -> None:
             except ToolError as e:
                 api = f", API failed: {e}"
         print(f"YouTube: {yt.status()}; {feeds}{api}; {quota}")
+        m = services.maps_client
+        maps_line = m.status()
+        if m.configured:
+            # Its own budget object: the running daemon owns maps-budget.json. Resolving a name is free.
+            probe = Maps(client, m.api_key, None)
+            try:
+                found = await probe.resolve_names(["Eiffel Tower, Paris"])
+                maps_line += ", API OK" if (found.get("results") or [{}])[0].get("entity") else ", API answered oddly"
+            except ToolError as e:
+                maps_line += f", API failed: {e}"
+        print(f"Google Maps: {maps_line}; {m.budget.summary()}")
+        print(f"Wolt: {services.wolt_client.status()} (not contacted by check)")
         for name, c in (("Threads", services.threads_client), ("Instagram", services.instagram_client)):
             if c is None:
                 print(f"{name}: not set up")
@@ -533,10 +571,29 @@ async def _check(home: Path) -> None:
                 print(f"{name}: {redact(e)}")
 
 
+async def _wolt_login(home: Path) -> None:
+    import getpass
+
+    print("Connect your Wolt account (Ampi can then see your orders and fill baskets; it never orders or pays).\n")
+    print("1. In a desktop browser, open a PRIVATE window, go to https://wolt.com and log in.")
+    print("2. Open the developer tools (F12) → Application/Storage → Cookies → https://wolt.com,")
+    print("   and copy the value of the cookie named __wrtoken.")
+    print("3. Close the private window WITHOUT logging out (logging out would cancel this login).\n")
+    token = getpass.getpass("__wrtoken value (not shown): ").strip()
+    async with httpx.AsyncClient() as client:
+        auth = WoltAuth(home / "wolt-token.json", client)
+        try:
+            auth.save(token)
+            await auth.token()  # exchanges it once, which also proves it works
+        except ToolError as e:
+            sys.exit(f"Failed: {redact(e)}")
+    print("Connected. Now: systemctl restart ampi-tools")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="ampi-tools", description="Todoist, Gmail and YouTube for the assistant")
     parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "threads-login",
-                                            "instagram-login", "check"])
+                                            "instagram-login", "wolt-login", "check"])
     parser.add_argument("--write", action="store_true", help="youtube-login: also allow changes (playlists, "
                         "subscriptions), each critical one still approved by you in Telegram")
     args = parser.parse_args(argv)
@@ -557,7 +614,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "youtube-login":
         asyncio.run(_youtube_login(home, args.write))
         return
-    runner = {"serve": _serve, "gmail-login": _gmail_login, "check": _check}[args.command]
+    runner = {"serve": _serve, "gmail-login": _gmail_login, "wolt-login": _wolt_login, "check": _check}[args.command]
     asyncio.run(runner(home))
 
 

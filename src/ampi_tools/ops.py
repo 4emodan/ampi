@@ -51,6 +51,8 @@ class Services:
     threads_client: Any = None  # meta.MetaClient
     instagram_client: Any = None
     telegram_side: Any = None  # ops_telegram.TelegramSide
+    maps_client: Any = None  # maps.Maps
+    wolt_client: Any = None  # wolt.Wolt
 
     @property
     def todoist(self) -> Todoist:
@@ -1385,3 +1387,5 @@ async def summarize(services: Services, ops: list[dict], policy: Policy) -> str:
 # Threads, Instagram and Telegram register their operations here (they use the helpers above).
 from . import ops_social  # noqa: E402,F401
 from . import ops_telegram  # noqa: E402,F401
+from . import ops_maps  # noqa: E402,F401
+from . import ops_wolt  # noqa: E402,F401
