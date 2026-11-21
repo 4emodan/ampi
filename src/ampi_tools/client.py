@@ -459,6 +459,143 @@ def wolt_main(argv: list[str] | None = None) -> int:
     return _main("wolt", wolt_parser(), wolt_ops, argv)
 
 
+# --- personal info, checkout, payment -----------------------------------------------------------
+
+WAIT_DEFAULT = 540  # seconds; the skill runs these with the Bash tool's 600000 ms timeout
+
+
+def _wait_for(approval: int, wait: float, poll: float = 3.0) -> dict:
+    """Waits for the owner's answer to request #approval; returns the final status response."""
+    deadline = time.monotonic() + wait
+    while True:
+        st = request({"cmd": "approvals.status", "id": approval})
+        if not st.get("ok") or st.get("status") not in ("pending", "approved"):
+            return st
+        if time.monotonic() >= deadline:
+            return {"ok": True, "status": "pending", "text": ""}
+        time.sleep(poll)
+
+
+def _run_waiting(prog: str, ops: list[dict], reason: str | None, wait: float, collect: bool = False) -> int:
+    response = request({"cmd": "run", "ops": ops, "reason": reason, "origin": os.environ.get("AMPI_ORIGIN") or None})
+    if not response.get("ok"):
+        print(f"{prog}: {response.get('error', 'failed')}", file=sys.stderr)
+        return 1
+    approval = response.get("approval")
+    if not approval:
+        print(deliver(response.get("text", "") or "Done.", None, f"{prog}-run", save_dir=Path(prog)))
+        return 0
+    if wait <= 0:
+        print(response.get("text", ""))
+        return 0
+    print(f"Waiting for the owner's answer to request #{approval} (up to {int(wait)} s)…", flush=True)
+    st = _wait_for(approval, wait)
+    status = st.get("status")
+    if status == "pending":
+        print(f"No answer yet. The request (#{approval}) stays open for a while; check later with "
+              f"`{prog} status {approval}`. Don't ask again.")
+        return 0
+    if status in ("rejected", "expired"):
+        print(f"The owner {'rejected' if status == 'rejected' else 'did not answer'} request #{approval}; "
+              "nothing was done.")
+        return 1
+    print(f"Request #{approval}: {status}. {st.get('text', '')}".strip())
+    if collect and status == "done":
+        got = request({"cmd": "run", "ops": [{"op": "info.collect", "args": {"approval": approval}}],
+                       "origin": os.environ.get("AMPI_ORIGIN") or None})
+        print(got.get("text") if got.get("ok") else f"{prog}: {got.get('error')}")
+    return 0 if status == "done" else 1
+
+
+def _status(prog: str, approval: int) -> int:
+    st = request({"cmd": "approvals.status", "id": approval})
+    print(f"#{approval}: {st.get('status')} {st.get('text', '')}" if st.get("ok") else f"{prog}: {st.get('error')}")
+    return 0
+
+
+def info_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="info", description="The owner's personal details (approval needed to use them).")
+    p.add_argument("-m", "--reason", help="why (shown to the owner)")
+    p.add_argument("--wait", type=int, default=WAIT_DEFAULT)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("fields", help="what is stored (masked) and which sites may be filled without asking")
+    sub.add_parser("reveal", help="see values (asks the owner; never the card)").add_argument("fields", nargs="+")
+    sub.add_parser("revoke", help="remove a site permission (or all)").add_argument("site")
+    sub.add_parser("status", help="answer to a request").add_argument("approval", type=int)
+    return p
+
+
+def info_main(argv: list[str] | None = None) -> int:
+    a = info_parser().parse_args(argv)
+    if a.cmd == "reveal":
+        return _run_waiting("info", _op("info.reveal", fields=a.fields), a.reason, a.wait, collect=True)
+    if a.cmd == "status":
+        return _status("info", a.approval)
+    ops = _op("info.fields") if a.cmd == "fields" else _op("info.revoke", site=a.site)
+    return _run_waiting("info", ops, a.reason, 0)
+
+
+def _fill_pairs(pairs: list[str]) -> list[dict]:
+    out = []
+    for p in pairs:
+        ref, sep, field = p.partition("=")
+        if not sep:
+            raise SystemExit(f"use REF=FIELD, e.g. f0:12=email (got {p!r})")
+        out.append({"ref": ref.strip(), "field": field.strip()})
+    return out
+
+
+def checkout_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="checkout", description="The checkout browser (one session; read the skill).")
+    p.add_argument("-m", "--reason", help="why (shown to the owner)")
+    p.add_argument("--wait", type=int, default=WAIT_DEFAULT)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("open", help="start a session at a URL (or go to another URL)").add_argument("url")
+    sub.add_parser("snapshot", help="the page: text and numbered elements")
+    sub.add_parser("click", help="click an element").add_argument("ref")
+    s = sub.add_parser("type", help="type your own text into a field (never personal data or card details)")
+    s.add_argument("ref")
+    s.add_argument("text")
+    s = sub.add_parser("choose", help="pick an option in a select")
+    s.add_argument("ref")
+    s.add_argument("option")
+    sub.add_parser("back")
+    sub.add_parser("close")
+    sub.add_parser("fill", help="fill personal details by reference: REF=FIELD …").add_argument("pairs", nargs="+")
+    s = sub.add_parser("pay", help="fill the card (and details) and press pay, after the owner approves")
+    s.add_argument("pairs", nargs="+", help="REF=FIELD, e.g. f2:3=card.number f2:5=card.exp f2:7=card.cvc")
+    s.add_argument("--button", required=True, help="the pay button's REF")
+    s.add_argument("--amount", required=True)
+    s.add_argument("--currency", required=True)
+    s.add_argument("--what", required=True, help="what is bought, e.g. '2 × Pad thai, Thai Orchid'")
+    sub.add_parser("status", help="answer to a request").add_argument("approval", type=int)
+    return p
+
+
+def checkout_main(argv: list[str] | None = None) -> int:
+    a = checkout_parser().parse_args(argv)
+    c = a.cmd
+    if c == "status":
+        return _status("checkout", a.approval)
+    if c == "fill":
+        return _run_waiting("checkout", _op("checkout.fill", fills=_fill_pairs(a.pairs)), a.reason, a.wait)
+    if c == "pay":
+        return _run_waiting("checkout", _op("checkout.pay", fills=_fill_pairs(a.pairs), button=a.button,
+                                            amount=a.amount, currency=a.currency, what=a.what), a.reason, a.wait)
+    args = {"open": {"url": getattr(a, "url", None)}, "click": {"ref": getattr(a, "ref", None)},
+            "type": {"ref": getattr(a, "ref", None), "text": getattr(a, "text", None)},
+            "choose": {"ref": getattr(a, "ref", None), "option": getattr(a, "option", None)}}.get(c, {})
+    return _run_waiting("checkout", _op(f"checkout.{c}", **args), a.reason, 0)
+
+
+def payment_main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="payment", description="Purchases made with the owner's card.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("log", help="recent purchases").add_argument("-n", "--limit", type=int, default=20)
+    a = p.parse_args(argv)
+    return _run_waiting("payment", _op("payment.log", limit=a.limit), None, 0)
+
+
 # --- threads and instagram ----------------------------------------------------------------
 
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Claude Assistant checkout browser: control socket (ampi-tools only)
+
+[Socket]
+# Root owns the socket, so neither the controller nor the engine can re-bind it. Group ampicheckoutctl-use
+# has only ampitools in it; the controller also checks the caller's uid (SO_PEERCRED).
+ListenStream=/run/ampi-checkout.sock
+SocketUser=root
+SocketGroup=ampicheckoutctl-use
+SocketMode=0660
+Accept=no
+
+[Install]
+WantedBy=sockets.target

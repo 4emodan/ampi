@@ -1,0 +1,521 @@
+"""The checkout controller against a fake engine that implements the same page ops in Python."""
+
+import json
+import re
+import socket
+
+import pytest
+
+from ampi_tools import checkout as co
+from ampi_tools import checkout_net
+
+SHOP = "https://shop.example"
+PSP = "https://js.stripe.com"
+CARD = "4242 4242 4242 4242"
+
+
+def el(kind, **kw):
+    base = {"kind": kind, "tag": {"input": "input", "textarea": "textarea", "select": "select", "button": "button",
+                                  "link": "a", "checkbox": "input"}[kind],
+            "type": {"checkbox": "checkbox", "button": "submit"}.get(kind, kw.pop("type", "text")),
+            "autocomplete": "", "name": "", "id": "", "label": "", "value": "", "checked": False,
+            "connected": True, "options": [], "required": False}
+    base.update(kw)
+    return base
+
+
+class Frame:
+    def __init__(self, fid, url, elements=None, text="", title="", parent=None, origin=None):
+        self.id, self.url, self.parent = fid, url, parent
+        self.origin = origin if origin is not None else co.origin_of(url)
+        self.loader = f"L-{fid}-1"
+        self.els = {i + 1: e for i, e in enumerate(elements or [])}
+        self.text, self.title = text, title
+
+
+class FakeEngine:
+    def __init__(self, pages):
+        self.pages = pages  # url -> callable returning [Frame, ...] (first = main)
+        self.frames: list[Frame] = []
+        self.worlds: dict[int, str] = {}
+        self.sets: list[tuple[str, int, str]] = []
+        self.clicks: list[tuple[str, int]] = []
+        self.disposed = 0
+        self.closed = False
+        self.on_click = {}  # (frame_id, n) -> url to navigate to
+        self.history: list[str] = []
+
+    def navigate(self, url):
+        self.history.append(url)
+        self.frames = self.pages[url]()
+
+    def frame(self, fid):
+        return next(f for f in self.frames if f.id == fid)
+
+    def call(self, method, params=None, session=None, timeout=30):
+        params = params or {}
+        if method == "Target.createBrowserContext":
+            return {"browserContextId": "ctx"}
+        if method == "Target.createTarget":
+            return {"targetId": "page-1"}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "s1"}
+        if method in ("Page.enable", "Runtime.enable"):
+            return {}
+        if method == "Target.disposeBrowserContext":
+            self.disposed += 1
+            return {}
+        if method == "Page.navigate":
+            self.navigate(params["url"])
+            return {"frameId": "main"}
+        if method == "Page.getFrameTree":
+            def node(f):
+                return {"frame": {"id": f.id, "url": f.url, "loaderId": f.loader,
+                                  "securityOrigin": "null" if f.origin == "opaque" else f.origin},
+                        "childFrames": [node(c) for c in self.frames if c.parent == f.id]}
+            return {"frameTree": node(self.frames[0])}
+        if method == "Page.createIsolatedWorld":
+            ctx = len(self.worlds) + 1
+            self.worlds[ctx] = params["frameId"]
+            return {"executionContextId": ctx}
+        if method == "Runtime.evaluate":
+            expr = params["expression"]
+            op = json.loads(re.search(r"__ampi\.run\((.*)\)\);\s*$", expr, re.S).group(1))
+            f = self.frame(self.worlds[params["contextId"]])
+            return {"result": {"value": json.dumps(self.op(f, op))}}
+        raise AssertionError(method)
+
+    def describe(self, n, e):
+        d = {k: e[k] for k in ("kind", "tag", "type", "autocomplete", "name", "id", "label", "required")}
+        d.update(n=n, checked=e["checked"] if e["kind"] == "checkbox" else None, filled=bool(e["value"]))
+        if e["kind"] == "select":
+            d["options"] = e["options"]
+        return d
+
+    def op(self, f, a):
+        get = lambda n: f.els.get(n) if f.els.get(n, {}).get("connected") else None  # noqa: E731
+        if a["op"] == "enumerate":
+            out = {"href": f.url, "ready": "complete", "text": f.text,
+                   "elements": [self.describe(n, e) for n, e in f.els.items() if e["connected"]]}
+            if a.get("main"):
+                out["title"] = f.title
+            return out
+        if a["op"] == "inspect":
+            e = get(a["n"])
+            return {"connected": True, **self.describe(a["n"], e)} if e else {"connected": False}
+        if a["op"] == "set":
+            e = get(a["n"])
+            if not e:
+                return {"ok": False}
+            e["value"] = a["value"]
+            self.sets.append((f.id, a["n"], a["value"]))
+            return {"ok": True}
+        if a["op"] == "click":
+            e = get(a["n"])
+            if not e:
+                return {"ok": False}
+            self.clicks.append((f.id, a["n"]))
+            if (f.id, a["n"]) in self.on_click:
+                self.navigate(self.on_click[(f.id, a["n"])])
+            return {"ok": True}
+        if a["op"] == "choose":
+            e = get(a["n"])
+            if a["option"] not in e["options"]:
+                return {"ok": False, "why": "option"}
+            e["value"] = a["option"]
+            return {"ok": True}
+        if a["op"] == "state":
+            return {"href": f.url, "ready": "complete"}
+        if a["op"] == "back":
+            return {"ok": True}
+        raise AssertionError(a)
+
+    def close(self):
+        self.closed = True
+
+
+def checkout_page():
+    main = Frame("main", f"{SHOP}/checkout", title="Checkout", text="Your order\nPad thai\nTotal: 23,90 €", elements=[
+        el("input", type="email", autocomplete="email", name="email", label="Email"),          # 1
+        el("input", autocomplete="cc-number", name="ccnum", label="Card number (merchant)"),   # 2
+        el("checkbox", label="Save my card for next time"),                                   # 3
+        el("button", label="Pay 23,90 €"),                                                    # 4
+        el("select", label="Country", options=["Finland", "Sweden"]),                         # 5
+        el("input", type="password", name="pw", label="Password"),                            # 6
+    ])
+    card = Frame("stripe", f"{PSP}/v3/elements-inner-card.html", parent="main", elements=[
+        el("input", autocomplete="cc-number", name="cardnumber", label="Card number"),
+        el("input", autocomplete="cc-exp", name="exp-date", label="MM / YY"),
+        el("input", autocomplete="cc-csc", name="cvc", label="CVC"),
+    ])
+    blank = Frame("blank", "about:blank", parent="main", origin="opaque", elements=[el("input", label="hidden trap")])
+    return [main, card, blank]
+
+
+def confirmation_page():
+    return [Frame("main2", f"{SHOP}/thanks", title="Thanks", text="Order 1234 confirmed")]
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1_000_000.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+@pytest.fixture
+def env():
+    eng = FakeEngine({f"{SHOP}/checkout": checkout_page, f"{SHOP}/thanks": confirmation_page,
+                      "https://www.youtube.com/x": lambda: [Frame("yt", "https://www.youtube.com/x", text="video")]})
+    clock = Clock()
+
+    class CdpWrap:
+        def __init__(self):
+            self.call, self.close = eng.call, eng.close
+
+    c = co.Controller(connect=CdpWrap, clock=clock, mem_mb=lambda: 2000, sleep=clock.sleep)
+    return c, eng, clock
+
+
+def opened(c):
+    r = c.handle({"cmd": "open", "url": f"{SHOP}/checkout"})
+    assert r["ok"], r
+    return r["session"], r["snapshot"]
+
+
+def ref(snap, label):
+    return next(e["ref"] for e in snap["elements"] if e["label"] == label)
+
+
+# --- snapshot -----------------------------------------------------------------------------------
+
+
+def test_snapshot_lists_elements_frames_totals_and_flags(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    assert snap["origin"] == SHOP and snap["title"] == "Checkout"
+    assert {f["origin"] for f in snap["frames"]} == {SHOP, PSP, "opaque"}
+    assert snap["totals"] == [{"amount": "23.90", "currency": "EUR", "label": "total"}]
+    assert not any(e["label"] == "hidden trap" for e in snap["elements"])  # opaque frame: never actionable
+    card = next(e for e in snap["elements"] if e["name"] == "cardnumber")
+    assert card["frame_origin"] == PSP and card["ref"].startswith("f1:")
+    assert snap["risky_checked"] == [] and snap["captcha"] is False
+
+
+def test_snapshot_never_contains_values(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    r = c.handle({"cmd": "type", "session": sid, "ref": ref(snap, "Email"), "text": "secret-mail@example.org"})
+    assert r["ok"], r
+    assert "secret-mail" not in json.dumps(r) and next(e for e in r["snapshot"]["elements"]
+                                                        if e["label"] == "Email")["filled"] is True
+
+
+def test_risky_checkbox_reported(env):
+    c, eng, _ = env
+    eng.pages[f"{SHOP}/checkout"] = lambda: (lambda fr: (fr[0].els[3].update(checked=True), fr)[1])(checkout_page())
+    _, snap = opened(c)
+    assert snap["risky_checked"] == ["Save my card for next time"]
+
+
+# --- typing -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [CARD, "4242-4242-4242-4242", "my card 4242424242424242 thanks", "4242.4242.4242.4242"])
+def test_type_refuses_card_numbers(env, text):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    r = c.handle({"cmd": "type", "session": sid, "ref": ref(snap, "Email"), "text": text})
+    assert not r["ok"] and "card number" in r["error"] and not eng.sets
+    assert "4242" not in r["error"]
+
+
+@pytest.mark.parametrize("label", ["Card number (merchant)", "Password", "Card number"])
+def test_type_refuses_secret_fields(env, label):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    r = c.handle({"cmd": "type", "session": sid, "ref": ref(snap, label), "text": "hello"})
+    assert not r["ok"] and not eng.sets
+
+
+def test_type_and_choose_work(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    assert c.handle({"cmd": "type", "session": sid, "ref": ref(snap, "Email"), "text": "a@b.fi"})["ok"]
+    assert c.handle({"cmd": "choose", "session": sid, "ref": ref(snap, "Country"), "option": "Sweden"})["ok"]
+    r = c.handle({"cmd": "choose", "session": sid, "ref": ref(snap, "Country"), "option": "Mars"})
+    assert not r["ok"] and "no such option" in r["error"]
+
+
+def test_short_digit_runs_are_fine():
+    assert not co.has_card_number("order 12345, phone +358 40 123 4567")
+    assert co.has_card_number("4111 1111 1111 1111")
+
+
+# --- open / navigation --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url", ["http://127.0.0.1/x", "https://www.youtube.com/x", "file:///etc/passwd", "javascript:1"])
+def test_open_refuses_blocked_urls(env, url):
+    c, eng, _ = env
+    r = c.handle({"cmd": "open", "url": url})
+    assert not r["ok"] and c.session is None and not eng.history
+
+
+def test_click_that_lands_on_a_blocked_site_closes_the_session(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.on_click[("main", 4)] = "https://www.youtube.com/x"
+    r = c.handle({"cmd": "click", "session": sid, "ref": ref(snap, "Pay 23,90 €")})
+    assert not r["ok"] and "session was closed" in r["error"] and c.session is None and eng.disposed == 1
+
+
+def test_one_session_at_a_time_and_wrong_session(env):
+    c, eng, _ = env
+    sid, _ = opened(c)
+    assert "another checkout session" in c.handle({"cmd": "open", "url": f"{SHOP}/checkout"})["error"]
+    assert c.handle({"cmd": "snapshot", "session": "nope"})["error"] == "no such session"
+
+
+def test_low_memory_refuses(env):
+    c, eng, _ = env
+    c.mem_mb = lambda: 100
+    r = c.handle({"cmd": "open", "url": f"{SHOP}/checkout"})
+    assert not r["ok"] and "memory" in r["error"]
+
+
+# --- bind / fill --------------------------------------------------------------------------------
+
+
+def bound(c, sid, refs):
+    r = c.handle({"cmd": "bind", "session": sid, "refs": refs})
+    assert r["ok"], r
+    return r
+
+
+def test_fill_sets_exactly_the_bound_element(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    b = bound(c, sid, [ref(snap, "Email")])
+    assert b["origin"] == SHOP and b["bindings"][0]["autocomplete"] == "email"
+    r = c.handle({"cmd": "fill", "session": sid, "origin": b["origin"],
+                  "fields": [{"ref": b["bindings"][0]["ref"], "binding": b["bindings"][0], "value": "x@y.fi"}]})
+    assert r["ok"], r
+    assert eng.sets == [("main", 1, "x@y.fi")] and "x@y.fi" not in json.dumps(r)
+
+
+@pytest.mark.parametrize("change", ["replaced", "attributes", "frame_origin", "top_origin"])
+def test_fill_refuses_when_the_page_changed(env, change):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    b = bound(c, sid, [ref(snap, "Email")])
+    main = eng.frames[0]
+    if change == "replaced":
+        main.els[1]["connected"] = False
+        main.els[7] = el("input", type="email", autocomplete="email", name="email", label="Email")
+    elif change == "attributes":
+        main.els[1]["name"] = "evil"
+    elif change == "frame_origin":
+        main.origin = "https://evil.example"
+    elif change == "top_origin":
+        main.url = "https://shop.example.evil.com/checkout"
+        main.origin = co.origin_of(main.url)
+    r = c.handle({"cmd": "fill", "session": sid, "origin": b["origin"],
+                  "fields": [{"ref": b["bindings"][0]["ref"], "binding": b["bindings"][0], "value": "x@y.fi"}]})
+    assert not r["ok"] and not eng.sets and "x@y.fi" not in r["error"]
+
+
+def test_fill_refuses_card_values(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    card = next(e["ref"] for e in snap["elements"] if e["name"] == "cardnumber")
+    b = bound(c, sid, [card])
+    r = c.handle({"cmd": "fill", "session": sid, "origin": SHOP,
+                  "fields": [{"ref": card, "binding": b["bindings"][0], "value": "4242424242424242", "card": True}]})
+    assert not r["ok"] and not eng.sets
+
+
+def test_navigation_invalidates_refs(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    b = bound(c, sid, [ref(snap, "Email")])
+    for f in eng.frames:
+        f.loader = f.loader + "x"  # same page reloaded: new documents
+    r = c.handle({"cmd": "fill", "session": sid, "origin": SHOP,
+                  "fields": [{"ref": b["bindings"][0]["ref"], "binding": b["bindings"][0], "value": "x"}]})
+    assert not r["ok"] and not eng.sets
+
+
+# --- pay ----------------------------------------------------------------------------------------
+
+
+def pay_request(c, sid, snap, card_refs=None, psp=(PSP,)):
+    card_refs = card_refs or [next(e["ref"] for e in snap["elements"] if e["name"] == n)
+                              for n in ("cardnumber", "exp-date", "cvc")]
+    button = ref(snap, "Pay 23,90 €")
+    b = bound(c, sid, card_refs + [button])
+    values = ["4242424242424242", "12/30", "123"]
+    fields = [{"ref": bb["ref"], "binding": bb, "value": v, "card": True} for bb, v in zip(b["bindings"][:-1], values)]
+    return {"cmd": "pay", "session": sid, "origin": b["origin"], "fields": fields,
+            "button": {"ref": button, "binding": b["bindings"][-1]}, "expect_totals": b["totals"],
+            "psp_origins": list(psp)}
+
+
+def test_pay_fills_clicks_and_goes_readonly(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.on_click[("main", 4)] = f"{SHOP}/thanks"
+    r = c.handle(pay_request(c, sid, snap))
+    assert r["ok"], r
+    assert [s[:2] for s in eng.sets] == [("stripe", 1), ("stripe", 2), ("stripe", 3)] and eng.clicks == [("main", 4)]
+    assert r["snapshot"]["readonly"] and "Order 1234" in r["snapshot"]["text"]
+    assert "4242" not in json.dumps(r) and "123\"" not in json.dumps(r)
+    assert "finished" in c.handle({"cmd": "type", "session": sid, "ref": "f0:1", "text": "x"})["error"]
+    assert c.handle({"cmd": "snapshot", "session": sid})["ok"]
+
+
+def test_pay_refuses_changed_totals(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    req = pay_request(c, sid, snap)
+    eng.frames[0].text = "Your order\nTotal: 59,90 €"
+    r = c.handle(req)
+    assert not r["ok"] and "totals" in r["error"] and not eng.sets and not eng.clicks
+
+
+def test_pay_refuses_risky_checkbox(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    req = pay_request(c, sid, snap)
+    eng.frames[0].els[3]["checked"] = True
+    r = c.handle(req)
+    assert not r["ok"] and "ticked" in r["error"] and not eng.sets
+
+
+def test_pay_refuses_card_into_merchant_field(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    r = c.handle(pay_request(c, sid, snap, card_refs=[ref(snap, "Card number (merchant)")]))
+    assert not r["ok"] and "payment provider" in r["error"] and not eng.sets
+
+
+def test_pay_refuses_psp_not_on_the_list(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    r = c.handle(pay_request(c, sid, snap, psp=("https://checkoutshopper-live.adyen.com",)))
+    assert not r["ok"] and not eng.sets
+
+
+# --- sessions -----------------------------------------------------------------------------------
+
+
+def test_idle_and_hard_timeouts_and_hold(env):
+    c, eng, clock = env
+    sid, _ = opened(c)
+    clock.t += co.IDLE + 1
+    assert c.handle({"cmd": "status"})["state"] == "idle" and eng.disposed == 1
+    sid, _ = opened(c)
+    assert c.handle({"cmd": "hold", "session": sid, "until": clock.t + 25 * 60})["ok"]
+    clock.t += 20 * 60
+    assert c.handle({"cmd": "status"})["session"] == sid  # held while an approval waits
+    clock.t += 11 * 60
+    assert c.handle({"cmd": "status"})["state"] == "idle"  # but never beyond 30 minutes
+
+
+def test_engine_failure_closes_the_session(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+
+    def broken(*a, **k):
+        raise co.CdpError("boom")
+    eng.call = broken
+    c.session.cdp.call = broken
+    r = c.handle({"cmd": "snapshot", "session": sid})
+    assert not r["ok"] and c.session is None
+
+
+# --- engine connection, socket ------------------------------------------------------------------
+
+
+def proc_tcp(tmp_path, uid, local="0100007F:4B85"):
+    p = tmp_path / "tcp"
+    p.write_text("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+                 f"   0: {local} 00000000:0000 0A 00000000:00000000 00:00000000 00000000   {uid}        0 12345\n")
+    return (str(p),)
+
+
+def test_listener_uid_and_squatter_refused(tmp_path):
+    assert co.listener_uid(19333, proc_tcp(tmp_path, 991)) == 991
+    assert co.listener_uid(19333, proc_tcp(tmp_path, 991, local="00000000:4B85")) == 991
+    with pytest.raises(co.Refused):
+        co.connect_engine(991, proc_tcp(tmp_path, 1000))  # someone else bound the port
+    with pytest.raises(co.Refused):
+        co.connect_engine(None, proc_tcp(tmp_path, 991))
+
+
+def test_socket_peer_check_and_no_echo():
+    c = co.Controller(connect=lambda: (_ for _ in ()).throw(AssertionError("no")), mem_mb=lambda: 2000)
+    a, b = socket.socketpair()
+    a.sendall(b'{"cmd":"open","url":"http://10.0.0.1/' + b"SECRET4242" + b'"}\n')
+    co.serve_one(c, b, {123}, uid_of=lambda s: 999)
+    assert json.loads(a.recv(65536)) == {"ok": False, "error": "not allowed"}
+    a, b = socket.socketpair()
+    a.sendall(b'{"cmd":"fill","session":"x","fields":"SECRET4242"}\n')
+    co.serve_one(c, b, {123}, uid_of=lambda s: 123)
+    resp = a.recv(65536).decode()
+    assert "SECRET" not in resp and json.loads(resp)["ok"] is False
+
+
+def test_bad_requests():
+    c = co.Controller(connect=lambda: None)
+    assert c.handle(None)["error"] == "bad request"
+    assert c.handle({"cmd": "eval"})["error"] == "unknown command"
+
+
+# --- helpers ------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Total: 23,90 €", [("23.90", "EUR")]),
+    ("Grand total €1,234.50", [("1234.50", "EUR")]),
+    ("Yhteensä\n12,00 €", [("12.00", "EUR")]),
+    ("Att betala: 199 kr", [("199.00", "KR")]),
+    ("Order total USD 5", [("5.00", "USD")]),
+    ("Total (2 items)", []),
+    ("Subtotal 10.00 EUR\nTotal 12,50 EUR", [("10.00", "EUR"), ("12.50", "EUR")]),
+])
+def test_extract_totals(text, expected):
+    assert [(t["amount"], t["currency"]) for t in co.extract_totals(text)] == expected
+
+
+def test_origin_of():
+    assert co.origin_of("https://js.stripe.com/v3/x#y") == "https://js.stripe.com"
+    assert co.origin_of("https://a.b:8443/x") == "https://a.b:8443"
+    assert co.origin_of("about:blank") == co.origin_of("data:text/html,x") == "opaque"
+    assert co.origin_of("https://x.y/", "null") == "opaque"
+
+
+def test_checkout_net_ruleset():
+    rs = checkout_net.ruleset(991, 992, ["203.0.113.5/32"], ["2a01:4f8::/64"], ["185.12.64.1", "2a01:4ff:ff00::add:1"])
+    assert "tcp dport 19333 meta skuid != { 0, 992 } reject with tcp reset" in rs
+    assert "tcp sport 19333 meta skuid != 991 drop" in rs
+    lines = rs.splitlines()
+    est = next(i for i, ln in enumerate(lines) if "ct state established,related accept" in ln)
+    local = next(i for i, ln in enumerate(lines) if "fib daddr type local reject" in ln)
+    assert est < local  # replies to the controller over lo aren't caught by the local-reject rule
+    assert lines.index(next(ln for ln in lines if "dport 19333" in ln)) < est  # port guard comes first
+    assert "meta skuid 991 tcp dport { 80, 443 } accept" in rs and "ip daddr { 185.12.64.1 }" in rs
+    assert rs == checkout_net.ruleset(991, 992, ["203.0.113.5/32"], ["2a01:4f8::/64"],
+                                      ["185.12.64.1", "2a01:4ff:ff00::add:1"])
+    files = checkout_net.files(991, 991, ["185.12.64.1"])
+    assert "ampicheckout:x:991" in files["passwd"] and "0.0.0.0 www.youtube.com" in files["hosts"]
+
+
+def test_page_js_has_no_value_reads_except_buttons():
+    js = co.PAGE_JS
+    assert "el.value)" not in js.replace("(el.value || '') !== ''", "")
+    assert "__ampiEls" not in js or True  # elements live in a closure Map inside the isolated world

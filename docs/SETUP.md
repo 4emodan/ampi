@@ -316,6 +316,46 @@ assistant (it runs the engine with JavaScript on a local test page). To update t
 previous version stays in `/usr/local/lib/obscura/` and is switched back automatically if the new one
 doesn't start.
 
+## 8e. Personal info and payments (optional)
+
+Ampi can fill your name, email, phone and address into web forms, and buy things with your card, in a separate
+**checkout browser**. She never sees the card: the server types it into the payment provider's field (Stripe,
+Adyen, Braintree, Shopify, Paytrail…) and presses Pay only after you approve that exact purchase in Telegram (site,
+amount, what). Your details are filled the same way after you approve, or without asking on a site you allowed
+with "✅ + always here" (30 days, exact site). Only your own chat can use any of this, never groups or watchers.
+
+**Use a virtual card** with its own spending limit, ideally a per-purchase limit equal to `max_amount` below and
+bank-app confirmation for each payment. The bank app (3-D Secure) shows the real amount and merchant: that's your
+final check.
+
+1. Install the checkout browser (its own users, `ampicheckout` for the engine and `ampicheckoutctl` for the
+   controller, and its own firewall table):
+   ```bash
+   sudo bash deploy/install-checkout.sh
+   ```
+2. Enter your details on the server (the card number and CVC aren't shown as you type; nobody else ever sees them):
+   ```bash
+   sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools vault-set profile'
+   sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools vault-set card'
+   sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools vault-show'      # masked
+   ```
+   `vault-clear card|profile` removes them. They're kept in `/home/ampitools/vault.json` (only that user can read it).
+3. Limits in `/home/ampitools/config.toml`:
+   ```toml
+   [payment]
+   max_amount = 100      # per purchase, refused above (in the card's currency)
+   currency = "EUR"
+   max_per_day = 3
+   # psp_origins = ["https://pay.example-provider.com"]   # extra payment providers whose fields may get the card
+   ```
+4. `systemctl restart ampi-tools`, add `"Bash(info:*)", "Bash(checkout:*)", "Bash(payment:*)"` to `allowed_tools`,
+   and `systemctl restart claude-assistant`.
+
+What to expect: many shops block server browsers (bot checks, which Ampi never tries to get around) or need an
+account. Ampi uses guest checkout only. After paying, the session is read-only; 3-D Secure is confirmed by you in
+your bank app. `payment log` lists purchases (card shown masked). If a payment step times out, Ampi is told it MAY
+have gone through and not to pay again before checking.
+
 ## 9. Watchers and briefings (optional)
 
 Watchers let the assistant act without being asked. They check Gmail, Todoist, a Telegram chat, YouTube channels, or the clock, and start Claude with instructions from `<workspace>/watchers/<name>.md`. Starter instructions are installed by `install-tools.sh` (from `templates/watchers/`). Ask the assistant to change them, or edit them yourself.

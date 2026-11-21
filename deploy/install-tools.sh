@@ -50,15 +50,15 @@ if getent group tgwrite >/dev/null; then
   usermod -aG tgwrite "$TOOLS_USER"
 fi
 
-echo "==> todoist, gmail, youtube, threads, instagram, telegram, maps and wolt commands for $APP_USER"
+echo "==> todoist, gmail, youtube, threads, instagram, telegram, maps, wolt, info, checkout and payment commands for $APP_USER"
 install -d -o "$APP_USER" -g "$APP_USER" "$APP_HOME/.local/bin"
-for cmd in todoist gmail youtube threads instagram telegram maps wolt; do
+for cmd in todoist gmail youtube threads instagram telegram maps wolt info checkout payment; do
   ln -sfn "$APP_HOME/app/.venv/bin/$cmd" "$APP_HOME/.local/bin/$cmd"
 done
 
 echo "==> Skills and watcher instructions in each profile workspace"
 for ws in "$APP_HOME"/profiles/*/; do
-  for skill in todoist gmail telegram youtube threads instagram maps wolt; do
+  for skill in todoist gmail telegram youtube threads instagram maps wolt personal-info payment; do
     install -d -m 755 "$ws.claude/skills/$skill"
     install -m 644 "$SRC_DIR/templates/skills/$skill/SKILL.md" "$ws.claude/skills/$skill/SKILL.md"
   done

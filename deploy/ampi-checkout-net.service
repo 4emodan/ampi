@@ -1,0 +1,15 @@
+[Unit]
+Description=Firewall and config files for the Claude Assistant checkout browser (nft table inet ampi_checkout)
+After=network-online.target nftables.service
+Wants=network-online.target
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout_net.py load
+ExecReload=/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout_net.py load
+
+[Install]
+WantedBy=multi-user.target

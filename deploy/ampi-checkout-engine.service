@@ -1,0 +1,90 @@
+[Unit]
+Description=Claude Assistant checkout browser: the engine (Obscura, CDP on 127.0.0.1:19333)
+# Pages are hostile input, and this engine may hold card details while paying. It runs as its own user
+# (ampicheckout), sees almost nothing of the filesystem and can't reach Unix sockets. The nft table
+# (inet ampi_checkout, checked before start) lets it send only DNS to public resolvers, TCP 80/443 to public
+# addresses, and replies on connections it accepted; every local address is rejected for it, and only the
+# controller's user (ampicheckoutctl) may connect to its debugger port.
+Requires=ampi-checkout-net.service
+After=ampi-checkout-net.service
+
+[Service]
+Type=simple
+User=ampicheckout
+Group=ampicheckout
+# Read/execute on /usr/local/lib/obscura (root:ampibrowser 750), for this unit only, instead of putting the
+# user into the group for every process. The firewall matches users, not groups, so nothing else changes.
+SupplementaryGroups=ampibrowser
+Environment=HOME=/tmp/h
+ExecStartPre=+/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout_net.py check
+# --v8-flags before the subcommand, as one argument. Never --stealth, --allow-private-network or
+# --allow-file-access.
+ExecStart=/usr/local/lib/obscura/current/obscura "--v8-flags=--jitless --max-old-space-size=512 --optimize-for-size" --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 AmpiBrowser/1.0" serve --host 127.0.0.1 --port 19333 --max-connections 2 --quiet
+# Nothing from pages (console output, errors) reaches the journal.
+StandardOutput=null
+StandardError=null
+Restart=always
+RestartSec=2
+# A fresh engine every day (and the controller restarts it after each payment by closing the session).
+RuntimeMaxSec=1d
+KillMode=control-group
+TimeoutStopSec=5
+
+MemoryHigh=550M
+MemoryMax=700M
+MemorySwapMax=0
+OOMPolicy=stop
+OOMScoreAdjust=800
+CPUQuota=100%
+CPUWeight=20
+IOWeight=20
+Nice=10
+TasksMax=128
+LimitFSIZE=64M
+LimitCORE=0
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+KeyringMode=private
+RemoveIPC=true
+UMask=0077
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources io_uring_setup io_uring_enter io_uring_register
+SystemCallErrorNumber=EPERM
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=true
+PrivateIPC=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+TemporaryFileSystem=/etc:ro /var:ro /srv:ro /opt:ro /mnt:ro /media:ro /usr/local:ro /run:ro /boot:ro /snap:ro
+TemporaryFileSystem=/tmp:size=128M,mode=1777
+BindReadOnlyPaths=/etc/ld.so.cache -/etc/ssl -/etc/ca-certificates /etc/nsswitch.conf -/etc/localtime
+BindReadOnlyPaths=/etc/ampi-checkout/resolv.conf:/etc/resolv.conf /etc/ampi-checkout/hosts:/etc/hosts
+BindReadOnlyPaths=/etc/ampi-checkout/passwd:/etc/passwd /etc/ampi-checkout/group:/etc/group
+BindReadOnlyPaths=/usr/local/lib/obscura /usr/local/lib/ampi-checkout
+BindReadOnlyPaths=/run/ampi-checkout-net.sha256
+InaccessiblePaths=-/sys/firmware
+
+# No Unix sockets. AF_NETLINK only for the root ExecStartPre firewall check (nft speaks netlink).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+# Not "localhost": the engine listens on 127.0.0.1 for the controller. Its own connections to local addresses
+# are rejected by the nft table (only replies on accepted connections pass).
+IPAddressDeny=link-local multicast 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 198.18.0.0/15 240.0.0.0/4 fc00::/7 fec0::/10 64:ff9b::/96 2002::/16 2001::/32
+
+[Install]
+WantedBy=multi-user.target

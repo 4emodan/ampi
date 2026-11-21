@@ -53,6 +53,7 @@ class Services:
     telegram_side: Any = None  # ops_telegram.TelegramSide
     maps_client: Any = None  # maps.Maps
     wolt_client: Any = None  # wolt.Wolt
+    checkout_side: Any = None  # ops_checkout.CheckoutSide
 
     @property
     def todoist(self) -> Todoist:
@@ -1268,8 +1269,10 @@ class Approvals:
             item = dict(r)
             grants = json.loads(item.pop("grants") or "null")
             if grants:  # what the "always" button would allow, shown in the request text
-                item["grant_label"] = "; ".join(f"{g['action']} in “{g['title']}” without asking for 30 days"
-                                                for g in grants)
+                item["grant_label"] = "; ".join(
+                    f"fill {', '.join(g['fields'])} on {g['origin']} without asking for 30 days"
+                    if g.get("kind") == "site" else f"{g['action']} in “{g['title']}” without asking for 30 days"
+                    for g in grants)
             out.append(item)
         return out
 
@@ -1389,3 +1392,4 @@ from . import ops_social  # noqa: E402,F401
 from . import ops_telegram  # noqa: E402,F401
 from . import ops_maps  # noqa: E402,F401
 from . import ops_wolt  # noqa: E402,F401
+from . import ops_checkout  # noqa: E402,F401

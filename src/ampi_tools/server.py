@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
@@ -41,6 +42,8 @@ from .todoist import Todoist, ToolError
 from . import ops_social
 from .maps import Maps, latlng
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
+from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
+from .vault import Vault
 from .wolt import Wolt, WoltAuth
 from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact, register_secret
 from .ops_telegram import (
@@ -95,6 +98,11 @@ def load_telegram_rules(path: Path) -> TelegramRules:
         return TelegramRules.parse(raw.get("telegram"))
     except ValueError as e:
         sys.exit(f"{path}: {e}")
+
+
+def load_payment_rules(path: Path) -> PaymentRules:
+    raw = tomllib.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    return PaymentRules.from_toml(raw.get("payment"))
 
 
 def systemd_main_pid_check(unit: str) -> PidCheck:
@@ -153,6 +161,8 @@ class Daemon:
                 return await self.run(ops, request.get("reason"), request.get("origin"), origin)
             if cmd == "approvals.list":
                 return {"ok": True, "text": self.list_text()}
+            if cmd == "approvals.status":
+                return self.status_of(_int(request.get("id")))
             if cmd == "approvals.pending":
                 store = self.tg_store
                 return {"ok": True, "items": self.approvals.unnotified(),
@@ -199,6 +209,15 @@ class Daemon:
         `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
         if sum(o["op"] in WOLT_BASKET_OPS for o in ops) > 1:  # each would replace the one before it
             raise ToolError("one Wolt basket per request")
+        if any(o["op"] in CHECKOUT_PRIVATE for o in ops):
+            # Personal info, the checkout browser and payments: only the owner's own chat, never a group, watcher,
+            # forwarded message or unknown process (not even with approval).
+            if origin != "private":
+                raise ToolError("personal info, the checkout browser and payments are only for the owner's own chat")
+            if len(ops) > 1:
+                raise ToolError("one checkout or personal-info action per request")
+            if ops[0]["op"] == "checkout.pay" and self._pending_pay():
+                raise ToolError("a payment is already waiting for the owner's answer")
         ops = await pre_resolve(self.services, ops)
         for o in ops:
             if o["op"] == "telegram.revoke":
@@ -210,6 +229,10 @@ class Daemon:
         for o in ops:
             if o["op"] in WOLT_BASKET_OPS and origin != "private":
                 critical = True  # a basket wanted by something other than the owner in chat: ask them
+            elif o["op"] == "checkout.fill":
+                # Profile fields on a site the owner allowed (30-day grant) go straight in; otherwise ask.
+                critical = critical or not o["args"]["resolved"].get("granted") \
+                    or o["op"] in self.policy.require_approval
             elif o["op"] in WRITE_OPS:
                 ask = needs_approval(self.services, o, origin)  # also refuses "never" chats
                 if ask or o["op"] in self.policy.require_approval:
@@ -240,6 +263,15 @@ class Daemon:
                 summary = (f"⚠ Asked for by {clean(who, 80)} while handling outside content, not by you in "
                            f"chat.\n{summary}")
             grants = grant_offer(self.services, ops, origin) if telegram else None
+            if ops[0]["op"] == "checkout.fill":  # "✅ + always here": these fields on this exact site, 30 days
+                r = ops[0]["args"]["resolved"]
+                grants = [{"kind": "site", "origin": r["origin"], "fields": r["fields"]}]
+            if ops[0]["op"] in ("checkout.fill", "checkout.pay"):
+                # Keep the session open while the owner decides (the controller caps it at 30 minutes).
+                with contextlib.suppress(ToolError):
+                    await self.services.checkout_side.client.call(
+                        {"cmd": "hold", "session": ops[0]["args"]["resolved"]["session"],
+                         "until": ops[0]["args"]["resolved"]["expires"]})
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
             approval_id = self.approvals.add(ops, summary, reason, grants)
             for o in telegram:
@@ -293,17 +325,39 @@ class Daemon:
             return {"ok": True, "status": "rejected", "text": "Rejected; nothing was done."}
         ok, text, status = False, "interrupted", "failed"
         try:
-            ok, text, _ = await execute(self.services, json.loads(item["ops"]))
+            ops = json.loads(item["ops"])
+            for o in ops:  # ops that hand something back to Ampi later (info.reveal) key it by the request
+                o["args"]["approval_id"] = approval_id
+            ok, text, _ = await execute(self.services, ops)
             status = "done" if ok else "failed"
         finally:
             self.approvals.finish(approval_id, status, text)
             log.info("approval #%s %s", approval_id, status)
-        if always and ok and self.tg_store:
+        if always and ok and grants and grants[0].get("kind") == "site":
+            g = grants[0]  # from the stored request, never from the button
+            self.services.checkout_side.vault.grant(g["origin"], g["fields"])
+            text += f"\nFrom now on (30 days) filling {', '.join(g['fields'])} on {g['origin']} doesn't ask."
+            log.info("approval #%s approved with a site permission", approval_id)
+        elif always and ok and self.tg_store:
             for g in grants:  # from the stored request, never from the button
                 self.tg_store.grant(int(g["peer_id"]), g["action"], g["title"])
             text += f"\nFrom now on (30 days) sending there doesn't need your approval: {grants[0]['title']}."
             log.info("approval #%s approved with a standing permission", approval_id)
         return {"ok": True, "status": status, "text": text}
+
+    def _pending_pay(self) -> bool:
+        self.approvals.expire()
+        rows = self.approvals.db.execute("SELECT ops FROM approvals WHERE status='pending'").fetchall()
+        return any(o["op"] == "checkout.pay" for (ops,) in rows for o in json.loads(ops))
+
+    def status_of(self, approval_id: int) -> dict:
+        """For a CLI waiting on its own request: pending / approved / done / failed / rejected / expired, and the
+        result text (never contains vault values: those ops scrub their results)."""
+        self.approvals.expire()
+        row = self.approvals.get(approval_id)
+        if row is None:
+            raise ToolError("no such request")
+        return {"ok": True, "status": row["status"], "text": (row.get("result") or "")[:2000]}
 
     def list_text(self) -> str:
         rows = self.approvals.recent(10)
@@ -429,6 +483,7 @@ async def _serve(home: Path) -> None:
                  services.youtube.status())
         store = TelegramStore(home / "telegram.sqlite3")
         services.telegram_side = TelegramSide(TgWriterClient(store), store, load_telegram_rules(home / "config.toml"))
+        services.checkout_side = CheckoutSide(CheckoutClient(), Vault(home), load_payment_rules(home / "config.toml"))
         approvals = Approvals(home / "approvals.sqlite3")
         for approval_id in approvals.recover():
             store.notice(f"⚠️ Request #{approval_id} was approved, but the tools service stopped while running it; "
@@ -592,10 +647,52 @@ async def _wolt_login(home: Path) -> None:
     print("Connected. Now: systemctl restart ampi-tools")
 
 
+def _vault_cmd(home: Path, command: str, what: str | None) -> None:
+    """vault-set / vault-show / vault-clear: only the owner, on the server, as user ampitools."""
+    import getpass
+
+    vault = Vault(home)
+    if command == "vault-show":
+        print("\n".join(vault.masked()))
+        return
+    if command == "vault-clear":
+        if what not in ("card", "profile"):
+            sys.exit("vault-clear card|profile")
+        vault.clear(what)
+        print(f"Removed the {what}.")
+        return
+    if what == "card":
+        print("Card details (use a virtual card with its own limit). The number and CVC aren't shown as you type.")
+        card = {"number": getpass.getpass("Card number: "), "exp_month": input("Expiry month (MM): "),
+                "exp_year": input("Expiry year (YY or YYYY): "), "cvc": getpass.getpass("CVC: "),
+                "name": input("Name on the card: ")}
+        try:
+            vault.set_card(card)
+        except ToolError as e:
+            sys.exit(f"Not saved: {e}")
+        print(f"Saved: {vault.card_mask()}. Now: systemctl restart ampi-tools")
+        return
+    if what == "profile":
+        print("Your details (Enter to skip optional ones).")
+        profile = {"name": input("Full name: "), "email": input("Email: "), "phone": input("Phone (optional): "),
+                   "address": {"line1": input("Street address: "), "line2": input("Line 2 (optional): "),
+                               "postal": input("Postal code: "), "city": input("City: "),
+                               "region": input("Region/state (optional): "), "country": input("Country (2 letters): ")}}
+        try:
+            vault.set_profile(profile)
+        except ToolError as e:
+            sys.exit(f"Not saved: {e}")
+        print("Saved:\n  " + "\n  ".join(vault.masked()[:4]))
+        return
+    sys.exit("vault-set card|profile")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="ampi-tools", description="Todoist, Gmail and YouTube for the assistant")
     parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "threads-login",
-                                            "instagram-login", "wolt-login", "check"])
+                                            "instagram-login", "wolt-login", "vault-set", "vault-show",
+                                            "vault-clear", "check"])
+    parser.add_argument("what", nargs="?", help="vault-set/vault-clear: card or profile")
     parser.add_argument("--write", action="store_true", help="youtube-login: also allow changes (playlists, "
                         "subscriptions), each critical one still approved by you in Telegram")
     args = parser.parse_args(argv)
@@ -612,6 +709,9 @@ def main(argv: list[str] | None = None) -> None:
     sys.excepthook = excepthook
     if args.command in ("threads-login", "instagram-login"):
         asyncio.run(_meta_login(home, THREADS if args.command == "threads-login" else INSTAGRAM, args.write))
+        return
+    if args.command.startswith("vault-"):
+        _vault_cmd(home, args.command, args.what)
         return
     if args.command == "youtube-login":
         asyncio.run(_youtube_login(home, args.write))

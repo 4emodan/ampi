@@ -1,0 +1,62 @@
+[Unit]
+Description=Claude Assistant checkout browser: the controller (answers ampi-tools, drives the engine)
+# Started by ampi-checkout.socket. No internet: it talks only to the engine on 127.0.0.1:19333 (and checks
+# that the listener there belongs to the engine's user) and to ampi-tools on the socket systemd hands it.
+Requires=ampi-checkout-net.service ampi-checkout-engine.service ampi-checkout.socket
+After=ampi-checkout-net.service ampi-checkout-engine.service ampi-checkout.socket
+
+[Service]
+Type=simple
+User=ampicheckoutctl
+Group=ampicheckoutctl
+EnvironmentFile=/etc/ampi-checkout/ctl.env
+ExecStartPre=+/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout_net.py check
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout.py serve
+Restart=on-failure
+RestartSec=2
+# Logs carry only generic messages (never request contents).
+StandardError=journal
+
+MemoryMax=160M
+MemorySwapMax=0
+TasksMax=16
+CPUQuota=50%
+LimitCORE=0
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+KeyringMode=private
+RemoveIPC=true
+UMask=0077
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=true
+PrivateDevices=true
+PrivateIPC=true
+# Not ProcSubset=pid: the listener-owner check reads /proc/net/tcp.
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+TemporaryFileSystem=/var:ro /srv:ro /opt:ro /mnt:ro /media:ro /usr/local:ro /boot:ro /snap:ro /run:ro
+BindReadOnlyPaths=/usr/local/lib/ampi-checkout
+BindReadOnlyPaths=/run/ampi-checkout-net.sha256
+InaccessiblePaths=-/sys/firmware
+
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+IPAddressAllow=localhost
+IPAddressDeny=any

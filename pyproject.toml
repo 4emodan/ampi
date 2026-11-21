@@ -23,6 +23,9 @@ browse = "ampi_tools.client:browse_main"
 telegram = "ampi_tools.client:telegram_main"
 maps = "ampi_tools.client:maps_main"
 wolt = "ampi_tools.client:wolt_main"
+info = "ampi_tools.client:info_main"
+checkout = "ampi_tools.client:checkout_main"
+payment = "ampi_tools.client:payment_main"
 ampi-tools = "ampi_tools.server:main"
 
 [dependency-groups]

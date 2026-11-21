@@ -62,8 +62,15 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
                         routes, weather, link resolving; local daily/monthly budget; answers carry source links
   wolt.py, ops_wolt.py  Wolt via wolt.com's own (unofficial) web API, owner's choice: venues, menus, orders,
                         filling the basket; never places/pays an order; polite limiter, pause on any block
-  client.py             `todoist` / `gmail` / `youtube` / `threads` / `instagram` / `maps` / `wolt` / `browse`
-                        commands the assistant runs (skills: templates/skills/)
+  vault.py              the owner's profile + card (vault.json 0600, entered with `ampi-tools vault-set`), masking,
+                        per-site grants and the purchase log (vault.sqlite3)
+  ops_checkout.py       info.* / checkout.* / payment.*: fill by reference after approval, card only into payment
+                        provider frames, daemon presses Pay; private chat only; [payment] limits
+  checkout.py           stdlib; the checkout controller (user `ampicheckoutctl`) driving `obscura serve` (user
+                        `ampicheckout`) over CDP; elements tracked in isolated worlds; never returns input values
+  checkout_net.py       root: nft table for the engine's egress and the loopback control port
+  client.py             `todoist` / `gmail` / `youtube` / `threads` / `instagram` / `maps` / `wolt` / `browse` /
+                        `info` / `checkout` / `payment` commands the assistant runs (skills: templates/skills/)
   browser.py            stdlib-only; one sandboxed `ampi-browser@` instance per page (socket-activated, user
                         `ampibrowser`) running the Obscura engine read-only; not part of the ampi-tools daemon
   browser_net.py        root: nft egress table for the browser user + generated resolv.conf/hosts/passwd
