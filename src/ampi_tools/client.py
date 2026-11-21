@@ -421,6 +421,7 @@ def wolt_parser() -> argparse.ArgumentParser:
     s.add_argument("venue")
     s.add_argument("-f", "--file", required=True, help='JSON list: [{"id": ITEM_ID, "count": 1, "options": {...}}]')
     s.add_argument("--replace", action="store_true", help="replace an existing basket there (asks the owner)")
+    s.add_argument("--near", help="lat,lng of the delivery area (default: the owner's home area)")
     sub.add_parser("status", help="setup")
     sub.add_parser("approvals", help="recent approval requests and their outcome")
     return p
@@ -448,7 +449,7 @@ def wolt_ops(a: argparse.Namespace) -> list[dict]:
             items = json.loads(workspace_file(a.file, 20_000))
         except ValueError:
             raise SystemExit(f"wolt basket: {a.file} isn't valid JSON") from None
-        return _op("wolt.basket_replace" if a.replace else "wolt.basket", venue=a.venue, items=items)
+        return _op("wolt.basket_replace" if a.replace else "wolt.basket", venue=a.venue, items=items, lat_lng=near)
     if c == "status":
         return _op("wolt.status")
     raise SystemExit(f"unknown command {c}")

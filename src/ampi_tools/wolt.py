@@ -96,7 +96,10 @@ def money(cents: Any, currency: str = "EUR") -> str:
 
 
 def one_line(s: Any, limit: int = 200) -> str:
-    s = IGNORABLE.sub("", re.sub(r"\s+", " ", str(s or ""))).strip()
+    """Venue-written text: one line, no invisible characters, no ‹‹‹ ››› look-alikes (so it can't pose as the end
+    of the untrusted block it's shown in)."""
+    from .browser import MARKERS
+    s = MARKERS.sub("", IGNORABLE.sub("", re.sub(r"\s+", " ", str(s or "")))).strip()
     return s if len(s) <= limit else s[:limit] + "…"
 
 
@@ -268,16 +271,21 @@ class Wolt:
             raise ToolError("Wolt rejected the login; run `ampi-tools wolt-login` again")
         if resp.status_code == 404:
             raise ToolError("Wolt: not found (wrong venue or item?)")
-        if resp.status_code >= 400:
+        if resp.status_code >= 300:  # a redirect (e.g. to a login page) is not an answer either
             raise ToolError(f"Wolt error {resp.status_code}")
         if len(resp.content) > MAX_REPLY:
             raise ToolError("Wolt sent too big a reply")
         if not resp.content:
+            if method == "GET":
+                raise ToolError("Wolt sent an empty reply")
             return {}
         try:
-            return resp.json()
+            data = resp.json()
         except ValueError:
             raise ToolError("Wolt sent an unexpected reply") from None
+        if not isinstance(data, dict):
+            raise ToolError("Wolt sent an unexpected reply")
+        return data
 
     # --- public data -----------------------------------------------------------------------
 
@@ -332,6 +340,12 @@ class Wolt:
             raise ToolError(f"bad Wolt order id {purchase_id!r}")
         return await self.request("GET", self._restaurant, f"/v2/order_details/purchase_tracking/{purchase_id}",
                                   account=True)
+
+    async def basket_count(self) -> int:
+        n = (await self.request("GET", self._consumer, "/order-xp/v1/baskets/count", account=True)).get("count")
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise ToolError("Wolt sent an unexpected basket count")
+        return n
 
     async def baskets(self, near: dict | None = None) -> dict:
         loc = self.location(near)

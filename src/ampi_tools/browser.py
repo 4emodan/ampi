@@ -15,6 +15,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import posixpath
 import re
 import selectors
 import signal
@@ -145,9 +146,11 @@ def check_url(url: str) -> str:
     if port not in (None, 80, 443):
         raise Refused("only the normal web ports (80 and 443) are opened")
     host = check_host(parts.hostname or "")
-    if (GOOGLE_SITE.fullmatch(host) and re.match(r"/+maps(/|$)", parts.path, re.I)) \
-            or (host == "goo.gl" and re.match(r"/+maps(/|$)", parts.path, re.I)):
-        raise Refused("Google Maps isn't opened in the browser; use the maps command")
+    if GOOGLE_SITE.fullmatch(host) or host == "goo.gl":
+        # The path as the engine will see it: percent-decoded, dot segments collapsed (/./maps, /x/../maps).
+        seen = posixpath.normpath(re.sub(r"/+", "/", "/" + urllib.parse.unquote(parts.path))).lower()
+        if seen == "/maps" or seen.startswith("/maps/") or seen.startswith("/maps?"):
+            raise Refused("Google Maps isn't opened in the browser; use the maps command")
     netloc = host if port is None else f"{host}:{port}"
     safe = "/:?#[]@!$&'()*+,;=%~-._"
     path = urllib.parse.quote(parts.path, safe=safe) or "/"

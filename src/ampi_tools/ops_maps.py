@@ -9,7 +9,7 @@ from typing import Any
 
 from .maps import (
     DAILY, Maps, TRAVEL_MODES, directions_link, distance, duration, maps_link, name_and_coords, one_line,
-    place_text, safe_url, search_link, sources,
+    place_text, safe_url, search_link, sources, untrusted,
 )
 from .ops import FIELDS, OPS, Op, Result, Services, _bool, _choice, _date, _int, need
 from .todoist import ToolError
@@ -28,8 +28,8 @@ def _places(v: Any) -> list[str]:
 
 
 def _links(v: Any) -> list[str]:
-    if not isinstance(v, list) or not 1 <= len(v) <= 10:
-        raise ToolError("give 1-10 Google Maps links")
+    if not isinstance(v, list) or not 1 <= len(v) <= 5:
+        raise ToolError("give 1-5 Google Maps links")
     return list(dict.fromkeys(maps_link(x) for x in v))
 
 
@@ -39,12 +39,18 @@ def _when(v: Any) -> str:
     return v
 
 
+def _hour(v: Any) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 23:
+        raise ToolError("hour must be 0-23")
+    return v
+
+
 FIELDS.update({
     "place": place_text, "origin": lambda v: place_text(v, "origin"),
     "destination": lambda v: place_text(v, "destination"), "near": lambda v: place_text(v, "near"),
     "via": _places, "links": _links, "mode": _choice(*TRAVEL_MODES), "depart": _when, "arrive": _when,
     "radius": _int(100, 50_000), "details": _bool, "air": _bool, "pollen": _bool, "alternatives": _bool,
-    "hour": _int(0, 23), "date": _date,
+    "hour": _hour, "date": _date,
 })
 
 
@@ -69,10 +75,13 @@ async def maps_search(s: Services, a: dict) -> Result:
     data = await mp(s).search(query, near=a.get("near"), radius=a.get("radius"), limit=min(a.get("limit", 5), 10),
                               details=a.get("details", False))
     summary = str(data.get("summary") or "").strip()
-    places = _place_lines(data)
+    places = [p for p in _place_lines(data) if p[1]]
     if not summary and not places:
         return f"Google Maps found nothing for {query!r}."
-    return f"{summary}\n\n{sources(places)}\nAll results on a map: {search_link(query)}"
+    if not places:  # the terms want a link to the source either way
+        places = [("Google Maps search", search_link(query))]
+    body = untrusted(summary, "from Google Maps; may quote reviews by strangers") if summary else ""
+    return f"{body}\n{sources(places)}\nAll results on a map: {search_link(query)}".lstrip()
 
 
 async def maps_route(s: Services, a: dict) -> Result:
@@ -136,22 +145,23 @@ async def maps_weather(s: Services, a: dict) -> Result:
     out = [f"Weather for {place} ({when}):"]
     attr: list[tuple[str, str]] = []
     w = data.get("weather") if isinstance(data.get("weather"), dict) else data
+    w = {k: v for k, v in w.items() if k in ("attribution",) or isinstance(v, (dict, int, float))}
     out += ["  " + x for x in _weather_block(w)]
     a_ = (w.get("attribution") or data.get("attribution") or {})
     attr.append((str(a_.get("title") or "Google Maps"), safe_url(a_.get("url"))))
     aq = data.get("airQuality")
     if isinstance(aq, dict):
-        for h in (aq.get("hourlyResults") or [])[:1]:
-            for ix in (h.get("indexes") or [])[:2]:
+        for h in [x for x in aq.get("hourlyResults") or [] if isinstance(x, dict)][:1]:
+            for ix in [x for x in h.get("indexes") or [] if isinstance(x, dict)][:2]:
                 out.append(f"  Air quality: {one_line(ix.get('displayName'), 40)} {ix.get('aqi', ix.get('value', '?'))}"
                            f" ({one_line(ix.get('category'), 60)}), mostly {one_line(ix.get('dominantPollutant'), 20)}")
         attr.append((str((aq.get("attribution") or {}).get("title") or "Google Maps"),
                      safe_url((aq.get("attribution") or {}).get("url"))))
     pl = data.get("pollen")
     if isinstance(pl, dict):
-        day = pl.get("dailyForecast") or {}
-        for c in day.get("categories") or []:
-            ix = c.get("index") or {}
+        day = pl.get("dailyForecast") if isinstance(pl.get("dailyForecast"), dict) else {}
+        for c in [x for x in day.get("categories") or [] if isinstance(x, dict)]:
+            ix = c.get("index") if isinstance(c.get("index"), dict) else {}
             out.append(f"  Pollen, {one_line(c.get('displayName'), 30)}: {one_line(ix.get('category'), 30) or 'none'}"
                        + ("" if c.get("inSeason", True) else " (out of season)"))
         attr.append((str((pl.get("attribution") or {}).get("title") or "Google Maps"),
@@ -173,23 +183,28 @@ async def maps_place(s: Services, a: dict) -> Result:
         if not pid or str(n) in failed:
             out.append(f"{link}: Google couldn't tell which place this is (only single-place links work).")
             continue
+        note = ""
         try:
             expanded = await m.expand_short_link(link)
         except ToolError as e:
             expanded, note = link, f" ({e})"
-        else:
-            note = ""
         name, coords = name_and_coords(expanded)
-        block = [f"{link} → place_id:{pid}" + (f" · {name}" if name else "") + note]
+        block = [f"{link} → place_id:{pid}" + note]
         if name:
             near = f"{coords['latitude']},{coords['longitude']}" if coords else None
-            data = await m.search(name, near=near, radius=500 if coords else None, limit=3)
+            try:
+                # One result: the summary must be about this place, not about several.
+                data = await m.search(name, near=near, radius=500 if coords else None, limit=1)
+            except ToolError as e:
+                data = {}
+                block.append(f"(No summary: {e})")
             match = [p for p in data.get("places") or [] if isinstance(p, dict) and p.get("id") == pid]
             if match and data.get("summary"):
-                block.append(str(data["summary"]).strip())
+                block.append(untrusted(f"Name in the link: {name}\n{str(data['summary']).strip()}", "from Google Maps"))
                 block.append(sources(_place_lines({"places": match})))
             else:
-                block.append(f"(No summary: Google's search for {name!r} didn't return this exact place.)")
+                if data:
+                    block.append("(No summary: Google's search by the link's name didn't return this exact place.)")
                 block.append(sources([("Google Maps", search_link(name, pid))]))
         else:
             block.append(sources([("Google Maps", search_link(pid, pid))]))

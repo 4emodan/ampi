@@ -197,6 +197,8 @@ class Daemon:
     async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "unknown") -> dict:
         """`origin` is where the request really came from ("private", "group:…", "watcher:…" or "unknown");
         `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
+        if sum(o["op"] in WOLT_BASKET_OPS for o in ops) > 1:  # each would replace the one before it
+            raise ToolError("one Wolt basket per request")
         ops = await pre_resolve(self.services, ops)
         for o in ops:
             if o["op"] == "telegram.revoke":
@@ -398,22 +400,22 @@ def build_services(client: httpx.AsyncClient, home: Path) -> Services:
     # Keyless Google Maps links work without a key, so Maps is always there too.
     maps_key = os.environ.get("MAPS_API_KEY", "").strip() or None
     register_secret(maps_key)
-    try:
-        services.maps_client = Maps(client, maps_key, home, language=os.environ.get("MAPS_LANGUAGE", "en").strip(),
-                                    region=os.environ.get("MAPS_REGION", "").strip(),
-                                    near=os.environ.get("MAPS_NEAR", "").strip(),
-                                    tz=os.environ.get("MAPS_TIMEZONE", "").strip() or "UTC")
-    except ToolError as e:
-        log.warning("MAPS_NEAR: %s; ignoring it", e)
-        services.maps_client = Maps(client, maps_key, home)
-    near = None
-    for var in ("WOLT_NEAR", "MAPS_NEAR"):
+    def env_latlng(var: str) -> str:
+        value = os.environ.get(var, "").strip()
         try:
-            near = latlng(os.environ.get(var, "").strip())
+            if not value or latlng(value):
+                return value
         except ToolError:
-            log.warning("%s isn't a valid lat,lng; ignoring it", var)
-        if near:
-            break
+            pass
+        log.warning("%s=%r isn't a valid lat,lng; ignoring it", var, value)
+        return ""
+
+    maps_near = env_latlng("MAPS_NEAR")
+    services.maps_client = Maps(client, maps_key, home, language=os.environ.get("MAPS_LANGUAGE", "en").strip(),
+                                region=os.environ.get("MAPS_REGION", "").strip(), near=maps_near,
+                                tz=os.environ.get("MAPS_TIMEZONE", "").strip() or "UTC")
+    wolt_near = env_latlng("WOLT_NEAR") or maps_near
+    near = latlng(wolt_near) if wolt_near else None
     services.wolt_client = Wolt(client, home, near=near, language=os.environ.get("WOLT_LANGUAGE", "en").strip())
     return services
 
