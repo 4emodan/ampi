@@ -13,7 +13,7 @@ from ampi_tools.maps import Budget, Maps, maps_link, name_and_coords, place_text
 from ampi_tools.ops import Services, execute, validate
 from ampi_tools.todoist import ToolError
 
-KEY = "AIzaTESTKEY0000000000000000000000000000"
+KEY = "fake-maps-key-for-tests"  # not a Google key (a real-looking one trips secret scanners)
 PID = "ChIJLU7jZClu5kcR4PcOOO6p3I0"
 
 
