@@ -107,12 +107,32 @@ WRITE_OPS: dict[str, OpInfo] = {
     "checkout.close": OpInfo("high", route=("site",)),
     "checkout.fill": OpInfo("high", route=("site",)),
     "checkout.pay": OpInfo("high", route=("site",)),
+    # Instagram/Threads through the owner's web session: public, in the owner's name (never for watchers, below).
+    "igweb.comment": OpInfo("high", route=("target", "comment")),
+    "igweb.like": OpInfo("high", subject=("target", "comment")),
+    "igweb.unlike": OpInfo("high", subject=("target", "comment")),
+    "igweb.follow": OpInfo("high", subject=("user",)),
+    "igweb.unfollow": OpInfo("high", subject=("user",)),
+    "igweb.delete_comment": OpInfo("high", subject=("target", "comment")),
+    "thweb.like": OpInfo("high", subject=("target",)),
+    "thweb.unlike": OpInfo("high", subject=("target",)),
+    "thweb.follow": OpInfo("high", subject=("user",)),
+    "thweb.unfollow": OpInfo("high", subject=("user",)),
 }
 CHECKOUT_LIMIT_KEYS = ("max_amount", "per_week", "per_month", "card", "item")  # extra keys of a declared checkout.pay
 # Management operations a watcher never uses (they change Ampi's own permissions or are chat-only helpers).
 # Personal info is never handed to a watcher (an AI step could pass it on); checkout.fill still fills it by reference.
+# The owner's Instagram/Threads web session: watchers may only read direct messages (adapter steps, igweb.inbox /
+# igweb.dm); its other reads belong to social-mode chats, and every change is approved by the owner one by one
+# (a watcher's "allow all" must never cover them).
+SOCIAL_SESSION_READS = frozenset({"igweb.feed", "igweb.profile", "igweb.posts", "igweb.post", "igweb.stories",
+                                  "igweb.story", "thweb.feed", "thweb.profile", "thweb.posts", "thweb.post"})
+SOCIAL_SESSION_WRITES = frozenset(op for op in WRITE_OPS if op.startswith(("igweb.", "thweb.")))
 NOT_FOR_WATCHERS = frozenset({"telegram.revoke", "telegram.permissions", "info.revoke", "approvals.list",
-                              "info.fields", "info.reveal", "info.collect", "info.save_place", "payment.log"})
+                              "info.fields", "info.reveal", "info.collect", "info.save_place", "payment.log"}) \
+    | SOCIAL_SESSION_READS | SOCIAL_SESSION_WRITES
+# Reads a watcher test run never makes for real: it gets stub data (ampi_tools.social_dm) instead.
+TEST_STUB_OPS = frozenset({"igweb.inbox", "igweb.dm"})
 # A route that is variable on one of these makes the watcher high risk even when the op itself is medium.
 SENDS_OUT = frozenset({"telegram.send", "youtube.add", "todoist.add", "todoist.move", "todoist.add_section",
                        "wolt.basket", "wolt.basket_replace"})

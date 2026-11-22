@@ -46,6 +46,8 @@ from .keeper import (
 )
 from .todoist import Todoist, ToolError
 from . import ops_social
+from . import meta_session
+from .ops_social_session import SOCIAL_ORIGIN, check_origin as check_social_origin
 from .maps import LATLNG_RE, Maps, latlng, zone
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
@@ -201,6 +203,10 @@ class Daemon:
                 return {"ok": True, "lines": side.vault.masked(),
                         "grants": [{"origin": r["origin"], "fields": r["fields"], "expires": r["expires"]}
                                    for r in side.vault.grants()]}
+            if cmd == "social.sessions":
+                # Which web sessions exist (no names, no state): the instagram/threads commands pick their ops by it.
+                return {"ok": True, **{k: bool(c is not None and c.configured()) for k, c in (
+                    ("instagram", self.services.igweb_client), ("threads", self.services.thweb_client))}}
             if cmd == "approvals.list":
                 return {"ok": True, "text": self.list_text()}
             if cmd == "approvals.status":
@@ -259,6 +265,8 @@ class Daemon:
     async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "unknown") -> dict:
         """`origin` is where the request really came from ("private", "group:…", "watcher:…" or "unknown");
         `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
+        # Instagram/Threads web-session reads: only social-mode conversations; direct messages: never through here.
+        check_social_origin(ops, origin, "run")
         parsed = parse_origin(origin)
         if parsed is not None:
             # A Claude run of a watcher's agent step (watchers v2): changes go through the keeper.
@@ -314,7 +322,8 @@ class Daemon:
             summary = await summarize(self.services, ops, self.policy)
             who = None
             if origin.startswith(("group:", "watcher:", "forwarded:")):
-                who = "a forwarded message in your chat" if origin.startswith("forwarded:") else origin
+                who = ("a social-mode conversation (Instagram/Threads content)" if origin == SOCIAL_ORIGIN
+                       else "a forwarded message in your chat" if origin.startswith("forwarded:") else origin)
             elif origin == "unknown":
                 if isinstance(claimed_origin, str) and claimed_origin.strip():
                     who = claimed_origin
@@ -822,6 +831,8 @@ class Daemon:
         w = k.active(profile, name, hash12)
         h = w["hash"]
         origin = f"watcher:{profile}/{name}@{h[:12]}"
+        # Direct messages: only a watcher's own (engine) step; an agent step's tool call is a plain `run`.
+        check_social_origin(ops, origin, "run" if agent else "watch.run")
         for o in ops:
             if o["op"] in ws.NOT_FOR_WATCHERS:
                 raise ToolError(f"{o['op']} isn't available to watchers")
@@ -1087,6 +1098,10 @@ def build_services(client: httpx.AsyncClient, home: Path) -> Services:
         auth = meta_auth(service, client, home)
         if auth is not None:
             setattr(services, attr, MetaClient(service, auth, client))
+    # The owner's own web sessions (meta_session.py): each with its own httpx client (no shared cookie jar). Always
+    # built: the running daemon picks up a session the owner saves later, or a --resume, without a restart.
+    services.igweb_client = meta_session.make_client(home, meta_session.IG)
+    services.thweb_client = meta_session.make_client(home, meta_session.TH)
     # RSS feeds and oEmbed work without any credentials, so YouTube is always there.
     services.youtube_client = YouTube(client, youtube_auth(client, home),
                                       os.environ.get("YOUTUBE_API_KEY", "").strip() or None, home=home)
@@ -1128,6 +1143,8 @@ async def _serve(home: Path) -> None:
                  services.youtube.status())
         store = TelegramStore(home / "telegram.sqlite3")
         services.telegram_side = TelegramSide(TgWriterClient(store), store, load_telegram_rules(home / "config.toml"))
+        for web in (services.igweb_client, services.thweb_client):
+            web.auth.notify = store.notice  # one fixed-text notice when a session pauses
         services.checkout_side = CheckoutSide(CheckoutClient(), Vault(home), load_payment_rules(home / "config.toml"))
         approvals = Approvals(home / "approvals.sqlite3")
         for approval_id in approvals.recover():
@@ -1271,6 +1288,8 @@ async def _check(home: Path) -> None:
                 print(f"{name}: OK (@{me.get('username')}) {c.auth.expiry_note()}".rstrip())
             except ToolError as e:
                 print(f"{name}: {redact(e)}")
+        for web in (services.igweb_client, services.thweb_client):
+            print(web.auth.status() + " (not contacted by check)")  # a check request is one more request Meta sees
 
 
 async def _wolt_login(home: Path) -> None:
@@ -1379,10 +1398,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "threads-login",
                                             "instagram-login", "wolt-login", "vault-set", "vault-show",
                                             "vault-clear", "check", "info-show", "info-set", "info-delete",
-                                            "info-default-card", "info-search", "info-reveal", "hub"])
+                                            "info-default-card", "info-search", "info-reveal", "hub",
+                                            "instagram-session", "threads-session"])
     parser.add_argument("what", nargs="*", help="vault-set/vault-clear: card, profile or home; info-*: NAME [FIELD|on|off]")
     parser.add_argument("--write", action="store_true", help="youtube-login: also allow changes (playlists, "
                         "subscriptions), each critical one still approved by you in Telegram")
+    parser.add_argument("--resume", action="store_true", help="instagram-session/threads-session: use the session "
+                        "again after confirming it's you in the app")
+    parser.add_argument("--forget", action="store_true", help="instagram-session/threads-session: delete the saved "
+                        "session")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -1397,6 +1421,10 @@ def main(argv: list[str] | None = None) -> None:
     sys.excepthook = excepthook
     if args.command in ("threads-login", "instagram-login"):
         asyncio.run(_meta_login(home, THREADS if args.command == "threads-login" else INSTAGRAM, args.write))
+        return
+    if args.command in ("instagram-session", "threads-session"):
+        service = meta_session.IG if args.command == "instagram-session" else meta_session.TH
+        meta_session.session_command(home, service, resume=args.resume, forget=args.forget)
         return
     if args.command.startswith("vault-"):
         _vault_cmd(home, args.command, args.what[0] if args.what else None)

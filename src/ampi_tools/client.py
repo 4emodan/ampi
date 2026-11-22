@@ -640,14 +640,24 @@ def _op(name: str, **args: object) -> list[dict]:
 
 
 def threads_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="threads", description="The owner's Threads account.")
+    p = argparse.ArgumentParser(prog="threads", description="The owner's Threads account (and, in social mode, "
+                                "Threads through their own web session).")
     p.add_argument("-m", "--reason", help="why (shown to the owner with approval requests)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("profile")
-    s = sub.add_parser("posts", help="the owner's posts")
+    sub.add_parser("profile", help="the owner's profile, or anyone's with USER (social mode)").add_argument(
+        "user", nargs="?")
+    s = sub.add_parser("posts", help="the owner's posts, or USER's (social mode)")
+    s.add_argument("user", nargs="?")
     s.add_argument("-n", "--limit", type=int, default=20)
     s.add_argument("--days", type=int)
-    sub.add_parser("post", help="one post or reply (id or threads.com link), with stats").add_argument("target")
+    sub.add_parser("post", help="one post with its replies (link); without a web session: one of the owner's "
+                   "posts or replies, with stats").add_argument("target")
+    sub.add_parser("feed", help="the Threads home feed (social mode)").add_argument("-n", "--limit", type=int,
+                                                                                   default=20)
+    for name in ("like", "unlike"):
+        sub.add_parser(name, help="a post (link); needs approval").add_argument("target")
+    for name in ("follow", "unfollow"):
+        sub.add_parser(name, help="an account; needs approval").add_argument("user")
     s = sub.add_parser("replies", help="replies under one of the owner's posts")
     s.add_argument("target")
     s.add_argument("-n", "--limit", type=int, default=50)
@@ -666,10 +676,19 @@ def threads_parser() -> argparse.ArgumentParser:
 def threads_ops(a: argparse.Namespace) -> list[dict]:
     c = a.cmd
     if c == "profile":
-        return _op("threads.profile")
+        return _op("thweb.profile", user=a.user) if a.user else _op("threads.profile")
     if c == "posts":
-        return _op("threads.posts", limit=a.limit, days=a.days)
-    if c in ("post", "delete", "hide", "unhide"):
+        return _op("thweb.posts", user=a.user, limit=a.limit) if a.user else \
+            _op("threads.posts", limit=a.limit, days=a.days)
+    if c == "feed":
+        return _op("thweb.feed", limit=a.limit)
+    if c in ("like", "unlike"):
+        return _op(f"thweb.{c}", target=a.target)
+    if c in ("follow", "unfollow"):
+        return _op(f"thweb.{c}", user=a.user)
+    if c == "post":
+        return _op("thweb.post" if _web_session("threads") else "threads.post", target=a.target)
+    if c in ("delete", "hide", "unhide"):
         return _op(f"threads.{c}", target=a.target)
     if c == "replies":
         return _op("threads.replies", target=a.target, limit=a.limit)
@@ -683,12 +702,32 @@ def threads_ops(a: argparse.Namespace) -> list[dict]:
 
 
 def instagram_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="instagram", description="The owner's Instagram (professional account).")
+    p = argparse.ArgumentParser(prog="instagram", description="The owner's Instagram: the official API (professional "
+                                "accounts) and, in social mode, their own web session.")
     p.add_argument("-m", "--reason", help="why (shown to the owner with approval requests)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("profile")
+    sub.add_parser("profile", help="the owner's (official API), or USER's (social mode)").add_argument(
+        "user", nargs="?")
     sub.add_parser("media", help="the owner's posts").add_argument("-n", "--limit", type=int, default=20)
-    sub.add_parser("post", help="one of the owner's posts (id or instagram.com link)").add_argument("target")
+    sub.add_parser("post", help="a post with its comments (instagram.com link)").add_argument("target")
+    sub.add_parser("feed", help="the home feed (social mode)").add_argument("-n", "--limit", type=int, default=20)
+    s = sub.add_parser("posts", help="an account's posts (social mode)")
+    s.add_argument("user")
+    s.add_argument("-n", "--limit", type=int, default=12)
+    sub.add_parser("stories", help="who has stories now (social mode; nothing is marked seen)")
+    sub.add_parser("story", help="one account's story (social mode; not marked seen)").add_argument("user")
+    s = sub.add_parser("comment", help="comment on a post, or reply to a comment (needs approval)")
+    s.add_argument("target")
+    s.add_argument("text", nargs="?")
+    s.add_argument("--text-file")
+    s.add_argument("--reply-to", help="the comment id to reply to (a top-level comment)")
+    for name in ("like", "unlike"):
+        s = sub.add_parser(name, help="a post, or with --comment one of its comments (needs approval)")
+        s.add_argument("target")
+        s.add_argument("--comment")
+    for name in ("follow", "unfollow"):
+        sub.add_parser(name, help="an account (needs approval)").add_argument("user")
+    sub.add_parser("dms", help="check new direct messages now (runs the owner's DM watcher; the summary goes to them)")
     s = sub.add_parser("comments", help="comments on one of the owner's posts")
     s.add_argument("target")
     s.add_argument("-n", "--limit", type=int, default=50)
@@ -697,7 +736,11 @@ def instagram_parser() -> argparse.ArgumentParser:
     s.add_argument("comment")
     s.add_argument("text", nargs="?")
     s.add_argument("--text-file")
-    for name in ("delete-comment", "hide", "unhide"):
+    s = sub.add_parser("delete-comment", help="needs approval; with --post: through the web session (the owner's own "
+                       "comments, or comments on the owner's posts)")
+    s.add_argument("comment")
+    s.add_argument("--post", help="the post the comment is on (link)")
+    for name in ("hide", "unhide"):
         sub.add_parser(name, help="needs approval").add_argument("comment")
     sub.add_parser("apply", help="run a JSON plan of operations as one request").add_argument("file")
     sub.add_parser("approvals", help="recent approval requests and their outcome")
@@ -707,13 +750,31 @@ def instagram_parser() -> argparse.ArgumentParser:
 def instagram_ops(a: argparse.Namespace) -> list[dict]:
     c = a.cmd
     if c in ("profile",):
-        return _op("instagram.profile")
+        return _op("igweb.profile", user=a.user) if a.user else _op("instagram.profile")
     if c == "media":
         return _op("instagram.media", limit=a.limit)
     if c == "post":
-        return _op("instagram.post", target=a.target)
+        return _op("igweb.post" if _web_session("instagram") else "instagram.post", target=a.target)
     if c == "comments":
+        if _web_session("instagram"):
+            return _op("igweb.post", target=a.target, limit=a.limit)
         return _op("instagram.comments", target=a.target, limit=a.limit)
+    if c == "feed":
+        return _op("igweb.feed", limit=a.limit)
+    if c == "posts":
+        return _op("igweb.posts", user=a.user, limit=a.limit)
+    if c == "stories":
+        return _op("igweb.stories")
+    if c == "story":
+        return _op("igweb.story", user=a.user)
+    if c == "comment":
+        return _op("igweb.comment", target=a.target, text=_text(a), comment=a.reply_to)
+    if c in ("like", "unlike"):
+        return _op(f"igweb.{c}", target=a.target, comment=a.comment)
+    if c in ("follow", "unfollow"):
+        return _op(f"igweb.{c}", user=a.user)
+    if c == "delete-comment" and a.post:
+        return _op("igweb.delete_comment", target=a.post, comment=a.comment)
     if c == "insights":
         return _op("instagram.insights", days=a.days)
     if c == "reply":
@@ -725,9 +786,50 @@ def instagram_ops(a: argparse.Namespace) -> list[dict]:
     raise SystemExit(f"unknown command {c}")
 
 
+def _web_session(service: str) -> bool:
+    """Whether the owner saved an Instagram/Threads web session (then post links go through it)."""
+    try:
+        return bool(request({"cmd": "social.sessions"}).get(service))
+    except (OSError, AttributeError):
+        return False
+
+
+def _watcher_run(name: str) -> dict:
+    """Runs one of the owner's watchers now, through the bridge (which allows it only from the owner's own chat)."""
+    import socket
+    path = os.environ.get("AMPI_WATCHERS_SOCKET") or "/run/claude-assistant/watchers.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(30)
+            s.connect(path)
+            s.sendall(json.dumps({"cmd": "run", "name": name}).encode() + b"\n")
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+        reply = json.loads(buf)
+    except (OSError, ValueError, AttributeError) as e:
+        return {"ok": False, "error": f"the bridge isn't reachable ({type(e).__name__})"}
+    return {"ok": bool(reply.get("ok")), "text": reply.get("text", ""), "error": reply.get("text", "")}
+
+
+DM_WATCHER = "instagram-dms"
+
+
 def _main(prog: str, parser: argparse.ArgumentParser, to_ops, argv: list[str] | None) -> int:
     args = parser.parse_args(argv)
-    if args.cmd == "approvals":
+    if prog == "instagram" and args.cmd == "dms":
+        # Direct messages never come into a chat: this only starts the owner's DM watcher, whose summary goes to them.
+        response = _watcher_run(DM_WATCHER)
+        if response.get("ok"):
+            response["text"] = (f"{response['text']} The summary goes to the owner's chat as a watcher message; you "
+                                "won't see the messages here.")
+        else:
+            response["error"] = (f"{response.get('error') or 'failed'} (the DM watcher is “{DM_WATCHER}”: see "
+                                 "docs/SETUP.md §8c-2)")
+    elif args.cmd == "approvals":
         response = request({"cmd": "approvals.list"})
     else:
         response = request({"cmd": "run", "ops": to_ops(args), "reason": args.reason,
