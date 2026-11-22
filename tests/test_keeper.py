@@ -546,7 +546,7 @@ def test_action_approval_refused_after_watcher_paused(keeper_daemon):
 
 def test_proposals_are_capped_and_stale_ones_dont_block(keeper_daemon):
     daemon, _ = keeper_daemon
-    for i in range(3):
+    for i in range(5):
         assert propose(daemon, TASKER.replace('name = "tasker"', f'name = "t{i}"'), name=f"t{i}")["ok"]
     resp = propose(daemon, TASKER.replace('name = "tasker"', 'name = "t9"'), name="t9")
     assert not resp["ok"] and "already waiting" in resp["error"]

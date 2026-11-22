@@ -76,7 +76,7 @@ ACTION_CHOICES = [{"key": "approve", "label": "✅ Approve"},
                   {"key": "reject", "label": "❌ Reject"}]
 # For an action with no destination to pin (nothing a lifetime grant could be limited to): approve once only.
 ONCE_CHOICES = [ACTION_CHOICES[0], ACTION_CHOICES[2]]
-PROPOSALS_PENDING_CAP = 3
+PROPOSALS_PENDING_CAP = 5
 RISK_ICON = ws.RISK_ICON
 log = logging.getLogger("ampi-tools")
 
