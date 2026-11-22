@@ -400,9 +400,24 @@ class Pipeline:
         return outcome
 
 
+_SCHEME = re.compile(r"\b(h)tt(ps?)://", re.I)
+_OTHER_SCHEME = re.compile(r"\b(ftp|tg|mailto|javascript|data):", re.I)
+_DOMAIN = re.compile(r"\b((?:[a-z0-9-]+\.)+)(com|net|org|me|io|co|ly|gl|link|info|biz|xyz|ru|app|dev|site|online|top|gg"
+                     r"|to|cc|tk|us|uk|de|in|tv|ai|so|sh|club|shop|live|page|cn|eu)\b", re.I)
+
+
+def defang_text(s: str) -> str:
+    """Outside text in a Markdown message to the owner: no link or code syntax, and no clickable addresses
+    (https:// → hxxps://, t.me → t(.)me), so neither Telegram nor a quick tap turns it into a link."""
+    s = s.replace("[", "(").replace("]", ")").replace("`", "'")
+    s = _SCHEME.sub(lambda m: f"{m.group(1)}xx{m.group(2)}://", s)
+    s = _OTHER_SCHEME.sub(lambda m: f"{m.group(1)}(:)", s)
+    return _DOMAIN.sub(lambda m: m.group(1).replace(".", "(.)") + m.group(2), s)
+
+
 def _defang(v: Any) -> Any:
     if isinstance(v, str):
-        return v.replace("[", "(").replace("]", ")").replace("`", "'")
+        return defang_text(v)
     if isinstance(v, list):
         return [_defang(x) for x in v]
     if isinstance(v, dict):

@@ -103,6 +103,7 @@ def build_args(
     system_prompt: str | None = None,
     json_schema: str | None = None,
     watchers_edit: bool = False,
+    extra_denied: Sequence[str] = (),
 ) -> list[str]:
     args = [*command, "-p", "--output-format", "json", "--strict-mcp-config"]
     if tools is not None:  # the built-in tools that exist at all ("" = none: a pure text-in, text-out call)
@@ -118,7 +119,7 @@ def build_args(
         args += ["--model", model]
     if allowed_tools:
         args += ["--allowedTools", ",".join(scope_tools(allowed_tools))]
-    denied = DENIED_TOOLS if watchers_edit else (*DENIED_TOOLS, WATCHERS_DENY)
+    denied = (*(DENIED_TOOLS if watchers_edit else (*DENIED_TOOLS, WATCHERS_DENY)), *extra_denied)
     args += ["--disallowedTools", ",".join(denied)]
     if append_system_prompt:
         args += ["--append-system-prompt", append_system_prompt]
@@ -229,6 +230,7 @@ class ClaudeRunner:
         json_schema: str | None = None,
         semaphore: bool = True,
         watchers_edit: bool = False,
+        extra_denied: Sequence[str] = (),
     ) -> RunResult:
         """Send one message to the conversation's Claude session. `origin` (e.g. "watcher:gmail-inbox") marks
         runs that handle outside content rather than the owner's own messages.
@@ -254,6 +256,7 @@ class ClaudeRunner:
                     system_prompt=system_prompt,
                     json_schema=json_schema,
                     watchers_edit=watchers_edit,
+                    extra_denied=extra_denied,
                 )
                 result = await self._exec(args, prompt, cwd, origin, extra_env, tag)
                 if result.ok or attempt == 1 or not result.error:

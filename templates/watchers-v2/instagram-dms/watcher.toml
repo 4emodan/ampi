@@ -13,20 +13,20 @@ llm_calls_per_day = 60
 actions_per_day = 0
 
 # The daemon reads the inbox (no AI, nothing marked as seen; message requests and groups you never wrote in are
-# left out). It stops the run quietly in quiet hours (home timezone), when nothing is new, or while the session is
-# paused.
+# left out). It stops the run quietly in quiet hours (home timezone; a run you start yourself checks anyway), when
+# nothing is unread, or while the session is paused.
 [[steps]]
 id = "inbox"
 type = "adapter"
 op = "igweb.inbox"
-args = { quiet = "23:00-08:00" }
+args = { quiet = "23:00-08:00", manual = "{{item.manual}}" }
 
-# Each new message is reported once.
+# Only messages newer than the last one reported in each conversation: each message is reported once.
 [[steps]]
 id = "fresh"
 type = "script"
-run = "lib/dedupe"
-args = { field = "steps.inbox.key", file = "dms-seen.txt" }
+run = "scripts/new_only"
+args = { threads = "{{steps.inbox.threads}}", test = "{{steps.inbox.test}}" }
 
 # An AI without any tools reads the messages (as untrusted data) and answers in a fixed form.
 [[steps]]
@@ -34,7 +34,7 @@ id = "summary"
 type = "llm"
 model = "haiku"
 prompt = "prompts/dms.md"
-input = "{{steps.inbox.text}}"
+input = "{{steps.fresh.text}}"
 schema = { worth = ["yes", "no"], summary = "text:1500" }
 
 # Markdown, so text from the messages can't form links or code in the message to you.

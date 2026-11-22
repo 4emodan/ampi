@@ -3,6 +3,8 @@ the calling process descends from), never from what the request says:
 
 - the owner's private chat runs: everything except `propose`;
 - the builder run of watcher X: read commands, `validate X`, `test X`, `propose X`;
+- a social-mode run of the owner's chat: only `run instagram-dms` (`instagram dms`: start the DM watcher, whose
+  summary goes to the owner, never to the run);
 - anything else (groups, forwarded messages, watcher runs, unknown processes): refused.
 """
 
@@ -29,6 +31,7 @@ PRIVATE_CMDS = READ_CMDS | {"validate", "test", "build", "pause", "run", "retry"
 # The builder reads real items while testing and could be misled by them: it sees only its own watcher, never run
 # logs, saved data or the audit of any watcher.
 BUILDER_CMDS = {"list", "lib", "help", "show", "validate", "test", "propose"}
+DM_WATCHER = "instagram-dms"
 
 
 def peer_pid(sock: socket.socket) -> int:
@@ -41,7 +44,7 @@ def peer_pid(sock: socket.socket) -> int:
 
 @dataclass
 class Who:
-    kind: str                # private | builder
+    kind: str                # private | builder | social
     profile: str
     name: str | None = None  # builder: its watcher
     caller: Caller | None = None
@@ -86,6 +89,8 @@ class Control:
             return Who("private", tag[1], caller=caller)
         if caller.origin.startswith("builder:") and isinstance(tag, tuple) and len(tag) == 3:
             return Who("builder", tag[1], tag[2], caller)
+        if caller.origin == "forwarded:social" and isinstance(tag, tuple) and len(tag) == 2 and tag[0] == "social":
+            return Who("social", tag[1], caller=caller)
         return None
 
     # --- server ------------------------------------------------------------------------------------------
@@ -124,7 +129,10 @@ class Control:
         if who is None:
             return {"ok": False, "text": "The watchers command works only in the owner's private chat (or the "
                                          "watcher builder); not from groups, watchers or forwarded content."}
-        allowed = PRIVATE_CMDS if who.kind == "private" else BUILDER_CMDS
+        if who.kind == "social" and (cmd != "run" or req.get("name") != DM_WATCHER):
+            return {"ok": False, "text": f"In social mode only `instagram dms` (the {DM_WATCHER} watcher) can be "
+                                         "started here."}
+        allowed = PRIVATE_CMDS if who.kind == "private" else {"run"} if who.kind == "social" else BUILDER_CMDS
         if cmd not in allowed:
             return {"ok": False, "text": f"`watchers {cmd}` isn't available here."}
         engine = self.engines.get(who.profile)
@@ -194,7 +202,7 @@ class Control:
             e.mark_dirty()
             return f"Paused {name}." if resp.get("ok") else f"Couldn't pause: {resp.get('error')}"
         if cmd == "run":
-            return e.manual(name, "Ampi in chat")
+            return e.manual(name, "Ampi in social mode" if who.kind == "social" else "Ampi in chat")
         if cmd == "retry":
             return e.retry(str(req.get("run") or ""))
         return "Unknown command."

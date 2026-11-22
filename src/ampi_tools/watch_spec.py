@@ -656,6 +656,27 @@ def _step(s: Any, i: int, earlier: list[str], files: dict[str, bytes]) -> dict:
     return out
 
 
+def _check_social_shape(steps: list[dict]) -> None:
+    """A watcher that reads the owner's Instagram/Threads session (direct messages) may only summarize them for the
+    owner: scripts, structured (tool-less) AI steps and markdown messages (defanged); no agent or web step and no
+    change anywhere in it, so strangers' text can't reach a tool, a website or another person."""
+    def social(op: str) -> bool:
+        return op.startswith(("igweb.", "thweb."))
+
+    reads = [s["id"] for s in steps if (s["type"] == "adapter" and social(s["op"]))
+             or any(social(a["op"]) for a in s.get("actions", []))]
+    if not reads:
+        return
+    where = f"step {reads[0]} reads the owner's Instagram/Threads session"
+    for s in steps:
+        if s["type"] == "web" or (s["type"] == "llm" and s["mode"] == "agent"):
+            raise SpecError(f"{where}: no agent or web steps in this watcher (step {s['id']}); use a structured AI step")
+        if s["type"] == "notify" and s["format"] != "markdown":
+            raise SpecError(f"{where}: its messages must use format = \"markdown\" (step {s['id']})")
+        if (s["type"] == "adapter" and is_write(s["op"])) or any(is_write(a["op"]) for a in s.get("actions", [])):
+            raise SpecError(f"{where}: it can't change anything (step {s['id']}); it only messages the owner")
+
+
 @dataclass
 class Spec:
     name: str
@@ -705,6 +726,7 @@ def parse(files: dict[str, bytes], expected_name: str | None = None) -> Spec:
         raise SpecError("[limits] must be a table")
     _only(limits_raw, set(LIMIT_DEFAULTS), "[limits]")
     limits = {k: int(_num(limits_raw.get(k, d), f"limits.{k}", *LIMIT_RANGES[k])) for k, d in LIMIT_DEFAULTS.items()}
+    _check_social_shape(out_steps)
     # Every file must be used: an unused script would be approved without anyone reading it in context.
     used = {"watcher.toml"} | {s["run"] for s in out_steps if s["type"] == "script"} | \
            {s["prompt"] for s in out_steps if s["type"] == "llm"} | \
