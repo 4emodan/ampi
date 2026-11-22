@@ -59,8 +59,15 @@ def redact(text: Any) -> str:
         if secret in s:
             s = s.replace(secret, "[redacted]")
     # Anything shaped like a Meta token, secret or code (URL, JSON or dict form), even if not registered (yet).
-    return re.sub(r"([\"']?\b(?:access_token|client_secret|code|fb_exchange_token|prev_token)[\"']?\s*[:=]\s*[\"']?)"
-                  r"[^&\s\"',}]+", r"\1[redacted]", s)
+    s = re.sub(r"([\"']?\b(?:access_token|client_secret|code|fb_exchange_token|prev_token)[\"']?\s*[:=]\s*[\"']?)"
+               r"[^&\s\"',}]+", r"\1[redacted]", s)
+    # Web-session cookies and the tokens scraped from the owner's logged-in pages (meta_session.py), in cookie,
+    # header, URL, JSON or dict form (X-CSRFToken: …, X-FB-LSD: …), whatever the case.
+    return _SESSION_RE.sub(r"\1[redacted]", s)
+
+
+_SESSION_RE = re.compile(r"([\"']?\b(?:x-)?(?:fb-)?(?:sessionid|csrftoken|ds_user_id|fb_dtsg|lsd|jazoest|rur)[\"']?"
+                         r"\s*[:=]\s*[\"']?)[^&;\s\"',}]+", re.I)
 
 
 class RedactingFormatter(logging.Formatter):
