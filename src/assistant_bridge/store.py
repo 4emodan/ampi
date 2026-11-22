@@ -62,6 +62,7 @@ class Conversation:
     started: bool
     title: str | None
     model: str | None
+    social: bool = False  # /social: runs here read Instagram/Threads, without web tools, until /new
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,9 @@ class Store:
         self._db = sqlite3.connect(str(path))
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_SCHEMA)
+        have = {r[1] for r in self._db.execute("PRAGMA table_info(conversations)")}
+        if "social" not in have:  # databases created by older versions
+            self._db.execute("ALTER TABLE conversations ADD COLUMN social INTEGER NOT NULL DEFAULT 0")
         self._db.commit()
 
     def close(self) -> None:
@@ -93,6 +97,7 @@ class Store:
             started=bool(row["started"]),
             title=row["title"],
             model=row["model"],
+            social=bool(row["social"]),
         )
 
     def get_conversation(self, profile: str, chat_id: int, thread_id: int) -> Conversation | None:
@@ -118,10 +123,11 @@ class Store:
         return conv
 
     def reset_session(self, profile: str, chat_id: int, thread_id: int) -> Conversation:
-        """Start a fresh Claude session for this conversation (keeps title and model)."""
+        """Start a fresh Claude session for this conversation (keeps title and model). The context with other
+        people's text is gone, so social mode ends too."""
         self.get_or_create(profile, chat_id, thread_id)
         self._db.execute(
-            "UPDATE conversations SET session_id=?, started=0, updated_at=?"
+            "UPDATE conversations SET session_id=?, started=0, social=0, updated_at=?"
             " WHERE profile=? AND chat_id=? AND thread_id=?",
             (str(uuid.uuid4()), now_iso(), profile, chat_id, thread_id),
         )
@@ -143,6 +149,15 @@ class Store:
         self._db.execute(
             "UPDATE conversations SET model=?, updated_at=? WHERE profile=? AND chat_id=? AND thread_id=?",
             (model, now_iso(), profile, chat_id, thread_id),
+        )
+        self._db.commit()
+
+    def set_social(self, profile: str, chat_id: int, thread_id: int) -> None:
+        """Only the owner's /social sets this; only a fresh session (/new, /reset) clears it."""
+        self.get_or_create(profile, chat_id, thread_id)
+        self._db.execute(
+            "UPDATE conversations SET social=1, updated_at=? WHERE profile=? AND chat_id=? AND thread_id=?",
+            (now_iso(), profile, chat_id, thread_id),
         )
         self._db.commit()
 

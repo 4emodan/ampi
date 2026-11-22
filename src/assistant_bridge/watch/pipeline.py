@@ -349,6 +349,12 @@ class Pipeline:
             if write:
                 st.previews.append(f"would do: {op} {json.dumps(args, ensure_ascii=False)[:500]}")
                 return {"text": f"(test: {op} not done)", "tested": False}
+            if op in ws.TEST_STUB_OPS:
+                # The owner's direct messages are never read in a test (ampi-tools refuses them outside a real
+                # watcher step anyway): the test runs on the same fake inbox the unit tests use.
+                from ampi_tools.social_dm import stub_reply
+                st.previews.append(f"{op}: test data instead of real messages")
+                return stub_reply(op, args)
             resp = await self.svc.tools({"cmd": "run", "ops": [{"op": op, "args": args}]})
         else:
             if write:
