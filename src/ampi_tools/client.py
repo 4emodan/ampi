@@ -828,8 +828,8 @@ def _main(prog: str, parser: argparse.ArgumentParser, to_ops, argv: list[str] | 
         # Direct messages never come into a chat: this only starts the owner's DM watcher, whose summary goes to them.
         response = _watcher_run(DM_WATCHER)
         if response.get("ok"):
-            response["text"] = (f"{response['text']} The summary goes to the owner's chat as a watcher message (also "
-                                "in quiet hours, since they asked); you won't see the messages here.")
+            response["text"] = (f"{response['text']} The summary goes to the owner's chat as a watcher message (not in "
+                                "quiet hours, at most once per 10 minutes from social mode); you won't see the messages here.")
         else:
             response["error"] = (f"{response.get('error') or 'failed'} (the DM watcher is “{DM_WATCHER}”: see "
                                  "docs/SETUP.md §8c-2)")

@@ -109,6 +109,11 @@ class WatchDB:
         d["item"] = json.loads(d["item"])
         return d
 
+    def busy_count(self, profile: str, name: str) -> int:
+        """Items queued, running or waiting for the owner."""
+        return self.db.execute("SELECT COUNT(*) FROM wt_items WHERE profile=? AND name=? AND status IN "
+                               "('queued', 'running', 'parked')", (profile, name)).fetchone()[0]
+
     def queued_count(self, profile: str, name: str) -> int:
         return self.db.execute("SELECT COUNT(*) FROM wt_items WHERE profile=? AND name=? AND status='queued'",
                                (profile, name)).fetchone()[0]

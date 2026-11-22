@@ -329,7 +329,8 @@ Open the Instagram app (or website), do what it asks, then run
 Feeds, profiles, bios, captions, comments, replies and stories are written by strangers, so Ampi only reads them in
 a conversation that **can't use the web**: send `/social` in a topic of your private chat. From then on, until
 `/new` (or `/reset`), that conversation runs like a group, only stricter: no WebFetch, WebSearch or `browse`, no
-file edits (so nothing read there can plant instructions for later conversations), no permission prompts (anything
+file edits (so nothing read there can plant instructions for later conversations); only reading tools
+(Read, Glob, Grep, Skill) and the `instagram`/`threads` commands are kept from your `allowed_tools`, no permission prompts (anything
 not allowed is simply denied, so a stranger's caption can't make you a target for "Approve?" buttons), and every
 action it asks for comes to you with a ⚠ ("asked for by a social-mode conversation"). Comments, likes and follows can
 only be asked for from a social conversation. In any other conversation Ampi answers
@@ -361,7 +362,8 @@ then ask Ampi in your private chat: *"build the watcher instagram-dms from the f
 watchers/instagram-dms, without changing them"*. You get the usual approval request (🟢 low risk: it only reads
 and messages you); its test run uses made-up messages, not yours. It checks every 15 minutes (4 of the 30
 watcher reads an hour the session allows); `instagram dms` in chat, or **Run** in `/watcher instagram-dms`, checks
-now, also during quiet hours (you asked); it works from social mode too, and the summary still only goes to you.
+now (Run in `/watcher` also during quiet hours; `instagram dms` from chat or social mode keeps quiet hours, and
+from social mode at most once per 10 minutes); the summary only ever goes to you.
 Each message is reported once: its small script (`scripts/new_only.py`, shown in the approval) remembers the last
 reported message per conversation. To stop it: `/watcher instagram-dms` → Pause or Delete.
 

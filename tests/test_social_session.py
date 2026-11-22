@@ -1156,12 +1156,20 @@ def test_social_runs_get_no_permission_tool(sbot):
 def test_instagram_dms_works_from_social_mode_only_for_the_dm_watcher():
     from assistant_bridge.watch.control import Control
     from assistant_bridge.watch.engine import Caller
-    engine = SimpleNamespace(manual=lambda name, by: f"Queued a run of {name} ({by}).")
+    started, busy = [], [0]
+    engine = SimpleNamespace(profile=SimpleNamespace(name="personal"),
+                             db=SimpleNamespace(busy_count=lambda profile, name: busy[0]),
+                             manual=lambda name, by, owner=False: started.append(owner) or f"Queued {name} ({by}).")
     control = Control({"personal": engine}, "unused")
     who = control.who(Caller("forwarded:social", ("social", "personal")))
     assert who is not None and who.kind == "social"
     out = run(control.dispatch({"cmd": "run", "name": "instagram-dms"}, who))
-    assert out["ok"] and "social mode" in out["text"]
+    assert out["ok"] and "social mode" in out["text"] and started == [False]  # quiet hours apply
+    assert "less than 10 minutes" in run(control.dispatch({"cmd": "run", "name": "instagram-dms"}, who))["text"]
+    control._social_runs.clear()
+    busy[0] = 1
+    assert "already queued" in run(control.dispatch({"cmd": "run", "name": "instagram-dms"}, who))["text"]
+    assert started == [False]
     for req in ({"cmd": "run", "name": "other"}, {"cmd": "list"}, {"cmd": "build", "name": "x", "text": "y"},
                 {"cmd": "logs", "run": "r"}):
         assert not run(control.dispatch(req, who))["ok"]
@@ -1177,3 +1185,35 @@ def test_a_manual_dm_check_ignores_quiet_hours(web, monkeypatch):
     assert out["stop"] and "Quiet hours" in out["text"] and w.fake.calls == []
     out = run(ops_social_session.ig_inbox(w.daemon.services, {"quiet": "00:00-23:59", "manual": True}))
     assert "Are we still on" in out["text"] and out["threads"]
+
+
+def test_login_required_summaries_pause(web):
+    w = web()
+    w.fake.override[("www.threads.com", "POST", "/graphql/query")] = httpx.Response(
+        200, text='for (;;);{"error":1357053,"errorSummary":"Login required"}')
+    assert not ask(w, ("thweb.feed", {}))["ok"] and w.th.auth.state() == "paused"
+
+
+def test_refused_page_tokens_never_resend_a_change(web):
+    w = web()
+    assert ask(w, ("thweb.like", {"target": f"https://www.threads.com/@carol/post/{TH_CODE}"}))["approval"]
+    real = w.fake.threads
+
+    def refuse_like(method, path, form):
+        if path == "/graphql/query" and form.get("doc_id") == TH_DOCS["like"].doc_id:
+            return httpx.Response(200, text='for (;;);{"error":1357004,"errorSummary":"Sorry"}')
+        return real(method, path, form)
+
+    w.fake.threads = refuse_like
+    out = approve(w)
+    assert out["status"] == "failed" and "nothing was changed" in out["text"]
+    assert sum(c.form.get("doc_id") == TH_DOCS["like"].doc_id for c in w.fake.calls) == 1
+    assert w.th.budget.hits["write"] == [] and w.th.auth.state() == "ok"
+
+
+def test_social_runs_keep_only_allow_listed_tools():
+    from assistant_bridge.bot import without_web
+    tools = ("Read", "Read(./**)", "Glob", "Grep", "Skill", "Bash(instagram:*)", "Bash(threads:*)", "Bash(curl:*)",
+             "Bash(todoist:*)", "mcp__web__fetch", "WebFetch", "Edit", "Bash", "Bash(info:*)", "Bash(instagram *)")
+    assert without_web(tools) == ("Read", "Read(./**)", "Glob", "Grep", "Skill", "Bash(instagram:*)",
+                                  "Bash(threads:*)")

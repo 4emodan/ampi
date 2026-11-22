@@ -796,11 +796,14 @@ EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 SOCIAL_DENIED = ("WebFetch", "WebSearch", "Bash(browse:*)", *EDIT_TOOLS)
 
 
+SOCIAL_READ_TOOLS = frozenset({"Read", "Glob", "Grep", "Skill"})  # with or without a path rule
+SOCIAL_COMMANDS = frozenset({"Bash(instagram:*)", "Bash(threads:*)"})
+
+
 def without_web(tools) -> tuple[str, ...]:
-    """Social-mode runs: like a group (no browse, no command runners), and also no WebFetch/WebSearch and no file
-    edits (the workspace is shared with later runs that have the web)."""
-    return without_browse(t for t in tools
-                          if t.split("(", 1)[0].strip() not in ("WebFetch", "WebSearch", *EDIT_TOOLS))
+    """Social-mode runs keep only an allow-list of the profile's tools: reading the workspace and the instagram and
+    threads commands. Everything else (WebFetch, curl, other commands, mcp__ web tools, file edits) is gone."""
+    return tuple(t for t in tools if t.split("(", 1)[0].strip() in SOCIAL_READ_TOOLS or t.strip() in SOCIAL_COMMANDS)
 
 
 def is_browse_rule(rule: str) -> bool:

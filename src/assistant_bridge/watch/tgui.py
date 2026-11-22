@@ -76,7 +76,7 @@ class WatchUI:
                 r = await e.tools({"cmd": "watch.status", "name": name, "status": "active"})
                 reply = "Resumed" if r.get("ok") else f"Failed: {r.get('error')}"
             elif action == "run":
-                reply = e.manual(name, "the owner (button)")
+                reply = e.manual(name, "the owner (button)", owner=True)
             elif action == "delete":
                 confirm = secrets.token_hex(6)
                 self.buttons[confirm] = (name, "delete!", None, time.time())

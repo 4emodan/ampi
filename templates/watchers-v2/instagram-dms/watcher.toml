@@ -13,13 +13,13 @@ llm_calls_per_day = 60
 actions_per_day = 0
 
 # The daemon reads the inbox (no AI, nothing marked as seen; message requests and groups you never wrote in are
-# left out). It stops the run quietly in quiet hours (home timezone; a run you start yourself checks anyway), when
+# left out). It stops the run quietly in quiet hours (home timezone; only Run in /watcher checks anyway), when
 # nothing is unread, or while the session is paused.
 [[steps]]
 id = "inbox"
 type = "adapter"
 op = "igweb.inbox"
-args = { quiet = "23:00-08:00", manual = "{{item.manual}}" }
+args = { quiet = "23:00-08:00", manual = "{{item.owner}}" }
 
 # Only messages newer than the last one reported in each conversation: each message is reported once.
 [[steps]]

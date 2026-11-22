@@ -550,11 +550,13 @@ class WatchEngine:
 
     # --- manual runs, retries, tests --------------------------------------------------------------------
 
-    def manual(self, name: str, by: str) -> str:
+    def manual(self, name: str, by: str, owner: bool = False) -> str:
+        """`owner`: the owner tapped Run themselves (/watchers); only then `item.owner` is true (e.g. the DM watcher
+        then checks even in quiet hours)."""
         w = self.watchers.get(name)
         if w is None or w.status != "active":
             return f"{name} isn't an active watcher."
-        self.db.enqueue(self.profile.name, name, "manual", "manual", [{"manual": True, "by": by,
+        self.db.enqueue(self.profile.name, name, "manual", "manual", [{"manual": True, "owner": owner, "by": by,
                                                                        "time": iso(now())}], 60, False)
         if name in self.tasks:
             self.tasks[name].wake.set()

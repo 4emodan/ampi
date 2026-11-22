@@ -409,13 +409,25 @@ class Budget:
             raise ToolError(f"the {name} limit for reads is used up ({READS_PER_DAY} a day); try again tomorrow")
         for kind in kinds:
             self.hits[kind].append(now)
+        self._last = (kinds, now)
+        self._save()
+
+    def refund_last(self) -> None:
+        kinds, at = getattr(self, "_last", ((), None))
+        for kind in kinds:
+            if at in self.hits[kind]:
+                self.hits[kind].remove(at)
+        self._last = ((), None)
+        self._save()
+
+    def _save(self) -> None:
         if self.path is not None:
             try:
                 tmp = self.path.with_name(self.path.name + ".tmp")
                 tmp.write_text(json.dumps(self.hits))
                 os.replace(tmp, self.path)
             except OSError:
-                log.warning("couldn't save the %s request counts", name)
+                log.warning("couldn't save the request counts (%s)", self.path.name)
 
 
 # --- the client ---------------------------------------------------------------------------------------------
@@ -449,7 +461,12 @@ HOME = {"instagram": "ig.home", "threads": "th.home"}
 
 
 class _StaleTokens(Exception):
-    """The page tokens (fb_dtsg/lsd) were refused (Meta error 1357004): fetch them once more, never a pause."""
+    """The page tokens (fb_dtsg/lsd) were refused (Meta error 1357004): fetch them once more (reads only), never a
+    pause."""
+
+    def __init__(self, cls: str):
+        super().__init__(cls)
+        self.cls = cls
 _SLOW_DOWN = ("feedback_required", "please wait a few minutes", "rate_limit")
 
 
@@ -478,12 +495,17 @@ class WebClient:
                    watch: bool = False) -> Any:
         try:
             return await self._call(name, ids, params, form, doc, variables, watch)
-        except _StaleTokens:
+        except _StaleTokens as e:
             self._tokens = {}
+            self.budget.refund_last()  # a refused attempt doesn't count
+            if e.cls != "read":  # a change is never sent twice
+                raise ToolError(f"{self.s.name} refused the page tokens; nothing was changed. Ask again in a "
+                                "moment.") from None
         try:
             return await self._call(name, ids, params, form, doc, variables, watch)
         except _StaleTokens:
             self._tokens = {}
+            self.budget.refund_last()
             raise ToolError(f"{self.s.name} refused the page tokens twice; try again later") from None
 
     async def _call(self, name: str, ids: dict[str, str] | None, params: dict | None, form: dict | None,
@@ -587,7 +609,7 @@ class WebClient:
             self.auth.pause("challenge" if status not in (401, 403) else f"http_{status}")
             raise ToolError(self.s.paused_text)
         if problem == "stale_tokens":
-            raise _StaleTokens()
+            raise _StaleTokens(cls)
         if problem == "user_agent":
             self.auth.pause("user_agent")
             raise ToolError(UA_TEXT.format(name=self.s.name, command=self.s.command))
@@ -655,12 +677,12 @@ def _problem(status: int, data: Any, text: str) -> str | None:
     if isinstance(data, dict):
         msg = str(data.get("message", "")).lower()
         summary = str(data.get("errorSummary", "")).lower()
-        if any(c in msg for c in _CHALLENGES) or "challenge" in data or "checkpoint_url" in data \
-                or data.get("require_login") is True or data.get("error") == 1357001 \
-                or "not logged in" in summary or "log in" in summary:
-            return "challenge"
         if data.get("error") == 1357004:
             return "stale_tokens"
+        if any(c in msg for c in _CHALLENGES) or "challenge" in data or "checkpoint_url" in data \
+                or data.get("require_login") is True or data.get("error") == 1357001 \
+                or re.search(r"log ?in|login required|expired", summary) is not None:
+            return "challenge"
         if "useragent" in msg or "user agent" in msg:
             return "user_agent"
         if any(c in msg for c in _SLOW_DOWN) or data.get("spam") is True:

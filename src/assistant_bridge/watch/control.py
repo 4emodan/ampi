@@ -32,6 +32,7 @@ PRIVATE_CMDS = READ_CMDS | {"validate", "test", "build", "pause", "run", "retry"
 # logs, saved data or the audit of any watcher.
 BUILDER_CMDS = {"list", "lib", "help", "show", "validate", "test", "propose"}
 DM_WATCHER = "instagram-dms"
+SOCIAL_RUN_GAP = 600  # seconds between two DM-watcher runs started from social mode
 
 
 def peer_pid(sock: socket.socket) -> int:
@@ -55,6 +56,7 @@ class Control:
         self.engines = engines
         self.path = path
         self.callers: dict[int, Caller] = {}
+        self._social_runs: dict[str, float] = {}  # profile -> when social mode last started the DM watcher
         self._server: asyncio.AbstractServer | None = None
 
     # --- run registry (fed by the claude runner) -------------------------------------------------------
@@ -201,8 +203,19 @@ class Control:
             resp = await e.tools({"cmd": "watch.status", "name": name, "status": "paused"})
             e.mark_dirty()
             return f"Paused {name}." if resp.get("ok") else f"Couldn't pause: {resp.get('error')}"
+        if cmd == "run" and who.kind == "social":
+            # A run reading strangers' posts could be talked into starting it over and over: once per 10 minutes,
+            # never while a run is waiting, and quiet hours apply (owner=False).
+            import time
+            if e.db.busy_count(e.profile.name, name):
+                return f"A run of {name} is already queued or running; its summary will come to the owner."
+            last = self._social_runs.get(e.profile.name, 0.0)
+            if time.monotonic() - last < SOCIAL_RUN_GAP:
+                return f"{name} was started from here less than 10 minutes ago; not again yet."
+            self._social_runs[e.profile.name] = time.monotonic()
+            return e.manual(name, "Ampi in social mode")
         if cmd == "run":
-            return e.manual(name, "Ampi in social mode" if who.kind == "social" else "Ampi in chat")
+            return e.manual(name, "Ampi in chat")
         if cmd == "retry":
             return e.retry(str(req.get("run") or ""))
         return "Unknown command."
