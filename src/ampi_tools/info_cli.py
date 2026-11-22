@@ -18,7 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .todoist import ToolError
-from .vault import LATLNG, TYPE_FIELDS, TYPES, Vault
+from .vault import LATLNG, TYPE_FIELDS, TYPES, Vault, check_name
 
 TYPE_BY_NAME = {"me": "person", "home": "place", "work": "place"}
 PROMPTS = {
@@ -74,12 +74,16 @@ def run(home: Path, command: str, args: list[str], geocode: Callable[[str], str]
             raise ToolError("info-set NAME [FIELD]")
         name, only = args[0], (args[1] if len(args) > 1 else None)
         e = vault.entry(name)
+        if not e:
+            check_name(name)  # before asking anything (a card number typed for nothing)
         if e:
             kind = e["type"]
         else:
             kind = TYPE_BY_NAME.get(name) or ("card" if name.startswith("card") else None)
             if kind is None:
                 kind = ask(f"Type of {name} ({'/'.join(TYPES)}): ").strip().lower()
+                if kind not in TYPES:
+                    raise ToolError(f"the type is one of {', '.join(TYPES)}")
             if only:
                 raise ToolError(f"{name} doesn't exist yet; create it with `info-set {name}` first")
         if only and only not in TYPE_FIELDS.get(kind, ()) and not any(k == only for k, _ in PROMPTS.get(kind, [])):

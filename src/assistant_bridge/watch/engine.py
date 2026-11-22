@@ -154,7 +154,13 @@ class WatchEngine:
 
     async def _refresh_timezone(self) -> None:
         resp = await self.tools({"cmd": "home.timezone"})
-        tz = resp.get("timezone") if resp.get("ok") else None
+        if not resp.get("ok"):
+            return
+        tz = resp.get("timezone")
+        if tz is None and self.home_timezone is not None:
+            log.info("[%s] timezone removed from personal info; using the config's", self.profile.name)
+            self.home_timezone = None
+            return
         if isinstance(tz, str) and tz != self.home_timezone:
             try:
                 from ..config import zone

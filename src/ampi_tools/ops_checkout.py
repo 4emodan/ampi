@@ -118,8 +118,8 @@ class CheckoutSide:
         could echo it back to her ("confirm your email: …")."""
         return self.mask_any(obj)
 
-    def mask_any(self, obj: Any) -> Any:
-        values, cards = self._values()
+    def mask_any(self, obj: Any, level: str = "all") -> Any:
+        values, cards = self._values(level)
         out = obj
         for card in cards or [None]:
             out = mask_obj(out, values, card)
@@ -128,14 +128,15 @@ class CheckoutSide:
             out = _map_strings(out, lambda t: mask_coords(t, locs))
         return out
 
-    def _values(self) -> tuple[list[str], list[str]]:
-        values = list(self.vault.sensitive_values())
-        try:  # first names are short but personal
-            first = self.vault.value("me.first_name")
-            if len(first) >= 4:
-                values.append(first)
-        except ToolError:
-            pass
+    def _values(self, level: str = "all") -> tuple[list[str], list[str]]:
+        values = list(self.vault.sensitive_values(level))
+        if level == "all":
+            try:  # first names are short but personal (not for places: "St John's" must stay readable)
+                first = self.vault.value("me.first_name")
+                if len(first) >= 4:
+                    values.append(first)
+            except ToolError:
+                pass
         return values, self.vault.card_numbers()
 
     def prune(self) -> None:

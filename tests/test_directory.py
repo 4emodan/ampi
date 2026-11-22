@@ -208,3 +208,67 @@ def test_watcher_spec_uses_and_payment_caps_are_shown():
     assert ws.risk(entries)[0] == "high"
     with pytest.raises(ws.SpecError):
         ws.parse({"watcher.toml": AGENT_PAY.replace(b'"me.email"]', b'"Me Email"]'), "prompts/p.md": b"x"})
+
+
+# --- review fixes ----------------------------------------------------------------------------------------------
+
+def test_upgraded_vault_keeps_the_env_home_area(tmp_path):
+    d, side, _ = make(tmp_path)  # set_profile: home has only an address, like a migrated vault
+    d.services.env_home = "35.18,33.38"
+    assert d.places_for("private") == {"home": "35.18,33.38"}
+    side.vault.set_entry("home", "place", {"location": "35.1,33.3"})
+    assert d.places_for("private") == {"home": "35.10000,33.30000"}  # its own location wins
+    side.vault.set_flag("home", "search", False)
+    assert d.places_for("private") == {}  # switched off stays off
+
+
+def test_unreadable_vault_is_never_overwritten(tmp_path):
+    (tmp_path / "vault.json").write_text('{"version": 2, "entries": {,}')
+    with pytest.raises(ToolError, match="valid JSON"):
+        Vault(tmp_path)
+    assert (tmp_path / "vault.json").read_text().startswith('{"version": 2')
+
+
+def test_compat_commands_keep_their_old_meaning(tmp_path):
+    d, side, _ = make(tmp_path)
+    v = side.vault
+    v.set_home({"location": "35.1,33.3", "timezone": "Europe/Nicosia"})
+    v.set_profile({**PROFILE, "phone": ""})
+    assert "phone" not in v.entry("me")["fields"]  # replaced as a whole, like before
+    v.clear("profile")
+    assert v.entry("me") is None and v.home() == {"location": "35.10000,33.30000", "timezone": "Europe/Nicosia"}
+    v.clear("home")
+    assert v.entry("home") is None
+
+
+def test_masking_levels(tmp_path):
+    d, side, _ = make(tmp_path)
+    out = d._masked({"ok": True, "text": "Cafe in Helsinki near Mannerheimintie 1 A 2"}, [{"op": "maps.search"}])
+    assert "Helsinki" in out["text"] and "Mannerheimintie 1 A 2" not in out["text"]
+    out = d._masked({"ok": True, "text": "chat id -1001234567896"}, [{"op": "telegram.chats"}])
+    assert "-1001234567896" in out["text"]  # a Luhn-valid chat id isn't a card
+    out = d._masked({"ok": True, "items": [{"snippet": "card " + CARD}]}, [{"op": "gmail.meta"}])
+    assert CARD not in json.dumps(out)
+    out = run(d.handle({"cmd": "run", "ops": [{"op": "checkout.open", "args": {"url": "https://x.example/" + CARD}}]}, 1))
+    assert CARD not in json.dumps(out)
+
+
+def test_routes_from_a_place_are_rounded(tmp_path):
+    from ampi_tools import ops_maps
+    from ampi_tools.ops import Services
+
+    class M:
+        near = None
+        async def route(self, o, dst, **kw):
+            return {"routes": [{"duration": "1234s", "distanceMeters": 12345}]}
+    s = Services(maps_client=M())
+    out = run(ops_maps.maps_route(s, {"origin": "home", "destination": "X", "places_allowed": {"home": "35.1,33.3"}}))
+    assert "about 12 km" in out and "about 20 min" in out and "12.3" not in out
+    out = run(ops_maps.maps_route(s, {"origin": "A", "destination": "X"}))
+    assert "about" not in out
+
+
+def test_watcher_payment_item_and_monthly_cap_optional():
+    spec = ws.parse({"watcher.toml": AGENT_PAY.replace(b"per_month = 1, ", b""), "prompts/p.md": b"x"})
+    lim = next(e for e in ws.manifest(spec) if e.get("op") == "checkout.pay")["limits"]
+    assert "per_month" not in lim and lim["item"] == "monthly fee"

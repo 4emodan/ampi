@@ -110,7 +110,9 @@ A watcher never sees personal values. It may use, by reference, only what `uses`
 searches near them (`home.location`), fields to fill in a checkout (`me.email`, `home.address.*` as entries), and
 cards to pay with. Pre-approved payments: an agent step declaring
 `actions = [{ op = "checkout.pay", site = "https://shop.example", max_amount = 40, per_week = 1, per_month = 1,
-card = "card-main", item = "monthly fee" }]`; every purchase is reported to the owner.
+card = "card-main", item = "monthly fee" }]`: `item` must appear in what the purchase says it buys, `per_month`
+is optional (no monthly cap without it), every purchase is reported to the owner. `uses` takes entry names
+(`card-main`) or fields in the new form (`me.email`, `home.address.city`).
 
 ### Templates
 `{{item.subject}}`, `{{steps.summary.summary}}`, `{{run.date}}`, `{{watcher.name}}`. A value that is exactly one

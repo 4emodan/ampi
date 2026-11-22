@@ -49,7 +49,7 @@ from . import ops_social
 from .maps import LATLNG_RE, Maps, latlng
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
-from .vault import Vault, mask_coords, mask_text
+from .vault import Vault, mask_cards, mask_coords, mask_text
 from .wolt import Wolt, WoltAuth
 from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact, register_secret
 from .ops_telegram import (
@@ -161,6 +161,7 @@ class Daemon:
         self.runs = runs or RunRegistry()
         self.keeper = keeper
         self._tg_lock = asyncio.Lock()
+        self._paying: set[tuple[str, str]] = set()
         self._limits: dict[str, dict] = {}  # snapshot hash -> its [limits]
 
     @property
@@ -249,7 +250,8 @@ class Daemon:
                 return {"ok": True}
             raise ToolError(f"unknown command {cmd!r}")
         except ToolError as e:
-            return {"ok": False, "error": redact(e)}
+            # Errors can quote pages, shops or places: mask them like the strictest reply.
+            return {"ok": False, "error": self._mask_obj(redact(e), "all")}
         except Exception as e:  # never let one request take the daemon down
             log.exception("request failed")
             return {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
@@ -370,21 +372,50 @@ class Daemon:
         """Every reply to Ampi: card numbers and coordinates near the owner's places are masked everywhere; Maps, Wolt,
         checkout and payment replies also mask every stored personal value. (`info collect` is the one reply meant
         to carry values, after the owner approved; cards are never in it.)"""
-        side = self.services.checkout_side
-        if side is None or any(o["op"] == "info.collect" for o in ops):
+        if any(o["op"] == "info.collect" for o in ops):
             return resp
-        full = any(o["op"].startswith(("maps.", "wolt.", "checkout.", "payment.")) for o in ops)
-        cards, locs = side.vault.card_numbers(), side.vault.locations()
+        if any(o["op"].startswith(("checkout.", "payment.")) for o in ops):
+            level = "all"
+        elif any(o["op"].startswith(("maps.", "wolt.")) for o in ops):
+            level = "places"  # places in the owner's city stay readable: street, full address, email, phone, names
+        else:
+            level = "light"
+        return self._mask_obj(resp, level)
 
-        def light(t: str) -> str:
-            for card in cards:
-                t = mask_text(t, [], card)
+    def _locations(self) -> list[tuple[float, float]]:
+        vault = getattr(self.services.checkout_side, "vault", None)
+        locs = vault.locations() if vault is not None else []
+        env_home = getattr(self.services, "env_home", None)
+        if env_home:
+            ll = latlng(env_home)
+            if ll:
+                locs.append((ll["latitude"], ll["longitude"]))
+        return locs
+
+    def _mask_obj(self, obj: Any, level: str) -> Any:
+        """Masks every string in a reply. light: the stored card numbers (not every Luhn-valid run: chat ids and
+        timestamps look like that) and coordinates of the owner's places; places/all: personal values too."""
+        side = self.services.checkout_side
+        mask_any = getattr(side, "mask_any", None)
+        vault = getattr(side, "vault", None)
+        cards = vault.card_numbers() if vault is not None else []
+        locs = self._locations()
+
+        def one(t: str) -> str:
+            if mask_any is not None and level != "light":
+                t = mask_any(t, level=level)
+            t = mask_cards(t, cards)
             return mask_coords(t, locs) if locs else t
-        out = dict(resp)
-        for key in ("text", "error"):
-            if isinstance(out.get(key), str):
-                out[key] = side.mask_any(out[key]) if full else light(out[key])
-        return out
+
+        def walk(x: Any) -> Any:
+            if isinstance(x, str):
+                return one(x)
+            if isinstance(x, list):
+                return [walk(v) for v in x]
+            if isinstance(x, dict):
+                return {k: walk(v) for k, v in x.items()}
+            return x
+        return walk(obj)
 
     def places_for(self, origin: str) -> dict[str, str]:
         """Places a request may use for searches ({name: "lat,lng"}): the owner's private chat gets the places with
@@ -393,7 +424,10 @@ class Daemon:
         side = self.services.checkout_side
         places = dict(side.vault.search_places()) if side is not None else {}
         env_home = getattr(self.services, "env_home", None)
-        if env_home and "home" not in places and not (side and side.vault.entry("home")):
+        home = side.vault.entry("home") if side is not None else None
+        # The env setting stands in until the home entry has a location of its own (an upgraded vault's home has
+        # only the address); a home with a location but searches switched off stays off.
+        if env_home and "home" not in places and not (home and (home["fields"].get("location") or not home.get("search", True))):
             places["home"] = env_home
         if origin == "private":
             return places
@@ -417,7 +451,6 @@ class Daemon:
                 o["args"]["places_allowed"] = places
             elif o["op"].startswith("wolt.") and not o["args"].get("lat_lng"):
                 o["args"]["lat_lng"] = latlng(places["home"]) if places.get("home") else None
-                o["args"]["no_home"] = "home" not in places
 
     async def decide(self, approval_id: int, approve: bool, nonce: str, message_id: int | None,
                      always: bool = False, choice: str | None = None, confirmed: bool = False) -> dict:
@@ -748,6 +781,21 @@ class Daemon:
 
     async def watcher_action(self, profile: str, name: str, hash12: str, step: str, ops: list[dict], reason: Any,
                              idem_key: str | None, ttl: float, run_id: str | None, agent: bool) -> dict:
+        """One payment of a watcher at a time, so its weekly/monthly counts can't be raced."""
+        paying = any(o["op"] == "checkout.pay" for o in ops)
+        key = (profile, name)
+        if paying:
+            if key in self._paying:
+                raise ToolError("another payment of this watcher is in progress")
+            self._paying.add(key)
+        try:
+            return await self._watcher_action(profile, name, hash12, step, ops, reason, idem_key, ttl, run_id, agent)
+        finally:
+            if paying:
+                self._paying.discard(key)
+
+    async def _watcher_action(self, profile: str, name: str, hash12: str, step: str, ops: list[dict], reason: Any,
+                             idem_key: str | None, ttl: float, run_id: str | None, agent: bool) -> dict:
         """An action of a watcher (engine adapter step / script action, or an agent step's Claude run)."""
         k = self._keeper()
         w = k.active(profile, name, hash12)
@@ -801,11 +849,21 @@ class Daemon:
         fits = [e for e in declared if route_fits(op, e["route"], route)]
         if declared and not fits and not agent:
             raise ToolError(f"{op} from step {step} would go somewhere the watcher didn't declare; refused")
+        force_ask = False
         if op in ("checkout.fill", "checkout.pay"):
             # Personal info only as its spec declares (`uses`), shown in its approval.
-            uses = next((e.get("uses", []) for e in k.manifest(w) if e.get("kind") == "uses"), [])
-            allowed = {u.split(".", 1)[0] for u in uses if "." not in u} | set(uses)
+            uses_entry = next((e for e in k.manifest(w) if e.get("kind") == "uses"), None)
+            vault = self.services.checkout_side.vault if self.services.checkout_side else None
+            allowed = set()
+            for u in (uses_entry or {}).get("uses", []):
+                allowed.add(u if "." not in u or vault is None else vault.canonical(u))
+            # Watchers approved before `uses` existed keep working as approved (their fills still ask or use grants).
+            approved_at = float(w.get("approved") or 0)
             for f in (o["args"].get("resolved") or {}).get("fills") or []:
+                e = vault.entry(f["field"].split(".", 1)[0]) if vault is not None else None
+                if e and float(e.get("created") or 0) > approved_at:
+                    force_ask = True  # e.g. card-main deleted and re-added: the approval was for the old one
+            for f in ((o["args"].get("resolved") or {}).get("fills") or []) if uses_entry is not None else []:
                 entry = f["field"].split(".", 1)[0]
                 if entry not in allowed and f["field"] not in allowed:
                     raise ToolError(f"watcher {name} didn't declare {f['field']} in `uses`; refused")
@@ -821,13 +879,15 @@ class Daemon:
                 raise ToolError(f"{amount} is over this watcher's limit of {lim['max_amount']} per purchase")
             if k.pays_this_week(profile, name) >= int(lim["per_week"]):
                 raise ToolError(f"this watcher's purchases for the week ({lim['per_week']}) are used up")
-            if k.pays_this_month(profile, name) >= int(lim.get("per_month", 1)):
-                raise ToolError(f"this watcher's purchases for the month ({lim.get('per_month', 1)}) are used up")
+            if lim.get("per_month") is not None and k.pays_this_month(profile, name) >= int(lim["per_month"]):
+                raise ToolError(f"this watcher's purchases for the month ({lim['per_month']}) are used up")
+            if lim.get("item") and lim["item"].casefold() not in str(r.get("what") or "").casefold():
+                raise ToolError(f"this watcher may buy only “{lim['item']}” (the purchase says: {clean(r.get('what'), 80)})")
             if lim.get("card") and r.get("card") != lim["card"]:
                 raise ToolError(f"this watcher may pay only with {lim['card']}")
         # Engine actions must fit a declared entry; an agent's undeclared action may be covered by a runtime grant
         # ("Allow for this watcher": that exact op and destination, this step, this version).
-        granted = (bool(fits) or agent) and k.granted(profile, name, h, step, op, route)
+        granted = (bool(fits) or agent) and k.granted(profile, name, h, step, op, route) and not force_ask
         if granted and await shares_with_others(self.services, o):
             granted = False  # a shared Todoist project or a public playlist: other people see it, so ask (as in chat)
         summary = await summarize(self.services, ops, self.policy)
@@ -915,17 +975,17 @@ class Daemon:
         row = self.approvals.get(approval_id)
         if row is None:
             raise ToolError("no such request")
-        return {"ok": True, "status": row["status"], "text": (row.get("result") or "")[:2000]}
+        return {"ok": True, "status": row["status"], "text": self._mask_obj((row.get("result") or "")[:2000], "all")}
 
     def list_text(self) -> str:
         rows = self.approvals.recent(10)
         if not rows:
             return "No approval requests yet."
-        return "\n".join(
+        return self._mask_obj("\n".join(
             f"#{r['id']} {r['status']}: {r['summary'].splitlines()[0][:150]}"
             + (f"\n   result: {r['result'][:200]}" if r.get("result") else "")
             for r in rows
-        )
+        ), "all")
 
     async def connection(self, rd: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
         try:
@@ -1259,7 +1319,8 @@ def _vault_cmd(home: Path, command: str, what: str | None) -> None:
             vault.set_home({k: v for k, v in (("location", loc), ("timezone", tz)) if v})
         except ToolError as e:
             sys.exit(f"Not saved: {e}")
-        print("Saved:\n  " + "\n  ".join(vault.masked()[-3:-1]) + "\nNow: systemctl restart ampi-tools claude-assistant")
+        print("Saved: " + next((x for x in vault.masked() if x.startswith("home (")), "home")
+              + "\nNow: systemctl restart ampi-tools claude-assistant")
         return
     sys.exit("vault-set card|profile|home")
 

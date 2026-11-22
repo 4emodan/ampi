@@ -112,6 +112,23 @@ def _bias(a: dict) -> dict | None:
     return latlng(home) if home else None
 
 
+def _rough_distance(m: Any) -> str:
+    try:
+        km = float(m) / 1000
+    except (TypeError, ValueError):
+        return "?"
+    return "under 1 km" if km < 1 else f"about {round(km)} km"
+
+
+def _rough_duration(d: Any) -> str:
+    try:
+        sec = float(str(d).rstrip("s"))
+    except (TypeError, ValueError):
+        return "?"
+    mins = max(5, int(round(sec / 300.0)) * 5)
+    return f"about {mins} min" if mins < 60 else f"about {mins // 60} h {mins % 60:02d} min"
+
+
 def _home(s: Services) -> str:  # kept for callers that only know about home
     raise ToolError("no home location is set (the owner sets it on the server: `ampi-tools info-set home`)")
 
@@ -145,7 +162,11 @@ async def maps_route(s: Services, a: dict) -> Result:
     lines = []
     for n, r in enumerate(routes[:3]):
         label = "Route" if len(routes) == 1 else f"Option {n + 1}"
-        lines.append(f"{label}: {duration(r.get('duration'))}, {distance(r.get('distanceMeters'))}")
+        if from_place or to_place:
+            # Rounded: exact distances from a few chosen points would pinpoint the place.
+            lines.append(f"{label}: {_rough_duration(r.get('duration'))}, {_rough_distance(r.get('distanceMeters'))}")
+        else:
+            lines.append(f"{label}: {duration(r.get('duration'))}, {distance(r.get('distanceMeters'))}")
     when = f" (departing {a['depart']})" if a.get("depart") else f" (arriving by {a['arrive']})" if a.get("arrive") else ""
     head = f"{mode.capitalize()} from {origin} to {destination}{when}:"
     note = ""
@@ -273,7 +294,7 @@ async def maps_link_op(s: Services, a: dict) -> Result:
 async def maps_status(s: Services, a: dict) -> Result:
     m = mp(s)
     return (f"Google Maps: {m.status()}; language {m.language}"
-            + (f", region {m.region}" if m.region else "") + (", home area set" if m.near else "")
+            + (f", region {m.region}" if m.region else "") + ", places for searches: from personal info, in the owner's chat"
             + f", time zone {m.tz.key}.\nBudget: {m.budget.summary()} (daily caps {DAILY}).")
 
 

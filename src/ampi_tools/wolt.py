@@ -238,7 +238,7 @@ class Wolt:
         return bool(self.auth and self.auth.configured())
 
     def status(self) -> str:
-        where = "location: home from personal info, in the owner's chat"
+        where = "location: home from personal info when set up, in the owner's chat only"
         return f"{'account connected' if self.connected else 'not logged in (read-only lookups)'}, {where}"
 
     def location(self, near: dict | None = None) -> dict:

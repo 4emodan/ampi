@@ -501,7 +501,8 @@ def _declared_action(a: Any, where: str) -> dict:
     if op == "checkout.pay":
         _num(a.get("max_amount"), f"{where}.max_amount", 0.01, 100000)
         _num(a.get("per_week", 1), f"{where}.per_week", 1, 50)
-        _num(a.get("per_month", 1), f"{where}.per_month", 1, 200)
+        if "per_month" in a:
+            _num(a["per_month"], f"{where}.per_month", 1, 200)
         if "card" in a and (not isinstance(a["card"], str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", a["card"])):
             raise SpecError(f"{where}.card: the card entry's name, e.g. card-main")
         if "item" in a:
@@ -716,7 +717,7 @@ def _declared_entries(s: dict, by: str) -> list[dict]:
                  "route": route, "subject": {}, "declared_by": by}
         if a["op"] == "checkout.pay":
             entry["limits"] = {"max_amount": float(a["max_amount"]), "per_week": int(a.get("per_week", 1)),
-                               "per_month": int(a.get("per_month", 1)),
+                               **({"per_month": int(a["per_month"])} if "per_month" in a else {}),
                                **({"card": a["card"]} if a.get("card") else {}),
                                **({"item": a["item"]} if a.get("item") else {})}
         out.append(entry)
@@ -879,7 +880,8 @@ def describe(spec: Spec, entries: list[dict]) -> str:
         lines.append("Actions it can take (granted together with \"allow all\"):")
         for g in grants:
             lim = g.get("limits") or {}
-            caps = (f" (at most {lim['max_amount']:g} per purchase, {lim['per_week']}/week, {lim.get('per_month', 1)}/month"
+            caps = (f" (at most {lim['max_amount']:g} per purchase, {lim['per_week']}/week"
+                    + (f", {lim['per_month']}/month" if lim.get("per_month") else "")
                     + (f", card {_c(lim['card'], 30)}" if lim.get("card") else "")
                     + (f", for {_c(lim['item'], 60)}" if lim.get("item") else "") + ")") if lim else ""
             lines.append(f"  · {g['op']}" + (f" → {_route_text(g['route'])}" if g["route"] else "") + caps)

@@ -144,7 +144,7 @@ def check_card(c: dict, today: date | None = None) -> dict:
 
 TYPES = ("person", "place", "card", "note")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,30}$")
-RESERVED = {"card", "address", "all", "person", "place", "note", "maps", "wolt", "reveal", "fill", "pay", "home-"}
+RESERVED = {"card", "address", "all", "person", "place", "note", "maps", "wolt", "reveal", "fill", "pay"}
 # Old field names (today's skills, approved watchers, stored site grants) keep working.
 ALIASES = {"name": "me.name", "first_name": "me.first_name", "last_name": "me.last_name", "email": "me.email",
            "phone": "me.phone"}
@@ -236,7 +236,7 @@ class Vault:
         self.clock = time.time
         if self.path.exists():
             data = self._read()
-            if data.get("version") != 2:
+            if data and "version" not in data:
                 self._migrate(data)
         for number in self.card_numbers():
             register_secret(number)  # the CVC is too short to register (it would garble output)
@@ -245,15 +245,25 @@ class Vault:
     # --- storage -------------------------------------------------------------------------
 
     def _read(self) -> dict:
+        """The stored data; {} if there is none yet. A file that exists but can't be read is an error, never an empty
+        vault (anything saved afterwards would overwrite every entry and card)."""
         try:
-            data = json.loads(self.path.read_text())
-        except (OSError, ValueError):
+            text = self.path.read_text()
+        except FileNotFoundError:
             return {}
-        return data if isinstance(data, dict) else {}
+        except OSError as e:
+            raise ToolError(f"vault.json can't be read ({e.__class__.__name__}); fix it or restore it") from None
+        try:
+            data = json.loads(text)
+        except ValueError:
+            raise ToolError("vault.json isn't valid JSON (edited by hand?); fix it or restore it before going on") from None
+        if not isinstance(data, dict):
+            raise ToolError("vault.json doesn't hold an object; fix it or restore it")
+        return data
 
     def load(self) -> dict:
         data = self._read()
-        if data and data.get("version") != 2:
+        if data and "version" not in data:
             data = self._converted(data)
         data.setdefault("version", 2)
         data.setdefault("entries", {})
@@ -324,9 +334,9 @@ class Vault:
         else:
             if kind not in TYPES:
                 raise ToolError(f"type must be one of {', '.join(TYPES)}")
-            eid = f"e{data.get('next', 1)}"
-            data["next"] = data.get("next", 1) + 1
-            e = {"name": name, "type": kind, "fields": check_entry(kind, fields), "revealable": kind != "card"}
+            eid = self._new_id(data)
+            e = {"name": name, "type": kind, "fields": check_entry(kind, fields), "revealable": kind != "card",
+                 "created": self.clock()}
             if kind == "place":
                 e["search"] = name == "home"
             data["entries"][eid] = e
@@ -379,9 +389,47 @@ class Vault:
     # --- compatibility with version 1 commands ----------------------------------------------
 
     def set_profile(self, profile: dict) -> None:
+        """Like version 1: the profile is replaced as a whole (blank fields are cleared); home keeps its location
+        and timezone."""
         p = check_profile(profile)
-        self.set_entry("me", "person", {k: p[k] for k in ("name", "email", "phone")})
-        self.set_entry("home", "place", {"address": p["address"]})
+        data = self.load()
+        me = self._find(data, "me")
+        fields = {k: p[k] for k in ("name", "email", "phone") if p.get(k)}
+        if me:
+            me[1]["fields"] = check_entry("person", fields)
+        else:
+            data["entries"][self._new_id(data)] = {"name": "me", "type": "person",
+                                                   "fields": check_entry("person", fields), "revealable": True}
+        home = self._find(data, "home")
+        address = {k: v for k, v in p["address"].items() if v}
+        if home:
+            home[1]["fields"] = {**{k: v for k, v in home[1]["fields"].items() if k != "address"}, "address": address}
+        else:
+            data["entries"][self._new_id(data)] = {"name": "home", "type": "place", "fields": {"address": address},
+                                                   "revealable": True, "search": True}
+        self.save(data)
+
+    def _new_id(self, data: dict) -> str:
+        eid = f"e{data.get('next', 1)}"
+        data["next"] = data.get("next", 1) + 1
+        while eid in data["entries"]:
+            eid = f"e{data['next']}"
+            data["next"] += 1
+        return eid
+
+    def _strip(self, name: str, keys: tuple[str, ...]) -> None:
+        """Removes some fields of an entry; the entry goes when nothing is left."""
+        data = self.load()
+        hit = self._find(data, name)
+        if not hit:
+            return
+        eid, e = hit
+        e["fields"] = {k: v for k, v in e["fields"].items() if k not in keys}
+        if not e["fields"]:
+            self.save(data)
+            self.delete(name)
+            return
+        self.save(data)
 
     def set_card(self, card: dict) -> None:
         name = self.default_card_name() or "card-main"
@@ -402,12 +450,11 @@ class Vault:
             if name:
                 self.delete(name)
         elif what == "profile":
-            for n in ("me", "home"):
-                if self.entry(n):
-                    self.delete(n)
+            if self.entry("me"):
+                self.delete("me")
+            self._strip("home", ("address",))
         elif what == "home":
-            if self.entry("home"):
-                self.delete("home")
+            self._strip("home", ("location", "timezone"))
         else:
             self.delete(what)
 
@@ -525,14 +572,17 @@ class Vault:
             lines.append("nothing stored yet (the owner adds entries on the server: `ampi-tools info-set NAME`)")
         return lines
 
-    def sensitive_values(self) -> list[str]:
-        """Strings masked in anything shown to Ampi: every stored value of 6+ characters, in every entry (card
-        numbers too; the CVC is never matched: too short)."""
+    def sensitive_values(self, level: str = "all") -> list[str]:
+        """Strings masked in what Ampi sees: every stored value of 6+ characters in every entry (card numbers too;
+        the CVC is never matched: too short). level="places" (Maps, Wolt): only what pins the owner down — street
+        lines, full addresses, email, phone, names, notes — not the city, region or company, so places in the
+        owner's own city stay readable."""
+        broad = ("city", "region", "postal", "company") if level == "places" else ()
         out = []
         for e in self.entries():
             f = e["fields"]
-            vals = [v for k, v in f.items() if isinstance(v, str) and k not in ("timezone", "country", "label")]
-            vals += [v for k, v in (f.get("address") or {}).items() if k != "country"]
+            vals = [v for k, v in f.items() if isinstance(v, str) and k not in ("timezone", "country", "label") + broad]
+            vals += [v for k, v in (f.get("address") or {}).items() if k != "country" and k not in broad]
             if e["type"] == "place" and f.get("address"):
                 vals.append(_address_full(f["address"]))
             out += [v for v in vals if isinstance(v, str) and len(v) >= 6]
@@ -592,20 +642,53 @@ class Vault:
         return [dict(r) for r in self.db.execute("SELECT * FROM purchases ORDER BY id DESC LIMIT ?", (limit,))]
 
 
-def mask_coords(text: str, locations: list[tuple[float, float]], radius_deg: float = 0.002) -> str:
-    """Coordinates within ~200 m of a stored place, at any precision, become `[place]`."""
-    if not locations:
-        return text
+def mask_cards(text: str, cards: list[str]) -> str:
+    """Only the stored card numbers (with any separators between digits), not every Luhn-valid run."""
+    for number in cards:
+        if number:
+            text = re.sub(r"[^0-9]{0,3}".join(re.escape(d) for d in number), "[vault]", text)
+    return text
 
-    def sub(m: re.Match) -> str:
-        try:
-            lat, lng = float(m.group(1)), float(m.group(2))
-        except ValueError:
-            return m.group(0)
-        if any(abs(lat - a) <= radius_deg and abs(lng - b) <= radius_deg for a, b in locations):
-            return "[place]"
-        return m.group(0)
-    return re.sub(r"(-?\d{1,2}\.\d+)\s*[,;/ ]\s*(-?\d{1,3}\.\d+)", sub, text)
+
+def _dms(deg: str, minutes: str, sec: str | None, hemi: str) -> float:
+    v = float(deg) + float(minutes) / 60 + (float(sec) / 3600 if sec else 0)
+    return -v if hemi.upper() in "SW" else v
+
+
+_DEC = re.compile(r"-?\d{1,3}\.\d+")
+_DMS = re.compile(r"(\d{1,3})\s*°\s*(\d{1,2})\s*['′]\s*(?:(\d{1,2}(?:\.\d+)?)\s*[\"″])?\s*([NSEWnsew])")
+
+
+def mask_coords(text: str, locations: list[tuple[float, float]], radius_deg: float = 0.002) -> str:
+    """Coordinates of a stored place become `[place]`, in any common form: "lat,lng" or "lng,lat", URL-encoded
+    (`%2C`), query strings (`lat=…&lng=…`), JSON (`"latitude": …`), degrees/minutes/seconds, and rounded values
+    (the tolerance grows with fewer decimals: 35.19,33.38 still matches)."""
+    if not locations or not text:
+        return text
+    text = re.sub(r"%2[Cc]", ",", text) if "%2" in text else text
+
+    def near(a: float, b: float, decimals: int) -> bool:
+        tol = max(radius_deg, 0.5 * 10 ** -decimals + radius_deg)
+        return any((abs(a - la) <= tol and abs(b - lo) <= tol) or (abs(b - la) <= tol and abs(a - lo) <= tol)
+                   for la, lo in locations)
+
+    spans: list[tuple[int, int]] = []
+    nums = [(m.start(), m.end(), float(m.group(0)), len(m.group(0).split(".")[1])) for m in _DEC.finditer(text)]
+    for i, (s1, e1, v1, d1) in enumerate(nums):
+        for s2, e2, v2, d2 in nums[i + 1:i + 4]:
+            if s2 - e1 > 40:
+                break
+            if near(v1, v2, min(d1, d2)):
+                spans += [(s1, e1), (s2, e2)]
+    dms = [(m.start(), m.end(), _dms(*m.groups())) for m in _DMS.finditer(text)]
+    for i, (s1, e1, v1) in enumerate(dms):
+        for s2, e2, v2 in dms[i + 1:i + 2]:
+            if s2 - e1 <= 40 and near(v1, v2, 4):
+                spans += [(s1, e1), (s2, e2)]
+    for s, e in sorted(set(spans), reverse=True):
+        text = text[:s] + "[place]" + text[e:]
+    return text
+
 
 
 def _loose(value: str) -> str:
