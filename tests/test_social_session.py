@@ -4,6 +4,8 @@ Everything runs against fakes (httpx.MockTransport); nothing here can reach inst
 
 import asyncio
 import base64
+import copy
+import dataclasses
 import json
 import time
 import urllib.parse
@@ -22,10 +24,10 @@ from ampi_tools import watch_spec as ws
 from ampi_tools.keeper import Keeper
 from ampi_tools.meta import redact
 from ampi_tools.meta_session import (
-    ENDPOINTS, IG, TH, TH_DOCS, Budget, SessionAuth, WebClient, allowed, shortcode_to_pk, store_session,
+    DOCS, ENDPOINTS, IG, IG_DOCS, TH, TH_DOCS, Budget, SessionAuth, WebClient, allowed, shortcode_to_pk, store_session,
 )
 from ampi_tools.ops import Approvals, Policy, Services
-from ampi_tools.ops_social_session import DM_REFUSAL, OTHER_REFUSAL, PRIVATE_REFUSAL, check_origin
+from ampi_tools.ops_social_session import DM_REFUSAL, OTHER_REFUSAL, PRIVATE_REFUSAL, WRITE_REFUSAL, check_origin
 from ampi_tools.server import Daemon
 from ampi_tools.todoist import ToolError
 from assistant_bridge.bot import ProfileBot
@@ -50,6 +52,14 @@ def run(coro):
     return asyncio.run(coro)
 
 
+@pytest.fixture(autouse=True)
+def known_docs(monkeypatch):
+    """The real tables hold placeholders that are never sent; the fakes answer to made-up "known" ids."""
+    for i, (table, key) in enumerate([(TH_DOCS, k) for k in TH_DOCS] + [(IG_DOCS, k) for k in IG_DOCS]):
+        monkeypatch.setitem(table, key, dataclasses.replace(table[key], doc_id=str(1000000000000001 + i),
+                                                            status="known"))
+
+
 def media(pk, code, owner, caption):
     return {"pk": pk, "id": f"{pk}_{owner[0]}", "code": code, "media_type": 1, "taken_at": 1763700000,
             "user": {"pk": owner[0], "username": owner[1]}, "caption": {"text": caption}, "like_count": 3,
@@ -61,7 +71,11 @@ class FakeMeta:
 
     def __init__(self):
         self.calls = []
-        self.override = {}  # (method, path) -> httpx.Response (or a callable returning one)
+        self.override = {}  # (method, path) or (host, method, path) -> httpx.Response (or a callable)
+        self.inbox = copy.deepcopy(social_dm.FIXTURE_INBOX)
+        self.more_comments = []  # a second page of comments
+        self.children = {}  # comment id -> replies
+        self.th_page = None  # what threads.com's page says instead of the logged-in page
         self.media = {MEDIA_PK: media(MEDIA_PK, MEDIA_CODE, ("2002", "bob"), "Sunset at the beach"),
                       OWN_PK: media(OWN_PK, OWN_CODE, (OWNER_ID, "me_ig"), "My own post")}
         self.comments = [{"pk": "5001", "text": "Lovely!", "user": {"pk": "2001", "username": "alice"},
@@ -79,7 +93,8 @@ class FakeMeta:
         form = dict(urllib.parse.parse_qsl(request.content.decode())) if request.content else {}
         self.calls.append(SimpleNamespace(method=request.method, host=request.url.host, path=request.url.path,
                                           query=q, headers=dict(request.headers), form=form))
-        hit = self.override.get((request.method, request.url.path))
+        hit = self.override.get((request.url.host, request.method, request.url.path)) or \
+            self.override.get((request.method, request.url.path))
         if hit is not None:
             return hit(request) if callable(hit) else hit
         if request.url.host == "www.instagram.com":
@@ -100,17 +115,25 @@ class FakeMeta:
                     "edge_owner_to_timeline_media": {"count": 2}, "is_private": False,
                     "external_url": "https://bob.example"}}, **ok})
             return httpx.Response(404, json={"status": "fail", "message": "User not found"})
-        if path == "/api/v1/feed/timeline/":
-            return httpx.Response(200, json={"feed_items": [{"media_or_ad": self.media[MEDIA_PK]},
-                                                            {"media_or_ad": {"pk": "9", "ad_id": "1", "user": {}}}],
-                                             **ok})
+        if method == "GET" and path == "/":
+            return httpx.Response(200, text=PAGE, headers={"content-type": "text/html"})
+        if method == "POST" and path == "/graphql/query":
+            ad = {"pk": "9", "code": "ADcode00001", "ad_id": "1", "user": {"pk": "1", "username": "brand"}}
+            return httpx.Response(200, json={"data": {"xdt_api__v1__feed__timeline__connection": {"edges": [
+                {"node": {"media": self.media[MEDIA_PK]}}, {"node": {"media": ad}}]}}})
         if path == "/api/v1/feed/user/2002/":
             return httpx.Response(200, json={"items": [self.media[MEDIA_PK]], **ok})
         for pk, m in self.media.items():
             if path == f"/api/v1/media/{pk}/info/":
                 return httpx.Response(200, json={"items": [m], **ok})
             if path == f"/api/v1/media/{pk}/comments/":
-                return httpx.Response(200, json={"comments": self.comments, **ok})
+                if q.get("min_id") == "page2":
+                    return httpx.Response(200, json={"comments": self.more_comments, **ok})
+                return httpx.Response(200, json={"comments": self.comments, "has_more_comments": bool(
+                    self.more_comments), "next_min_id": "page2" if self.more_comments else None, **ok})
+            for cid, kids in self.children.items():
+                if path == f"/api/v1/media/{pk}/comments/{cid}/child_comments/":
+                    return httpx.Response(200, json={"child_comments": kids, **ok})
         if path == "/api/v1/feed/reels_tray/":
             return httpx.Response(200, json={"tray": [{"id": 2002, "user": {"pk": 2002, "username": "bob"},
                                                        "media_count": 2, "latest_reel_media": 1763700000}], **ok})
@@ -119,7 +142,7 @@ class FakeMeta:
                 {"pk": "1", "taken_at": 1763700000, "media_type": 1, "accessibility_caption": "Photo of a cat",
                  "story_link_stickers": [{"story_link": {"url": "https://evil.example/x"}}]}]}}, **ok})
         if path == "/api/v1/direct_v2/inbox/":
-            return httpx.Response(200, json=social_dm.FIXTURE_INBOX)
+            return httpx.Response(200, json=self.inbox)
         if path.startswith("/api/v1/direct_v2/threads/"):
             return httpx.Response(200, json=social_dm.FIXTURE_THREAD)
         if method == "POST" and path.endswith("/add/"):
@@ -130,9 +153,7 @@ class FakeMeta:
 
     def threads(self, method, path, form):
         if method == "GET" and path == "/":
-            page = ('<html><script>["DTSGInitialData",[],{"token":"%s"},258]["LSD",[],{"token":"%s"},323]'
-                    '</script></html>' % (DTSG, LSD))
-            return httpx.Response(200, text=page, headers={"content-type": "text/html"})
+            return httpx.Response(200, text=self.th_page or PAGE, headers={"content-type": "text/html"})
         if method == "POST" and path == "/graphql/query":
             doc = next((k for k, d in TH_DOCS.items() if d.doc_id == form.get("doc_id")), None)
             v = json.loads(form.get("variables") or "{}")
@@ -150,6 +171,10 @@ class FakeMeta:
 
     def paths(self):
         return [c.path for c in self.calls]
+
+
+PAGE = ('<html><script>["DTSGInitialData",[],{"token":"%s"},258]["LSD",[],{"token":"%s"},323]'
+        '</script></html>' % (DTSG, LSD))
 
 
 async def trusted(pid):
@@ -210,7 +235,7 @@ def test_every_listed_endpoint_is_allowed_exactly_as_listed():
         path = ep.path.replace("{user}", "123").replace("{media}", "456").replace("{comment}", "789") \
             .replace("{thread}", "340282366841710300949128100000000001")
         if ep.kind == "graphql":
-            for d in TH_DOCS.values():
+            for d in DOCS[ep.service].values():
                 assert allowed(ep.method, ep.host, path, d.doc_id, d.name) == name
         else:
             assert allowed(ep.method, ep.host, path) == name
@@ -223,7 +248,9 @@ def test_every_listed_endpoint_is_allowed_exactly_as_listed():
     ("POST", "www.instagram.com", "/api/v1/web/accounts/edit/"),
     ("GET", "www.instagram.com", "/challenge/"),
     ("POST", "www.instagram.com", "/api/v1/challenge/123/"),
-    ("POST", "www.instagram.com", "/api/v1/feed/timeline/"),           # wrong method
+    ("POST", "www.instagram.com", "/api/v1/feed/timeline/"),           # the mobile app's feed
+    ("GET", "www.instagram.com", "/api/v1/feed/timeline/"),
+    ("POST", "www.instagram.com", "/api/v1/web/friendships/1/follow/"),  # not the endpoint in use
     ("GET", "www.instagram.com", "/api/v1/web/likes/1/like/"),         # wrong method
     ("GET", "i.instagram.com", "/api/v1/feed/timeline/"),              # the mobile API host
     ("GET", "www.instagram.com", "/api/v1/media/seen/"),
@@ -265,10 +292,11 @@ def test_headers_cookies_and_user_agent(web):
         assert c.host in ("www.instagram.com", "www.threads.com")
         if c.host == "www.instagram.com":
             assert "sessionid=IGSESSION_secret_0001" in c.headers["cookie"] and "THSESSION" not in c.headers["cookie"]
-            assert c.headers["x-ig-app-id"] == msess.IG_APP_ID and c.headers["x-csrftoken"] == "IGCSRF_secret_00001"
+            if c.path != "/":
+                assert c.headers["x-ig-app-id"] == msess.IG_APP_ID and c.headers["x-csrftoken"] == "IGCSRF_secret_00001"
         else:
             assert "sessionid=THSESSION_secret_001" in c.headers["cookie"] and "IGSESSION" not in c.headers["cookie"]
-    gql = next(c for c in w.fake.calls if c.path == "/graphql/query")
+    gql = next(c for c in w.fake.calls if c.path == "/graphql/query" and c.host == "www.threads.com")
     assert gql.form["doc_id"] == TH_DOCS["feed"].doc_id
     assert gql.form["fb_api_req_friendly_name"] == gql.headers["x-fb-friendly-name"] == TH_DOCS["feed"].name
     assert gql.form["fb_dtsg"] == DTSG and gql.form["lsd"] == gql.headers["x-fb-lsd"] == LSD
@@ -284,7 +312,7 @@ def test_page_tokens_are_fetched_once_then_reused(web):
 
 def test_a_changed_graphql_doc_says_so_and_never_guesses(web):
     w = web()
-    w.fake.override[("POST", "/graphql/query")] = httpx.Response(
+    w.fake.override[("www.threads.com", "POST", "/graphql/query")] = httpx.Response(
         200, json={"errors": [{"message": "PersistedQueryNotFound"}]})
     resp = ask(w, ("thweb.feed", {}))
     assert not resp["ok"] and "Threads changed its web app; the `BarcelonaFeedTimelineQuery` query needs updating" \
@@ -312,12 +340,12 @@ def test_fixed_gap_between_requests(tmp_path):
 
 def test_a_redirect_pauses_the_session_for_everyone_with_one_notice(web):
     w = web()
-    w.fake.override[("GET", "/api/v1/feed/timeline/")] = httpx.Response(
+    w.fake.override[("GET", "/api/v1/feed/reels_tray/")] = httpx.Response(
         302, headers={"location": "https://www.instagram.com/accounts/login/"})
-    resp = ask(w, ("igweb.feed", {}))
+    resp = ask(w, ("igweb.stories", {}))
     assert not resp["ok"] and IG.paused_text in resp["error"]
     n = len(w.fake.calls)
-    resp = ask(w, ("igweb.stories", {}))
+    resp = ask(w, ("igweb.feed", {}))
     assert not resp["ok"] and IG.paused_text in resp["error"]
     assert len(w.fake.calls) == n  # nothing more is sent
     assert len(w.notices) == 1 and "instagram-session --resume" in w.notices[0]
@@ -357,7 +385,7 @@ def test_challenges_and_logouts_pause(web, response):
 
 def test_threads_login_errors_pause(web):
     w = web()
-    w.fake.override[("POST", "/graphql/query")] = httpx.Response(
+    w.fake.override[("www.threads.com", "POST", "/graphql/query")] = httpx.Response(
         200, text='for (;;);{"error":1357001,"errorSummary":"Not logged in"}')
     resp = ask(w, ("thweb.feed", {}))
     assert not resp["ok"] and TH.paused_text in resp["error"] and w.th.auth.state() == "paused"
@@ -365,10 +393,10 @@ def test_threads_login_errors_pause(web):
 
 def test_a_refused_user_agent_stops_instead_of_pretending(web):
     w = web()
-    w.fake.override[("GET", "/api/v1/feed/timeline/")] = httpx.Response(
+    w.fake.override[("GET", "/api/v1/feed/reels_tray/")] = httpx.Response(
         400, json={"message": "useragent mismatch", "status": "fail"})
-    resp = ask(w, ("igweb.feed", {}))
-    assert not resp["ok"] and "honest user agent" in resp["error"]
+    resp = ask(w, ("igweb.stories", {}))
+    assert not resp["ok"] and "refuse non-browser clients" in resp["error"]
     assert w.ig.auth.load()["paused_reason"] == "user_agent"
     assert all(c.headers["user-agent"] == msess.USER_AGENT for c in w.fake.calls)
 
@@ -419,9 +447,9 @@ def test_session_values_are_redacted_even_unregistered():
 
 def test_no_cookie_or_token_reaches_replies_or_errors(web):
     w = web()
-    w.fake.override[("GET", "/api/v1/feed/timeline/")] = lambda r: (_ for _ in ()).throw(
+    w.fake.override[("GET", "/api/v1/feed/reels_tray/")] = lambda r: (_ for _ in ()).throw(
         RuntimeError(f"boom {r.headers['cookie']}"))
-    resp = ask(w, ("igweb.feed", {}))
+    resp = ask(w, ("igweb.stories", {}))
     assert resp["error"].endswith("Instagram unreachable (RuntimeError)")
     w.fake.override.clear()
     for op, a in (("igweb.feed", {}), ("thweb.feed", {}), ("igweb.profile", {"user": "bob"})):
@@ -615,7 +643,7 @@ def test_reply_is_not_posted_when_the_parent_comment_changed(web):
 
 
 def test_likes_always_ask_even_if_the_config_relaxes_them(web):
-    w = web(origin="private", policy=Policy(auto_approve=frozenset({"igweb.like", "thweb.like"})))
+    w = web(policy=Policy(auto_approve=frozenset({"igweb.like", "thweb.like"})))
     resp = ask(w, ("igweb.like", {"target": f"https://www.instagram.com/p/{MEDIA_CODE}/"}))
     assert resp["approval"] and "Like (publicly visible) @bob's Instagram post" in resp["text"]
     assert approve(w)["status"] == "done"
@@ -686,8 +714,21 @@ def test_rejected_writes_do_nothing(web):
 def test_web_writes_are_not_for_watchers(web):
     w = web(origin="watcher:personal/dms@0123456789ab#think")
     resp = ask(w, ("igweb.like", {"target": f"https://www.instagram.com/p/{MEDIA_CODE}/"}))
-    assert not resp["ok"]
+    assert not resp["ok"] and WRITE_REFUSAL in resp["error"]
     assert w.fake.calls == []
+
+
+@pytest.mark.parametrize("origin", ["private", "group:clipboard", "forwarded:private", "watcher:gmail-inbox",
+                                    "unknown"])
+def test_writes_are_refused_outside_social_conversations(web, origin):
+    # Their approval text quotes captions, comments and names, and goes back to the calling run.
+    w = web(origin=origin)
+    for op, a in (("igweb.like", {"target": f"https://www.instagram.com/p/{MEDIA_CODE}/"}),
+                  ("igweb.comment", {"target": f"https://www.instagram.com/p/{MEDIA_CODE}/", "text": "hi"}),
+                  ("thweb.follow", {"user": "carol"})):
+        resp = ask(w, (op, a))
+        assert not resp["ok"] and WRITE_REFUSAL in resp["error"]
+    assert w.fake.calls == [] and run(w.daemon.handle({"cmd": "approvals.pending"}, BRIDGE))["items"] == []
 
 
 # --- the session commands ---------------------------------------------------------------------------------------
@@ -758,7 +799,6 @@ def test_shortcodes():
 def dm_template_files():
     base = ROOT / "templates" / "watchers-v2" / "instagram-dms"
     files = {p.relative_to(base).as_posix(): p.read_bytes() for p in base.rglob("*") if p.is_file()}
-    files["lib/dedupe.py"] = (ROOT / "templates" / "watcher-lib" / "dedupe.py").read_bytes()
     return files
 
 
@@ -828,6 +868,14 @@ def test_dm_watcher_end_to_end(web, tmp_path, monkeypatch):
     # The same messages again: reported once.
     st2 = state(dict(st.space))
     assert run(pipe.run(act, st2)) == "stopped" and len(claude.calls) == 1 and len(sent) == 1
+    # A new message in the same (still unread) conversation: only the new one is summarized.
+    w.fake.inbox["inbox"]["threads"][0]["items"].insert(0, {"item_id": "a4", "user_id": 2001, "item_type": "text",
+                                                           "timestamp": 1763710000000000, "text": "Hello??"})
+    claude.answers.append('{"worth": "yes", "summary": "@alice again"}')
+    st3 = state(dict(st2.space))
+    assert run(pipe.run(act, st3)) == "ok"
+    prompt = claude.calls[1][0]
+    assert "Hello??" in prompt and "Are we still on" not in prompt
 
 
 def test_dm_watcher_test_mode_uses_stub_data(tmp_path):
@@ -868,6 +916,9 @@ def test_cli_picks_web_ops_when_a_session_exists(monkeypatch):
 
     monkeypatch.setattr(cli, "request", fake_request)
     monkeypatch.setattr(cli, "deliver", lambda text, *a, **k: text)
+    monkeypatch.delenv("AMPI_ORIGIN", raising=False)
+    cli.instagram_main(["post", f"https://www.instagram.com/p/{MEDIA_CODE}/"])  # not social: the official API
+    monkeypatch.setenv("AMPI_ORIGIN", "forwarded:social")
     cli.instagram_main(["post", f"https://www.instagram.com/p/{MEDIA_CODE}/"])
     cli.threads_main(["post", f"https://www.threads.com/@carol/post/{TH_CODE}"])
     cli.instagram_main(["feed"])
@@ -880,10 +931,10 @@ def test_cli_picks_web_ops_when_a_session_exists(monkeypatch):
     cli.threads_main(["posts"])
     cli.threads_main(["posts", "carol"])
     cli.threads_main(["follow", "carol"])
-    assert [o["op"] for o in sent] == ["igweb.post", "threads.post", "igweb.feed", "instagram.profile",
+    assert [o["op"] for o in sent] == ["instagram.post", "igweb.post", "threads.post", "igweb.feed", "instagram.profile",
                                        "igweb.profile", "igweb.comment", "igweb.like", "igweb.delete_comment",
                                        "instagram.delete_comment", "threads.posts", "thweb.posts", "thweb.follow"]
-    assert sent[5]["args"] == {"target": "https://www.instagram.com/p/X1234/", "text": "Nice", "comment": "5001"}
+    assert sent[6]["args"] == {"target": "https://www.instagram.com/p/X1234/", "text": "Nice", "comment": "5001"}
 
 
 def test_cli_dms_only_triggers_the_watcher(monkeypatch, capsys):
@@ -902,8 +953,8 @@ def test_cli_dms_only_triggers_the_watcher(monkeypatch, capsys):
 def sbot(tmp_path):
     profile = Profile(name="personal", bot_token_env="TG", bot_token="t", owner_ids=frozenset({CHAT}),
                       workspace=tmp_path / "ws", model="sonnet",
-                      allowed_tools=("Read", "WebFetch", "WebSearch(*)", "Bash(browse:*)", "Bash(instagram:*)",
-                                     "Bash(threads:*)", "Bash(env:*)"), extra_args=())
+                      allowed_tools=("Read", "Edit", "Write", "WebFetch", "WebSearch(*)", "Bash(browse:*)",
+                                     "Bash(instagram:*)", "Bash(threads:*)", "Bash(env:*)"), extra_args=())
     profile.workspace.mkdir()
     api, runner = FakeAPI(), FakeRunner(reply="ok")
     store = Store(":memory:")
@@ -921,11 +972,13 @@ def test_social_flag_survives_resumed_turns_until_new(sbot):
         run(bot.handle_message(msg(text)))
         call = runner.calls[-1]
         assert call["origin"] == "forwarded:social"
-        assert call["tag"] is None  # watchers build never records this as the owner's request
+        assert call["tag"] == ("social", "personal")  # never a ("chat", …) tag: not the owner's words
         assert call["started"] is True and call["session_id"] == first["session_id"]  # --resume, a new process
         tools = call["allowed_tools"]
         assert "Bash(instagram:*)" in tools and "Read" in tools
-        assert not any(t.startswith(("WebFetch", "WebSearch")) or "browse" in t or "env" in t for t in tools)
+        assert not any(t.startswith(("WebFetch", "WebSearch", "Edit", "Write")) or "browse" in t or "env" in t
+                       for t in tools)
+        assert {"WebFetch", "WebSearch", "Bash(browse:*)", "Edit", "Write", "NotebookEdit"} <= set(call["extra_denied"])
         assert "social mode" in call["append_system_prompt"]
     run(bot.handle_message(msg("/status")))
     assert "Social mode: on" in api.sent[-1]["text"]
@@ -965,3 +1018,162 @@ def test_social_flag_survives_a_restart(tmp_path):
     s.set_social("personal", 1, 0)
     s.close()
     assert Store(db).get_conversation("personal", 1, 0).social is True
+
+
+# --- review fixes ------------------------------------------------------------------------------------------------
+
+
+def test_placeholder_doc_ids_are_never_sent(web, monkeypatch):
+    w = web()
+    monkeypatch.setitem(TH_DOCS, "feed", dataclasses.replace(TH_DOCS["feed"], doc_id="0", status="placeholder"))
+    monkeypatch.setitem(IG_DOCS, "feed", dataclasses.replace(IG_DOCS["feed"], doc_id="0", status="placeholder"))
+    for op in ("thweb.feed", "igweb.feed"):
+        resp = ask(w, (op, {}))
+        assert not resp["ok"] and "isn't known yet: copy its doc_id from DevTools" in resp["error"]
+    assert w.fake.calls == []
+
+
+def test_the_shipped_tables_mark_placeholders_and_stale_ids():
+    src = Path(msess.__file__)  # the autouse fixture patched the dicts, not the source
+    src = src.read_text(encoding="utf-8")
+    assert src.count('"placeholder")') >= 7 and src.count('"stale")') == 3
+    assert "/api/v1/feed/timeline/" not in "".join(ep.path for ep in ENDPOINTS.values())
+
+
+def test_page_tokens_belong_to_the_session(web):
+    w = web()
+    ask(w, ("thweb.feed", {}))
+    ask(w, ("thweb.feed", {}))
+    w.th.auth.resume()  # e.g. after a checkpoint: the old page tokens aren't reused
+    ask(w, ("thweb.feed", {}))
+    assert [c.path for c in w.fake.calls if c.host == "www.threads.com"].count("/") == 2
+
+
+def test_refused_page_tokens_are_fetched_again_once_not_paused(web):
+    w = web()
+    stale = httpx.Response(200, text='for (;;);{"error":1357004,"errorSummary":"Sorry, something went wrong"}')
+    real = w.fake.threads
+    hits = []
+
+    def once(method, path, form):
+        if path == "/graphql/query" and not hits:
+            hits.append(1)
+            return stale
+        return real(method, path, form)
+
+    w.fake.threads = once
+    assert ask(w, ("thweb.feed", {}))["ok"]
+    assert [c.path for c in w.fake.calls].count("/") == 2 and w.th.auth.state() == "ok"
+    w.fake.threads = lambda m, p, f: httpx.Response(200, text=stale.text) if p == "/graphql/query" else real(m, p, f)
+    resp = ask(w, ("thweb.feed", {}))
+    assert not resp["ok"] and "refused the page tokens twice" in resp["error"] and w.th.auth.state() == "ok"
+
+
+@pytest.mark.parametrize("page,reason,text", [
+    ('<html><a href="/accounts/login/">Log in</a></html>', "login_required", "confirm it's you"),
+    ("<html>Please use a supported browser</html>", "user_agent", "refuse non-browser clients"),
+])
+def test_a_page_without_tokens_pauses_once(web, page, reason, text):
+    w = web()
+    w.fake.th_page = page
+    resp = ask(w, ("thweb.feed", {}))
+    assert not resp["ok"] and text in resp["error"]
+    assert w.th.auth.load()["paused_reason"] == reason and len(w.notices) == 1
+    ask(w, ("thweb.feed", {}))
+    assert [c.path for c in w.fake.calls].count("/") == 1  # never fetched again in a loop
+
+
+def test_comments_on_later_pages_and_replies_are_found(web):
+    w = web()
+    w.fake.more_comments = [{"pk": "5009", "text": "old one", "user": {"pk": "2009", "username": "zoe"}}]
+    w.fake.comments[0]["child_comment_count"] = 1
+    w.fake.children = {"5001": [{"pk": "5010", "text": "a reply", "user": {"pk": "2010", "username": "yan"}}]}
+    resp = ask(w, ("igweb.like", {"target": f"https://www.instagram.com/p/{MEDIA_CODE}/", "comment": "5009"}))
+    assert resp["approval"] and "@zoe's comment “old one”" in resp["text"]
+    assert any(c.query.get("min_id") == "page2" for c in w.fake.calls)
+    approve(w)
+    resp = ask(w, ("igweb.comment", {"target": f"https://www.instagram.com/p/{MEDIA_CODE}/", "text": "yes",
+                                     "comment": "5010"}))
+    assert resp["approval"] and "@yan's comment “a reply”" in resp["text"]
+
+
+def test_quoted_posts_stay_inside_their_post(web):
+    w = web()
+    quoted = {"pk": "888", "code": "C1quoted001", "user": {"pk": "3004", "username": "erin"},
+              "caption": {"text": "the original"}}
+    w.fake.th_post["text_post_app_info"]["share_info"] = {"quoted_post": quoted}
+    text = ask(w, ("thweb.post", {"target": f"https://www.threads.com/@carol/post/{TH_CODE}"}))["text"]
+    assert "(quoting @erin: the original)" in text
+    replies = text.split("Replies")[1]
+    assert "erin" not in replies and "@dave" in replies
+    assert "[888]" not in ask(w, ("thweb.feed", {}))["text"]
+
+
+def _spec(extra):
+    toml = ('name = "w"\ndescription = "d"\n[[triggers]]\ntype = "manual"\n[[steps]]\nid = "dms"\n'
+            'type = "adapter"\nop = "igweb.inbox"\n' + extra)
+    files = {"watcher.toml": toml.encode(), "prompts/p.md": b"x", "templates/t.txt": b"x"}
+    return ws.parse({k: v for k, v in files.items() if k == "watcher.toml" or k in toml})
+
+
+@pytest.mark.parametrize("extra,match", [
+    ('[[steps]]\nid = "a"\ntype = "llm"\nmode = "agent"\nprompt = "prompts/p.md"\ntools = ["Read"]\n', "agent or web"),
+    ('[[steps]]\nid = "a"\ntype = "web"\nurl = "https://example.com/x"\n', "agent or web"),
+    ('[[steps]]\nid = "a"\ntype = "notify"\ntext = "{{steps.dms.text}}"\n', "markdown"),
+    ('[[steps]]\nid = "a"\ntype = "adapter"\nop = "telegram.send"\nargs = { chat = "me", text = "x" }\n',
+     "can't change anything"),
+])
+def test_dm_watchers_may_only_summarize(extra, match):
+    with pytest.raises(ws.SpecError, match=match):
+        _spec(extra)
+    assert _spec('[[steps]]\nid = "a"\ntype = "notify"\nformat = "markdown"\ntext = "{{steps.dms.text}}"\n')
+
+
+def test_defanged_text_has_no_clickable_addresses():
+    from assistant_bridge.watch.pipeline import defang_text
+    out = defang_text("go to https://evil.example/x or t.me/abc, www.site.com, [x](y) `code` tg:resolve")
+    assert "https://" not in out and "hxxps://" in out and "t(.)me" in out and "site(.)com" in out
+    assert "[" not in out and "`" not in out and "tg:" not in out
+
+
+def test_social_runs_get_no_permission_tool(sbot):
+    bot, api, runner, store = sbot
+
+    class Broker:
+        used = []
+
+        def run(self, label, outside_content):
+            self.used.append(label)
+            raise AssertionError("no permission tool for social runs")
+
+    bot.permissions = Broker()
+    run(bot.handle_message(msg("/social")))
+    run(bot.handle_message(msg("read the feed")))
+    assert Broker.used == [] and runner.calls[-1]["origin"] == "forwarded:social"
+    assert "mcp__ampi__install_system_packages" not in runner.calls[-1]["allowed_tools"]
+
+
+def test_instagram_dms_works_from_social_mode_only_for_the_dm_watcher():
+    from assistant_bridge.watch.control import Control
+    from assistant_bridge.watch.engine import Caller
+    engine = SimpleNamespace(manual=lambda name, by: f"Queued a run of {name} ({by}).")
+    control = Control({"personal": engine}, "unused")
+    who = control.who(Caller("forwarded:social", ("social", "personal")))
+    assert who is not None and who.kind == "social"
+    out = run(control.dispatch({"cmd": "run", "name": "instagram-dms"}, who))
+    assert out["ok"] and "social mode" in out["text"]
+    for req in ({"cmd": "run", "name": "other"}, {"cmd": "list"}, {"cmd": "build", "name": "x", "text": "y"},
+                {"cmd": "logs", "run": "r"}):
+        assert not run(control.dispatch(req, who))["ok"]
+    assert control.who(Caller("forwarded:private", ("social", "personal"))) is None
+    assert control.who(Caller("forwarded:social", None)) is None
+
+
+def test_a_manual_dm_check_ignores_quiet_hours(web, monkeypatch):
+    from ampi_tools import ops_social_session
+    monkeypatch.setattr(ops_social_session, "_in_quiet", lambda s, quiet: True)
+    w = web()
+    out = run(ops_social_session.ig_inbox(w.daemon.services, {"quiet": "00:00-23:59"}))
+    assert out["stop"] and "Quiet hours" in out["text"] and w.fake.calls == []
+    out = run(ops_social_session.ig_inbox(w.daemon.services, {"quiet": "00:00-23:59", "manual": True}))
+    assert "Are we still on" in out["text"] and out["threads"]

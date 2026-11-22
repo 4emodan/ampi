@@ -328,8 +328,11 @@ Open the Instagram app (or website), do what it asks, then run
 
 Feeds, profiles, bios, captions, comments, replies and stories are written by strangers, so Ampi only reads them in
 a conversation that **can't use the web**: send `/social` in a topic of your private chat. From then on, until
-`/new` (or `/reset`), that conversation runs like a group: no WebFetch, WebSearch or `browse`, and every action it
-asks for comes to you with a ⚠ ("asked for by a social-mode conversation"). In any other conversation Ampi answers
+`/new` (or `/reset`), that conversation runs like a group, only stricter: no WebFetch, WebSearch or `browse`, no
+file edits (so nothing read there can plant instructions for later conversations), no permission prompts (anything
+not allowed is simply denied, so a stranger's caption can't make you a target for "Approve?" buttons), and every
+action it asks for comes to you with a ⚠ ("asked for by a social-mode conversation"). Comments, likes and follows can
+only be asked for from a social conversation. In any other conversation Ampi answers
 that it can't read Instagram there and asks you to send `/social`. Only your own `/social` switches it on. Tip:
 keep one topic called "Social" for this.
 
@@ -358,16 +361,22 @@ then ask Ampi in your private chat: *"build the watcher instagram-dms from the f
 watchers/instagram-dms, without changing them"*. You get the usual approval request (🟢 low risk: it only reads
 and messages you); its test run uses made-up messages, not yours. It checks every 15 minutes (4 of the 30
 watcher reads an hour the session allows); `instagram dms` in chat, or **Run** in `/watcher instagram-dms`, checks
-now. To stop it: `/watcher instagram-dms` → Pause or Delete.
+now, also during quiet hours (you asked); it works from social mode too, and the summary still only goes to you.
+Each message is reported once: its small script (`scripts/new_only.py`, shown in the approval) remembers the last
+reported message per conversation. To stop it: `/watcher instagram-dms` → Pause or Delete.
 
 ### First session: what to check
 
 The endpoints and GraphQL ids come from public knowledge of the web apps. Try one read of each kind in a social
 topic. If something fails with "changed its web app; the `X` query needs updating", or a request is refused,
 open DevTools → **Network** on the same page in your browser, find the request the site itself makes, and correct
-its path, `doc_id` or name in `ENDPOINTS` / `TH_DOCS` in `meta_session.py` (Threads `doc_id`s marked as
-placeholders there certainly need this). Don't change the user agent: if Meta refuses it, the session stops by
-design.
+its path, `doc_id` or name in `ENDPOINTS` / `TH_DOCS` / `IG_DOCS` in `meta_session.py`. GraphQL entries marked
+`"placeholder"` are never sent: until you fill in the real `doc_id` (and set the status to `"known"`), Ampi answers
+"this … query isn't known yet: copy its doc_id from DevTools". That currently covers the Instagram home feed
+(`PolarisFeedRootPaginationCachedQuery_subscribe`) and, on Threads, the feed, looking up a username (so profiles,
+posts and follows), likes and follows. Entries marked `"stale"` are real but from 2023 and are sent; correct them if
+they fail. Don't change the user agent: if Meta's web endpoints refuse non-browser clients ("useragent mismatch",
+or a threads.com page without its tokens), the session stops by design.
 
 ## 8d. Web browser (optional)
 
