@@ -352,6 +352,10 @@ final check.
    the old `vault-set profile|card|home` commands still work. `/info` in Telegram shows the entries (masked) and the
    site permissions, with buttons to remove them.
 
+   Ampi can also **save places** you tell her about ("save this as my gym"): each save is an approval request showing
+   the name and the full address (and whether it replaces an existing place); the location is looked up once on
+   Google Maps. She can't create other kinds of entries, delete anything or change switches.
+
    How each use works:
    - **Ampi sees a value** (`info reveal`): asks you every time; cards, locations and timezones never.
    - **Filling a form**: asks; "✅ + always here" = exactly those fields on exactly that site for 30 days. Values stay

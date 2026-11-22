@@ -536,6 +536,15 @@ def info_parser() -> argparse.ArgumentParser:
     sub.add_parser("reveal", help="see values, e.g. me.email work.address.full (asks the owner every time; never "
                    "cards, locations or timezones)").add_argument("fields", nargs="+")
     sub.add_parser("revoke", help="remove a site permission (or all)").add_argument("site")
+    s = sub.add_parser("save-place", help="save a named address for the owner (asks them), e.g. gym, mom, school")
+    s.add_argument("entry", help="short name: lowercase letters, digits and -, e.g. gym")
+    s.add_argument("--street", required=True)
+    s.add_argument("--line2")
+    s.add_argument("--postal")
+    s.add_argument("--city", required=True)
+    s.add_argument("--region")
+    s.add_argument("--country", required=True, help="two letters, e.g. CY")
+    s.add_argument("--company", help="for a workplace")
     sub.add_parser("status", help="answer to a request").add_argument("approval", type=int)
     return p
 
@@ -546,6 +555,10 @@ def info_main(argv: list[str] | None = None) -> int:
         return _run_waiting("info", _op("info.reveal", fields=a.fields), a.reason, a.wait, collect=True)
     if a.cmd == "status":
         return _status("info", a.approval)
+    if a.cmd == "save-place":
+        return _run_waiting("info", _op("info.save_place", entry=a.entry, street=a.street, line2=a.line2,
+                                        postal=a.postal, city=a.city, region=a.region, country=a.country,
+                                        company=a.company), a.reason, a.wait)
     ops = _op("info.fields") if a.cmd == "fields" else _op("info.revoke", site=a.site)
     return _run_waiting("info", ops, a.reason, 0)
 

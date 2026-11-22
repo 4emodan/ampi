@@ -346,6 +346,32 @@ class Vault:
         if kind == "card":
             register_secret(e["fields"]["number"])
 
+    def save_place(self, name: str, address: dict, company: str | None = None, location: str | None = None) -> bool:
+        """Creates or updates a place: the address is replaced as a whole; company and location only when given
+        (an existing place keeps its timezone). Returns whether it replaced an existing place's address."""
+        data = self.load()
+        hit = self._find(data, check_name(name))
+        fields: dict[str, Any] = {"address": address}
+        if company:
+            fields["company"] = company
+        if location:
+            fields["location"] = location
+        if hit:
+            eid, e = hit
+            if e["type"] != "place":
+                raise ToolError(f"{name} is a {e['type']}, not a place")
+            replaced = bool(e["fields"].get("address"))
+            keep = {k: v for k, v in e["fields"].items() if k != "address" and k not in fields}
+            if not location:
+                keep.pop("location", None)  # a new address with the old location would search the wrong place
+            e["fields"] = check_entry("place", {**keep, **fields})
+        else:
+            replaced = False
+            data["entries"][self._new_id(data)] = {"name": name, "type": "place", "fields": check_entry("place", fields),
+                                                   "revealable": True, "search": True, "created": self.clock()}
+        self.save(data)
+        return replaced
+
     def delete(self, name: str) -> None:
         data = self.load()
         hit = self._find(data, name)

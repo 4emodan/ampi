@@ -23,7 +23,7 @@ from typing import Any
 from .ops import ALWAYS_CRITICAL, FIELDS, OPS, PRE_RESOLVE, Op, Result, Services, _text, clean, need
 from . import ops as _ops
 from .todoist import ToolError
-from .vault import CARD_FIELDS, PROFILE_FIELDS, Vault, mask_coords, mask_obj, mask_text
+from .vault import CARD_FIELDS, PROFILE_FIELDS, Vault, _address_full, check_entry, check_name, mask_coords, mask_obj, mask_text
 
 CTL_SOCKET = "/run/ampi-checkout.sock"  # root-owned (ampi-checkout.socket), group ampicheckoutctl-use
 REQUEST_TTL = 600            # fill/pay requests expire after 10 minutes (and with the session)
@@ -31,7 +31,7 @@ REVEAL_TTL = 600             # revealed values can be collected for 10 minutes, 
 DEFAULT_PSP = ("https://js.stripe.com", "https://checkout.stripe.com", "https://checkoutshopper-live.adyen.com",
                "https://checkoutshopper-live-us.adyen.com", "https://assets.braintreegateway.com",
                "https://checkout.shopifycs.com", "https://pay.paytrail.com", "https://services.paytrail.com")
-PRIVATE_ONLY = {"info.fields", "info.reveal", "info.collect", "info.revoke", "payment.log", "checkout.open",
+PRIVATE_ONLY = {"info.fields", "info.reveal", "info.collect", "info.revoke", "info.save_place", "payment.log", "checkout.open",
                 "checkout.snapshot", "checkout.click", "checkout.type", "checkout.choose", "checkout.back",
                 "checkout.close", "checkout.fill", "checkout.pay"}
 # Buttons that place an order: a plain click on them could complete an invoice / pay-later / saved-payment order
@@ -237,6 +237,9 @@ FIELDS.update({
     "fields": _profile_fields, "ref": _ref, "fills": _fills, "button": _ref, "amount": _amount, "currency": _currency,
     "what": _text(200, True), "url": _url, "option": _text(200, True), "approval": lambda v: _int_id(v),
     "site": _text(300, True), "card": _card_name,
+    # info.save_place: a place Ampi saves for the owner (each save asks them)
+    "entry": _card_name, "street": _text(120, True), "line2": _text(120, True), "postal": _text(12, True),
+    "city": _text(80, True), "region": _text(80, True), "country": _text(2, True), "company": _text(120, True),
 })
 
 
@@ -291,6 +294,53 @@ async def info_collect(s: Services, a: dict) -> Result:
     if not hit or side.clock() - hit[0] > REVEAL_TTL:
         raise ToolError("nothing to collect for that request (not approved, already collected, or expired)")
     return "\n".join(f"{k}: {v}" for k, v in hit[1].items())
+
+
+async def _resolve_save_place(s: Services, a: dict) -> dict:
+    """Before asking the owner: a valid name (not a card, person or note), a valid address, and its location from
+    Google Maps (one lookup) so searches near it work. The coordinates stay on the server."""
+    side = cs(s)
+    name = check_name(str(a.get("entry") or ""))
+    existing = side.vault.entry(name)
+    if existing and existing["type"] != "place":
+        raise ToolError(f"{name} is a {existing['type']}; Ampi can only save places")
+    address = {"line1": a.get("street"), "line2": a.get("line2"), "postal": a.get("postal"), "city": a.get("city"),
+               "region": a.get("region"), "country": str(a.get("country") or "").upper()}
+    address = check_entry("place", {"address": {k: v for k, v in address.items() if v}})["address"]
+    location = None
+    m = getattr(s, "maps_client", None)
+    if m is not None and getattr(m, "api_key", None):
+        try:
+            data = await m.search(_address_full(address), limit=1)
+            for p in data.get("places") or []:
+                loc = (p.get("location") or {}) if isinstance(p, dict) else {}
+                if loc.get("latitude") is not None:
+                    location = f"{loc['latitude']},{loc['longitude']}"
+                    break
+        except ToolError:
+            location = None
+    return {"resolved": {"entry": name, "address": address, "company": a.get("company"), "location": location,
+                         "replaces": bool(existing and existing["fields"].get("address"))}}
+
+
+async def describe_save_place(s: Services, a: dict) -> str:
+    r = a.get("resolved") or {}
+    what = "Replace the address of" if r.get("replaces") else ("Update" if cs(s).vault.entry(r.get("entry", "")) else "Save")
+    lines = [f"{what} your place “{r.get('entry')}” in personal info:", f"  {clean(_address_full(r.get('address') or {}), 300)}"]
+    if r.get("company"):
+        lines.append(f"  Company: {clean(r['company'], 120)}")
+    lines.append("  Location: found on Google Maps (searches near it will work)" if r.get("location")
+                 else "  Location: not found (forms will work; Maps/Wolt searches near it won't)")
+    lines.append("Ampi can then use it by name (forms, Maps, Wolt) without seeing it again; you can remove it with "
+                 "`ampi-tools info-delete` on the server.")
+    return "\n".join(lines)
+
+
+async def info_save_place(s: Services, a: dict) -> Result:
+    r = a["resolved"]
+    replaced = cs(s).vault.save_place(r["entry"], r["address"], r.get("company"), r.get("location"))
+    where = " Searches near it work." if r.get("location") else " (No location: Maps/Wolt searches near it won't work.)"
+    return f"{'Updated' if replaced else 'Saved'} the place “{r['entry']}”.{where}"
 
 
 async def info_revoke(s: Services, a: dict) -> Result:
@@ -698,6 +748,7 @@ CHECKOUT_OPS = [
     Op("info.reveal", True, info_reveal, describe_reveal, "SHOW personal info to Ampi"),
     Op("info.collect", False, info_collect),
     Op("info.revoke", False, info_revoke),
+    Op("info.save_place", True, info_save_place, describe_save_place, "SAVE a place in personal info"),
     Op("payment.log", False, payment_log),
     Op("checkout.open", False, _simple("open", "url")),
     Op("checkout.snapshot", False, _simple("snapshot")),
@@ -710,5 +761,6 @@ CHECKOUT_OPS = [
     Op("checkout.pay", True, checkout_pay, describe_pay, "PAY"),
 ]
 OPS.update({op.name: op for op in CHECKOUT_OPS})
-PRE_RESOLVE.update({"checkout.fill": _resolve_fill, "checkout.pay": _resolve_pay, "info.reveal": _resolve_reveal})
-_ops.ALWAYS_CRITICAL = ALWAYS_CRITICAL | {"info.reveal", "checkout.pay"}
+PRE_RESOLVE.update({"checkout.fill": _resolve_fill, "checkout.pay": _resolve_pay, "info.reveal": _resolve_reveal,
+                    "info.save_place": _resolve_save_place})
+_ops.ALWAYS_CRITICAL = ALWAYS_CRITICAL | {"info.reveal", "checkout.pay", "info.save_place"}

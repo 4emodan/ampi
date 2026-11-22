@@ -305,3 +305,43 @@ def test_named_places_in_wolt_and_maps(tmp_path):
                                                             "places_allowed": places}))
     assert m.calls[-1] == ("35.17000,33.36000", "34.68000,33.04000") and "from work to mom" in out
     assert "35.17" not in out and "34.68" not in out
+
+
+# --- Ampi saves places (each save asks the owner) ---------------------------------------------------------------
+
+def test_ampi_saves_a_place_after_approval(tmp_path):
+    d, side, _ = make(tmp_path)
+
+    class M:
+        api_key = "k"
+        async def search(self, q, **kw):
+            return {"places": [{"location": {"latitude": 35.16, "longitude": 33.35}}]}
+    d.services.maps_client = M()
+    args = dict(entry="gym", street="Gym Street 5", city="Nicosia", country="cy", company="FitCo")
+    res = run(d.run(req("info.save_place", **args), None, origin="private"))
+    assert res["approval"] and "Save your place “gym”" in res["text"] and "found on Google Maps" in res["text"]
+    assert side.vault.entry("gym") is None  # nothing before the owner taps
+    out = approve(d, res)
+    assert out["status"] == "done" and "Saved the place “gym”" in out["text"]
+    e = side.vault.entry("gym")
+    assert e["fields"]["location"] == "35.16000,33.35000" and e.get("search")
+    assert d.places_for("private")["gym"] == "35.16000,33.35000"
+    # Replacing an address drops the old location unless a new one is found, and says it replaces
+    d.services.maps_client = None
+    res = run(d.run(req("info.save_place", entry="gym", street="New Road 1", city="Limassol", country="CY"), None,
+                    origin="private"))
+    assert "Replace the address of" in res["text"] and "not found" in res["text"]
+    approve(d, res)
+    assert "location" not in side.vault.entry("gym")["fields"] and side.vault.value("gym.address.city") == "Limassol"
+
+
+def test_ampi_cannot_save_over_other_kinds_or_outside_private(tmp_path):
+    d, side, _ = make(tmp_path)
+    with pytest.raises(ToolError, match="only save places"):
+        run(d.run(req("info.save_place", entry="me", street="x 1", city="y", country="CY"), None, origin="private"))
+    with pytest.raises(ToolError):
+        run(d.run(req("info.save_place", entry="card", street="x 1", city="y", country="CY"), None, origin="private"))
+    with pytest.raises(ToolError):
+        run(d.run(req("info.save_place", entry="gym", street="x 1", city="y", country="CY"), None,
+                  origin="group:clipboard"))
+    assert "info.save_place" in ws.NOT_FOR_WATCHERS

@@ -112,7 +112,7 @@ CHECKOUT_LIMIT_KEYS = ("max_amount", "per_week", "per_month", "card", "item")  #
 # Management operations a watcher never uses (they change Ampi's own permissions or are chat-only helpers).
 # Personal info is never handed to a watcher (an AI step could pass it on); checkout.fill still fills it by reference.
 NOT_FOR_WATCHERS = frozenset({"telegram.revoke", "telegram.permissions", "info.revoke", "approvals.list",
-                              "info.fields", "info.reveal", "info.collect", "payment.log"})
+                              "info.fields", "info.reveal", "info.collect", "info.save_place", "payment.log"})
 # A route that is variable on one of these makes the watcher high risk even when the op itself is medium.
 SENDS_OUT = frozenset({"telegram.send", "youtube.add", "todoist.add", "todoist.move", "todoist.add_section",
                        "wolt.basket", "wolt.basket_replace"})
