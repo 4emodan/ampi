@@ -449,8 +449,17 @@ class Daemon:
         for o in ops:
             if o["op"].startswith("maps."):
                 o["args"]["places_allowed"] = places
-            elif o["op"].startswith("wolt.") and not o["args"].get("lat_lng"):
-                o["args"]["lat_lng"] = latlng(places["home"]) if places.get("home") else None
+            elif o["op"].startswith("wolt."):
+                name = o["args"].pop("place", None)
+                if name:
+                    from .ops_maps import _place_name
+                    key = _place_name(name, places)
+                    if key is None:
+                        raise ToolError(f"no place “{clean(name, 40)}” for searches here (the owner's places: "
+                                        f"{', '.join(sorted(places)) or 'none set up, or not in this chat'})")
+                    o["args"]["lat_lng"] = latlng(places[key])
+                elif not o["args"].get("lat_lng"):
+                    o["args"]["lat_lng"] = latlng(places["home"]) if places.get("home") else None
 
     async def decide(self, approval_id: int, approve: bool, nonce: str, message_id: int | None,
                      always: bool = False, choice: str | None = None, confirmed: bool = False) -> dict:

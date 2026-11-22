@@ -400,15 +400,18 @@ def wolt_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("venues", help="restaurants and shops delivering near the owner")
     s.add_argument("query", nargs="?", help="e.g. sushi, pizza, pharmacy")
     s.add_argument("--near", help="lat,lng (default: the owner's home area)")
+    s.add_argument("--at", help="one of the owner's places by name, e.g. work (instead of --near)")
     s.add_argument("--open", action="store_true", help="only venues taking orders now")
     s.add_argument("-n", "--limit", type=int, default=15)
     s = sub.add_parser("dishes", help="search dishes and products across venues")
     s.add_argument("query")
     s.add_argument("--near")
+    s.add_argument("--at", help="one of the owner's places by name, e.g. work")
     s.add_argument("-n", "--limit", type=int, default=20)
     s = sub.add_parser("venue", help="hours, open now, delivery estimate, minimum order, fees")
     s.add_argument("venue", help="slug or wolt.com link")
     s.add_argument("--near")
+    s.add_argument("--at", help="one of the owner's places by name, e.g. work")
     s = sub.add_parser("menu", help="a venue's menu (shops: --search)")
     s.add_argument("venue")
     s.add_argument("--search")
@@ -422,6 +425,7 @@ def wolt_parser() -> argparse.ArgumentParser:
     s.add_argument("-f", "--file", required=True, help='JSON list: [{"id": ITEM_ID, "count": 1, "options": {...}}]')
     s.add_argument("--replace", action="store_true", help="replace an existing basket there (asks the owner)")
     s.add_argument("--near", help="lat,lng of the delivery area (default: the owner's home area)")
+    s.add_argument("--at", help="deliver to one of the owner's places by name, e.g. work")
     sub.add_parser("status", help="setup")
     sub.add_parser("approvals", help="recent approval requests and their outcome")
     return p
@@ -430,12 +434,15 @@ def wolt_parser() -> argparse.ArgumentParser:
 def wolt_ops(a: argparse.Namespace) -> list[dict]:
     c = a.cmd
     near = getattr(a, "near", None)
+    at = getattr(a, "at", None)
+    if near and at:
+        raise SystemExit("wolt: give --near or --at, not both")
     if c == "venues":
-        return _op("wolt.venues", query=a.query, lat_lng=near, open=a.open, limit=a.limit)
+        return _op("wolt.venues", query=a.query, lat_lng=near, place=at, open=a.open, limit=a.limit)
     if c == "dishes":
-        return _op("wolt.dishes", query=a.query, lat_lng=near, limit=a.limit)
+        return _op("wolt.dishes", query=a.query, lat_lng=near, place=at, limit=a.limit)
     if c == "venue":
-        return _op("wolt.venue", venue=a.venue, lat_lng=near)
+        return _op("wolt.venue", venue=a.venue, lat_lng=near, place=at)
     if c == "menu":
         return _op("wolt.menu", venue=a.venue, search=a.search)
     if c == "item":
@@ -449,7 +456,8 @@ def wolt_ops(a: argparse.Namespace) -> list[dict]:
             items = json.loads(workspace_file(a.file, 20_000))
         except ValueError:
             raise SystemExit(f"wolt basket: {a.file} isn't valid JSON") from None
-        return _op("wolt.basket_replace" if a.replace else "wolt.basket", venue=a.venue, items=items, lat_lng=near)
+        return _op("wolt.basket_replace" if a.replace else "wolt.basket", venue=a.venue, items=items, lat_lng=near,
+                   place=at)
     if c == "status":
         return _op("wolt.status")
     raise SystemExit(f"unknown command {c}")

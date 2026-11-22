@@ -346,7 +346,7 @@ final check.
    ```
    `info-set NAME FIELD` changes one field (e.g. `info-set work address.line2`), `info-delete NAME` removes an entry
    and its site permissions, `info-default-card NAME` picks the card used when Ampi doesn't name one,
-   `info-search PLACE on|off` lets Maps/Wolt/routes use a place (home is on by default), `info-reveal NAME on|off`
+   `info-search PLACE on|off` decides whether Maps/Wolt/routes may use a place (on by default for every place), `info-reveal NAME on|off`
    decides whether Ampi may ask to see an entry. Locations: latitude,longitude (right-click in Google Maps) or an
    address (looked up once with your Maps key). Stored in `/home/ampitools/vault.json` (only that user can read it);
    the old `vault-set profile|card|home` commands still work. `/info` in Telegram shows the entries (masked) and the
@@ -358,7 +358,7 @@ final check.
      masked in what Ampi reads from that site.
    - **Paying**: the card is used without a separate tap, but every purchase asks (shop, amount, what, which card),
      unless a watcher's approval pre-approved it (fixed shop, card, caps per purchase/week/month; reported afterwards).
-   - **Searches near a place** (Maps, Wolt, `maps route home …`): automatic for places with searches on, only in your
+   - **Searches near a place** (Maps, Wolt, `maps route work home`, `wolt venues --at work`): automatic for places with searches on, only in your
      private chat and for watchers that declare it; coordinates never appear in what Ampi sees.
    - **Timezone**: used by schedules and Maps. `MAPS_NEAR`/`WOLT_NEAR`/`MAPS_TIMEZONE` and the profile's `timezone`
      stay as fallbacks.

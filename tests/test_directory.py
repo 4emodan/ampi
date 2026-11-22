@@ -124,7 +124,9 @@ def test_places_only_for_private_chat(tmp_path):
     d, side, _ = make(tmp_path)
     side.vault.set_entry("home", "place", {"location": "35.18,33.38"})
     side.vault.set_flag("home", "search", True)
-    add_work_and_card(side.vault)  # work has a location but searches are off
+    add_work_and_card(side.vault)  # every place is searchable by default
+    assert d.places_for("private") == {"home": "35.18000,33.38000", "work": "35.17000,33.36000"}
+    side.vault.set_flag("work", "search", False)
     assert d.places_for("private") == {"home": "35.18000,33.38000"}
     for origin in ("group:clipboard", "forwarded:private", "unknown", "watcher:old-style"):
         assert d.places_for(origin) == {}
@@ -272,3 +274,34 @@ def test_watcher_payment_item_and_monthly_cap_optional():
     spec = ws.parse({"watcher.toml": AGENT_PAY.replace(b"per_month = 1, ", b""), "prompts/p.md": b"x"})
     lim = next(e for e in ws.manifest(spec) if e.get("op") == "checkout.pay")["limits"]
     assert "per_month" not in lim and lim["item"] == "monthly fee"
+
+
+def test_named_places_in_wolt_and_maps(tmp_path):
+    d, side, _ = make(tmp_path)
+    add_work_and_card(side.vault)
+    side.vault.set_entry("mom", "place", {"location": "34.68,33.04"})
+    ops = [{"op": "wolt.venues", "args": {"place": "work"}}]
+    d._add_places(ops, "private")
+    assert ops[0]["args"]["lat_lng"] == {"latitude": 35.17, "longitude": 33.36} and "place" not in ops[0]["args"]
+    ops = [{"op": "wolt.venues", "args": {"place": "mom"}}]
+    d._add_places(ops, "private")
+    assert ops[0]["args"]["lat_lng"] == {"latitude": 34.68, "longitude": 33.04}
+    with pytest.raises(ToolError, match="no place"):
+        d._add_places([{"op": "wolt.venues", "args": {"place": "gym"}}], "private")
+    with pytest.raises(ToolError):
+        d._add_places([{"op": "wolt.venues", "args": {"place": "work"}}], "group:clipboard")
+    from ampi_tools import ops_maps
+    from ampi_tools.ops import Services
+
+    class M:
+        near = None
+        calls = []
+        async def route(self, o, dst, **kw):
+            self.calls.append((o, dst))
+            return {"routes": [{"duration": "600s", "distanceMeters": 4000}]}
+    m = M()
+    places = d.places_for("private")
+    out = run(ops_maps.maps_route(Services(maps_client=m), {"origin": "work", "destination": "mom",
+                                                            "places_allowed": places}))
+    assert m.calls[-1] == ("35.17000,33.36000", "34.68000,33.04000") and "from work to mom" in out
+    assert "35.17" not in out and "34.68" not in out

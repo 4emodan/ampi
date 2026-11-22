@@ -15,7 +15,7 @@ checkout fill f0:4=me.email f0:6=me.name f0:9=home.address.line1 f0:10=home.addr
                                               fill fields in the checkout browser (see the payment skill); asks
 info reveal work.address.full -m "why"        see a value yourself: asks the owner EVERY time; rarely needed
 info revoke SITE | all                        remove a site permission when the owner asks
-maps route home "Larnaca Airport"             places by name in maps (home/work, if the owner switched searches on)
+maps route work home / wolt venues --at work  places by name in Maps and Wolt (home, work, any place the owner added)
 ```
 
 Field names are `entry.field`: `me.name`, `me.first_name`, `me.last_name`, `me.email`, `me.phone`,

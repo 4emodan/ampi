@@ -8,8 +8,8 @@ description: Find restaurants, shops and dishes on Wolt near the owner, read men
 Run `wolt` with the Bash tool: one command per call, no pipes or `&&`.
 
 ```
-wolt venues ["QUERY"] [--open] [--near LAT,LNG] [-n 15]   restaurants/shops delivering to the owner
-wolt dishes "QUERY" [--near LAT,LNG]                      dishes and products across venues
+wolt venues ["QUERY"] [--open] [--at PLACE | --near LAT,LNG] [-n 15]   restaurants/shops delivering to the owner
+wolt dishes "QUERY" [--at PLACE | --near LAT,LNG]         dishes and products across venues
 wolt venue SLUG                                           hours, open now, delivery time, minimum order, fees
 wolt menu SLUG [--search TEXT]                            the menu with item ids (shops: always --search)
 wolt item SLUG ITEM_ID                                    an item's choices (required ones must be picked)
@@ -46,3 +46,5 @@ suggests it.
 - Allergies and diets: menus may be incomplete; tell the owner to check with the venue when it matters.
 - Without the owner's Wolt login, lookups still work but `orders`, `order` and `basket` don't; then give the
   owner the venue link and the exact items to add themselves.
+
+Places: by default everything is near the owner's home. `--at work` (or any of the owner's places by name, e.g. `--at mom`) searches, checks delivery or fills the basket for that place instead; the server knows where it is, you never see the address or coordinates. Works only in the owner's own chat.

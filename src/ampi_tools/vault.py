@@ -338,7 +338,7 @@ class Vault:
             e = {"name": name, "type": kind, "fields": check_entry(kind, fields), "revealable": kind != "card",
                  "created": self.clock()}
             if kind == "place":
-                e["search"] = name == "home"
+                e["search"] = True  # Maps/Wolt/routes may use it (owner's private chat only); info-search … off
             data["entries"][eid] = e
             if kind == "card" and not data.get("default_card"):
                 data["default_card"] = eid
