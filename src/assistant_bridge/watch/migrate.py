@@ -108,7 +108,7 @@ async def migrate(engine: Any) -> list[str]:
             error = str(resp.get("error") or "")
             if resp.get("ok"):
                 done.append(w.name)
-            elif "already waiting" not in error and "already approved" not in error:
+            elif not error.startswith("a proposal for") and "already approved" not in error:
                 log.warning("[%s] couldn't propose converted watcher %s: %s", profile.name, w.name, error)
                 continue  # try again on the next start
             engine.db.set_trigger_state(profile.name, MARKER, w.name, {"proposed": bool(resp.get("ok"))})
