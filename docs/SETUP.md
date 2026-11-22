@@ -210,8 +210,8 @@ Google Maps links you send. Without a key, the assistant can still give you Goog
    MAPS_API_KEY=AIza...
    MAPS_LANGUAGE=en          # language of the answers
    MAPS_REGION=FI            # your country (two letters), for ambiguous names
-   MAPS_NEAR=60.1699,24.9384 # optional: your home area, searches prefer places near it
-   MAPS_TIMEZONE=Europe/Helsinki
+   MAPS_NEAR=60.1699,24.9384 # optional fallback; better: your home in personal info (`vault-set home`, section 8e)
+   MAPS_TIMEZONE=Europe/Helsinki  # fallback; personal info's timezone wins
    ```
 6. `systemctl restart ampi-tools`, `ampi-tools check`, add `"Bash(maps:*)"` to `allowed_tools`, restart
    `claude-assistant`.
@@ -339,7 +339,18 @@ final check.
    sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools vault-set card'
    sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools vault-show'      # masked
    ```
-   `vault-clear card|profile` removes them. They're kept in `/home/ampitools/vault.json` (only that user can read it).
+   `vault-clear card|profile|home` removes them. They're kept in `/home/ampitools/vault.json` (only that user can read it).
+
+   **Home location and timezone** go in personal info too:
+   ```bash
+   sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools vault-set home'
+   systemctl restart ampi-tools claude-assistant
+   ```
+   Give latitude,longitude (right-click your home in Google Maps) or an address (looked up once with your Maps
+   key), and a timezone such as `Europe/Nicosia`. Unlike the rest of personal info, these are used by the server
+   without asking: Maps and Wolt search near home, `maps route` understands "home" (the coordinates never appear
+   in what Ampi sees), and watchers' schedules use the timezone. Ampi can't read either value. They replace
+   `MAPS_NEAR`/`WOLT_NEAR`/`MAPS_TIMEZONE` and the profile's `timezone` in `config.toml`, which stay as fallbacks.
 3. Limits in `/home/ampitools/config.toml`:
    ```toml
    [payment]

@@ -72,7 +72,11 @@ def _place_lines(data: dict) -> list[tuple[str, str]]:
 async def maps_search(s: Services, a: dict) -> Result:
     (query,) = need(a, "query")
     query = place_text(query, "query")
-    data = await mp(s).search(query, near=a.get("near"), radius=a.get("radius"), limit=min(a.get("limit", 5), 10),
+    near = a.get("near")
+    if near and _is_home(near):
+        _home(s)  # says clearly when no home is set
+        near = None  # searches are centred on home by default
+    data = await mp(s).search(query, near=near, radius=a.get("radius"), limit=min(a.get("limit", 5), 10),
                               details=a.get("details", False))
     summary = str(data.get("summary") or "").strip()
     places = [p for p in _place_lines(data) if p[1]]
@@ -84,13 +88,36 @@ async def maps_search(s: Services, a: dict) -> Result:
     return f"{body}\n{sources(places)}\nAll results on a map: {search_link(query)}".lstrip()
 
 
+def _home(s: Services) -> str:
+    """The owner's home as lat,lng for the API (from personal info); never put in anything Ampi sees."""
+    near = mp(s).near
+    if not near:
+        raise ToolError("no home location is set (the owner sets it on the server: `ampi-tools vault-set home`)")
+    return f"{near['latitude']},{near['longitude']}"
+
+
+def _is_home(v: str) -> bool:
+    return v.strip().lower() in ("home", "my home", "at home")
+
+
 async def maps_route(s: Services, a: dict) -> Result:
     origin, destination = need(a, "origin", "destination")
     mode = a.get("mode", "drive")
-    data = await mp(s).route(origin, destination, mode=mode, via=a.get("via"), depart=a.get("depart"),
+    from_home, to_home = _is_home(origin), _is_home(destination)
+    api_origin = _home(s) if from_home else origin
+    api_destination = _home(s) if to_home else destination
+    data = await mp(s).route(api_origin, api_destination, mode=mode, via=a.get("via"), depart=a.get("depart"),
                              arrive=a.get("arrive"), alternatives=a.get("alternatives", False))
     routes = [r for r in data.get("routes") or [] if isinstance(r, dict)]
-    link = directions_link(origin, destination, mode, a.get("via"))
+    origin, destination = ("home" if from_home else origin), ("home" if to_home else destination)
+    if to_home:
+        # A link would carry the home coordinates; the owner's Maps app knows "Home" anyway.
+        link = "(no link for routes to home: in Google Maps, choose Home as the destination)"
+    elif from_home:
+        # Without an origin, Google Maps starts from the phone's current location.
+        link = directions_link("", destination, mode, a.get("via")).replace("origin=&", "")
+    else:
+        link = directions_link(origin, destination, mode, a.get("via"))
     if not routes:
         return f"Google Maps found no {mode} route from {origin!r} to {destination!r}.\nOpen in Google Maps: {link}"
     lines = []

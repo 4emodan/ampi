@@ -46,7 +46,7 @@ from .keeper import (
 )
 from .todoist import Todoist, ToolError
 from . import ops_social
-from .maps import Maps, latlng
+from .maps import LATLNG_RE, Maps, latlng
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
 from .vault import Vault
@@ -62,7 +62,7 @@ DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
 MAX_REQUEST = 32 * 1024 * 1024  # watcher snapshots and space files (base64) travel in one line
 # Only the bridge's main process may: answer approvals, post notices, say which claude runs exist and where
 # they come from, and say which chats the assistant reads itself.
-ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide", "notices.ack", "runs.register",
+ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide", "notices.ack", "runs.register", "home.timezone",
          "runs.unregister", "telegram.protect",
          # watchers v2: only the bridge's engine talks to the keeper
          "watch.propose", "watch.get", "watch.list", "watch.status", "watch.delete", "watch.space_get",
@@ -180,6 +180,11 @@ class Daemon:
                 # Where the request really comes from: the claude run it descends from (never what it says).
                 origin = self.runs.origin_of(pid)
                 return await self.run(ops, request.get("reason"), request.get("origin"), origin)
+            if cmd == "home.timezone":
+                # Only the bridge (schedules); Ampi never asks for it.
+                side = self.services.checkout_side
+                tz = side.vault.home().get("timezone") if side is not None else None
+                return {"ok": True, "timezone": tz}
             if cmd == "approvals.list":
                 return {"ok": True, "text": self.list_text()}
             if cmd == "approvals.status":
@@ -935,10 +940,12 @@ def build_services(client: httpx.AsyncClient, home: Path) -> Services:
         log.warning("%s=%r isn't a valid lat,lng; ignoring it", var, value)
         return ""
 
-    maps_near = env_latlng("MAPS_NEAR")
+    # Home location and timezone from personal info (vault-set home) win; the env settings are fallbacks.
+    vault_home = Vault(home).home() if (home / "vault.json").exists() else {}
+    maps_near = vault_home.get("location") or env_latlng("MAPS_NEAR")
+    tz = vault_home.get("timezone") or os.environ.get("MAPS_TIMEZONE", "").strip() or "UTC"
     services.maps_client = Maps(client, maps_key, home, language=os.environ.get("MAPS_LANGUAGE", "en").strip(),
-                                region=os.environ.get("MAPS_REGION", "").strip(), near=maps_near,
-                                tz=os.environ.get("MAPS_TIMEZONE", "").strip() or "UTC")
+                                region=os.environ.get("MAPS_REGION", "").strip(), near=maps_near, tz=tz)
     wolt_near = env_latlng("WOLT_NEAR") or maps_near
     near = latlng(wolt_near) if wolt_near else None
     services.wolt_client = Wolt(client, home, near=near, language=os.environ.get("WOLT_LANGUAGE", "en").strip())
@@ -1127,8 +1134,8 @@ def _vault_cmd(home: Path, command: str, what: str | None) -> None:
         print("\n".join(vault.masked()))
         return
     if command == "vault-clear":
-        if what not in ("card", "profile"):
-            sys.exit("vault-clear card|profile")
+        if what not in ("card", "profile", "home"):
+            sys.exit("vault-clear card|profile|home")
         vault.clear(what)
         print(f"Removed the {what}.")
         return
@@ -1155,7 +1162,48 @@ def _vault_cmd(home: Path, command: str, what: str | None) -> None:
             sys.exit(f"Not saved: {e}")
         print("Saved:\n  " + "\n  ".join(vault.masked()[:4]))
         return
-    sys.exit("vault-set card|profile")
+    if what == "home":
+        print("Home location and timezone. The server uses them (Maps and Wolt near home, schedules); Ampi never "
+              "sees them. Enter to keep the current value.")
+        current = vault.home()
+        loc = input(f"Home location: latitude,longitude or an address [{'set' if current.get('location') else 'not set'}]: ").strip()
+        if loc and not LATLNG_RE.fullmatch(loc):
+            loc = _geocode(loc)
+        tz = input(f"Timezone, e.g. Europe/Nicosia [{current.get('timezone', 'not set')}]: ").strip()
+        try:
+            vault.set_home({k: v for k, v in (("location", loc), ("timezone", tz)) if v})
+        except ToolError as e:
+            sys.exit(f"Not saved: {e}")
+        print("Saved:\n  " + "\n  ".join(vault.masked()[-3:-1]) + "\nNow: systemctl restart ampi-tools claude-assistant")
+        return
+    sys.exit("vault-set card|profile|home")
+
+
+def _geocode(address: str) -> str:
+    """One Maps lookup to turn an address into lat,lng (only when the owner enters an address in vault-set home)."""
+    key = os.environ.get("MAPS_API_KEY", "").strip()
+    if not key:
+        sys.exit("Looking up an address needs MAPS_API_KEY in the env file; or enter latitude,longitude.")
+
+    async def lookup() -> str:
+        async with httpx.AsyncClient() as client:
+            m = Maps(client, key, Path.home(), language=os.environ.get("MAPS_LANGUAGE", "en").strip(),
+                     region=os.environ.get("MAPS_REGION", "").strip())
+            data = await m.search(address, limit=1)
+        for p in data.get("places") or []:
+            loc = (p.get("location") or {}) if isinstance(p, dict) else {}
+            if loc.get("latitude") is not None:
+                return f"{loc['latitude']},{loc['longitude']}"
+        return ""
+
+    try:
+        found = asyncio.run(lookup())
+    except ToolError as e:
+        sys.exit(f"Couldn't look up the address: {e}")
+    if not found:
+        sys.exit("Google Maps didn't find that address; try a fuller address or enter latitude,longitude.")
+    print(f"Found it (Google Maps). Using those coordinates.")
+    return found
 
 
 def main(argv: list[str] | None = None) -> None:

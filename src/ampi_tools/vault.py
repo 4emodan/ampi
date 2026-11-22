@@ -94,6 +94,33 @@ def check_profile(p: dict) -> dict:
     return out
 
 
+LATLNG = re.compile(r"\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*")
+
+
+def check_home(h: dict) -> dict:
+    """Home location ("lat,lng") and timezone (IANA name). Used by the server itself (Maps and Wolt searches near
+    home, schedules and times); never handed to Ampi."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    out: dict[str, str] = {}
+    loc = str(h.get("location") or "").strip()
+    if loc:
+        m = LATLNG.fullmatch(loc)
+        if not m or not (-90 <= float(m.group(1)) <= 90 and -180 <= float(m.group(2)) <= 180):
+            raise ToolError("home location: latitude,longitude, e.g. 35.1856,33.3823")
+        out["location"] = f"{float(m.group(1)):.5f},{float(m.group(2)):.5f}"
+    tz = str(h.get("timezone") or "").strip()
+    if tz:
+        try:
+            ZoneInfo(tz)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ToolError(f"unknown timezone {tz!r} (e.g. Europe/Nicosia)") from None
+        out["timezone"] = tz
+    if not out:
+        raise ToolError("give a home location, a timezone, or both")
+    return out
+
+
 def check_card(c: dict, today: date | None = None) -> dict:
     number = re.sub(r"[ \-]", "", str(c.get("number") or ""))
     if not luhn_ok(number) or len(number) < 13:
@@ -154,6 +181,16 @@ class Vault:
         data = self.load()
         data["profile"] = check_profile(profile)
         self.save(data)
+
+    def set_home(self, home: dict) -> None:
+        data = self.load()
+        data["home"] = {**(data.get("home") or {}), **check_home(home)}
+        self.save(data)
+
+    def home(self) -> dict:
+        """{"location": "lat,lng", "timezone": "Area/City"} as far as set. Daemon-internal only."""
+        h = self.load().get("home")
+        return dict(h) if isinstance(h, dict) else {}
 
     def set_card(self, card: dict) -> None:
         data = self.load()
@@ -220,6 +257,9 @@ class Vault:
             lines.append(f"address: set ({a.get('city', '?')[:1]}…, {a.get('country', '?')})")
         else:
             lines.append("personal details: not stored")
+        h = data.get("home") or {}
+        lines.append(f"home location: {'set (used by Maps and Wolt on the server; not readable)' if h.get('location') else 'not set'}")
+        lines.append(f"timezone: {'set (used for schedules and times; not readable)' if h.get('timezone') else 'not set'}")
         lines.append(f"card: {self.card_mask()}")
         return lines
 

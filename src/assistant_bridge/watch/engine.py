@@ -83,6 +83,7 @@ class WatchEngine:
         self._draining: dict[str, asyncio.Task] = {}
         self._background: set[asyncio.Task] = set()
         self.streak_since: dict[str, str] = {}
+        self.home_timezone: str | None = None  # from personal info (vault-set home), via ampi-tools
         self.build_count: dict[str, int] = {}
         self.test_count: dict[str, int] = {}
 
@@ -146,6 +147,24 @@ class WatchEngine:
                 log.exception("[%s] watcher engine loop failed; continuing", self.profile.name)
             await asyncio.sleep(5)
 
+    @property
+    def timezone(self) -> str:
+        """The owner's timezone: personal info if set there, else the profile's config."""
+        return self.home_timezone or self.profile.timezone
+
+    async def _refresh_timezone(self) -> None:
+        resp = await self.tools({"cmd": "home.timezone"})
+        tz = resp.get("timezone") if resp.get("ok") else None
+        if isinstance(tz, str) and tz != self.home_timezone:
+            try:
+                from ..config import zone
+                zone(tz)
+            except Exception:  # noqa: BLE001
+                log.warning("[%s] ignoring unknown timezone %r from personal info", self.profile.name, tz)
+                return
+            log.info("[%s] timezone from personal info: %s", self.profile.name, tz)
+            self.home_timezone = tz
+
     async def sync_soon(self) -> None:
         async with self._sync_lock:
             await self.sync()
@@ -157,6 +176,7 @@ class WatchEngine:
                 log.warning("[%s] watch.list: %s", self.profile.name, resp.get("error"))
             return
         self._synced = True
+        await self._refresh_timezone()
         seen = set()
         for info in resp.get("watchers", []):
             name, status = info.get("name"), info.get("status")
@@ -237,7 +257,7 @@ class WatchEngine:
                 state = self.db.trigger_state(self.profile.name, w.name, ident)
                 items, new_state = await trig.poll(
                     t, state, ask=self._trusted_tools, ask_tg=self._ask_tg, browse=self.pipeline.svc.browse,
-                    tz=self.profile.timezone)
+                    tz=self.timezone)
                 if items:
                     self.db.enqueue(self.profile.name, w.name, ident, t["type"], items, t["ttl_minutes"],
                                     t["latest_only"])
@@ -593,12 +613,12 @@ class WatchEngine:
                         "web.change"):
                 items, _ = await trig.poll(t, {"seen": [], "channels": [], "last_id": 0, "hash": "", "lines": []},
                                            ask=self._trusted_tools, ask_tg=self._ask_tg,
-                                           browse=self.pipeline.svc.browse, tz=self.profile.timezone)
+                                           browse=self.pipeline.svc.browse, tz=self.timezone)
                 return items[:n]
         except Exception as e:  # noqa: BLE001
             return [{"_sample_error": str(e)[:300]}]
         if kind == "time.at":
-            return [{"slot": now().strftime("%A %Y-%m-%d %H:%M"), "timezone": self.profile.timezone,
+            return [{"slot": now().strftime("%A %Y-%m-%d %H:%M"), "timezone": self.timezone,
                      "time": iso(now())}]
         return [{"time": iso(now()), "manual": kind == "manual"}]
 
