@@ -333,24 +333,35 @@ final check.
    ```bash
    sudo bash deploy/install-checkout.sh
    ```
-2. Enter your details on the server (the card number and CVC aren't shown as you type; nobody else ever sees them):
+2. Enter your details on the server, as a **personal info directory** of named entries: `me` (person), places
+   (`home`, `work`, …), cards (`card-main`, …) and notes. Secret card values aren't shown as you type.
    ```bash
-   sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools vault-set profile'
-   sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools vault-set card'
-   sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools vault-show'      # masked
-   ```
-   `vault-clear card|profile|home` removes them. They're kept in `/home/ampitools/vault.json` (only that user can read it).
-
-   **Home location and timezone** go in personal info too:
-   ```bash
-   sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools vault-set home'
+   T='sudo -u ampitools -H bash -c'
+   $T 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools info-set me'          # name, email, phone, birthday
+   $T 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools info-set home'        # address, location, timezone
+   $T 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools info-set work'        # company, address, location
+   $T 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools info-set card-main'   # number, expiry, CVC, name, label
+   $T 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools info-show'            # masked
    systemctl restart ampi-tools claude-assistant
    ```
-   Give latitude,longitude (right-click your home in Google Maps) or an address (looked up once with your Maps
-   key), and a timezone such as `Europe/Nicosia`. Unlike the rest of personal info, these are used by the server
-   without asking: Maps and Wolt search near home, `maps route` understands "home" (the coordinates never appear
-   in what Ampi sees), and watchers' schedules use the timezone. Ampi can't read either value. They replace
-   `MAPS_NEAR`/`WOLT_NEAR`/`MAPS_TIMEZONE` and the profile's `timezone` in `config.toml`, which stay as fallbacks.
+   `info-set NAME FIELD` changes one field (e.g. `info-set work address.line2`), `info-delete NAME` removes an entry
+   and its site permissions, `info-default-card NAME` picks the card used when Ampi doesn't name one,
+   `info-search PLACE on|off` lets Maps/Wolt/routes use a place (home is on by default), `info-reveal NAME on|off`
+   decides whether Ampi may ask to see an entry. Locations: latitude,longitude (right-click in Google Maps) or an
+   address (looked up once with your Maps key). Stored in `/home/ampitools/vault.json` (only that user can read it);
+   the old `vault-set profile|card|home` commands still work. `/info` in Telegram shows the entries (masked) and the
+   site permissions, with buttons to remove them.
+
+   How each use works:
+   - **Ampi sees a value** (`info reveal`): asks you every time; cards, locations and timezones never.
+   - **Filling a form**: asks; "✅ + always here" = exactly those fields on exactly that site for 30 days. Values stay
+     masked in what Ampi reads from that site.
+   - **Paying**: the card is used without a separate tap, but every purchase asks (shop, amount, what, which card),
+     unless a watcher's approval pre-approved it (fixed shop, card, caps per purchase/week/month; reported afterwards).
+   - **Searches near a place** (Maps, Wolt, `maps route home …`): automatic for places with searches on, only in your
+     private chat and for watchers that declare it; coordinates never appear in what Ampi sees.
+   - **Timezone**: used by schedules and Maps. `MAPS_NEAR`/`WOLT_NEAR`/`MAPS_TIMEZONE` and the profile's `timezone`
+     stay as fallbacks.
 3. Limits in `/home/ampitools/config.toml`:
    ```toml
    [payment]

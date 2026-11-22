@@ -143,7 +143,7 @@ def test_menu_lists_ids_prices_and_required_choices(tmp_path):
 
 
 def test_venue_details(tmp_path):
-    ok, text = op(make(FakeWolt(), tmp_path), "wolt.venue", venue="noodle-story-kamppi")
+    ok, text = op(make(FakeWolt(), tmp_path), "wolt.venue", venue="noodle-story-kamppi", lat_lng="60.17,24.94")
     assert ok and "Minimum order: 10.00 €" in text and "Now: Open until 20:45" in text and "20-30 min" in text
     assert "On Wolt: https://wolt.com/fi/fin/helsinki/restaurant/noodle-story-kamppi" in text
 

@@ -152,7 +152,7 @@ async def wolt_venue(s: Services, a: dict) -> Result:
         lines.append(f"  Delivery from {money(fees['delivery_price'], currency)} (more with distance)")
     if v.get("service_fee_short_description"):
         lines.append(f"  {one_line(v['service_fee_short_description'], 100)}")
-    if w.near or a.get("lat_lng"):
+    if a.get("lat_lng"):
         dyn = (await w.venue_dynamic(venue, a.get("lat_lng"))).get("venue") or {}
         status = (dyn.get("delivery_open_status") or dyn.get("open_status") or {})
         lines.append(f"  Now: {one_line(status.get('value'), 60) or ('online' if dyn.get('online') else 'offline')}")
@@ -282,7 +282,7 @@ async def _resolve_basket(s: Services, a: dict, replace: bool) -> dict:
                           if isinstance(o, dict) and o.get("id") not in
                           {x.get("id") for x in assortment.get("options") or [] if isinstance(x, dict)}]}
     payload, lines, total = build_basket(assortment, v, wanted)
-    loc = a.get("lat_lng") or w.near or _venue_location(st)
+    loc = a.get("lat_lng") or _venue_location(st)
     existing = await _has_basket(w, v["id"], loc)
     if existing and not replace:
         raise ToolError(_EXISTING)

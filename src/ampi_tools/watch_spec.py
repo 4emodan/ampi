@@ -108,7 +108,7 @@ WRITE_OPS: dict[str, OpInfo] = {
     "checkout.fill": OpInfo("high", route=("site",)),
     "checkout.pay": OpInfo("high", route=("site",)),
 }
-CHECKOUT_LIMIT_KEYS = ("max_amount", "per_week")  # extra keys of a declared checkout.pay action
+CHECKOUT_LIMIT_KEYS = ("max_amount", "per_week", "per_month", "card", "item")  # extra keys of a declared checkout.pay
 # Management operations a watcher never uses (they change Ampi's own permissions or are chat-only helpers).
 # Personal info is never handed to a watcher (an AI step could pass it on); checkout.fill still fills it by reference.
 NOT_FOR_WATCHERS = frozenset({"telegram.revoke", "telegram.permissions", "info.revoke", "approvals.list",
@@ -501,6 +501,11 @@ def _declared_action(a: Any, where: str) -> dict:
     if op == "checkout.pay":
         _num(a.get("max_amount"), f"{where}.max_amount", 0.01, 100000)
         _num(a.get("per_week", 1), f"{where}.per_week", 1, 50)
+        _num(a.get("per_month", 1), f"{where}.per_month", 1, 200)
+        if "card" in a and (not isinstance(a["card"], str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", a["card"])):
+            raise SpecError(f"{where}.card: the card entry's name, e.g. card-main")
+        if "item" in a:
+            _str(a["item"], f"{where}.item", 120)
     # A declared route is either a fixed value or a list of allowed values (an allowlist); "*" means any.
     return dict(a)
 
@@ -639,6 +644,7 @@ class Spec:
     limits: dict
     files: dict[str, bytes] = field(repr=False, default_factory=dict)
     hash: str = ""
+    uses: list[str] = field(default_factory=list)  # personal info entries/fields it may use (by reference only)
 
 
 LIMIT_DEFAULTS = {"runs_per_day": 200, "llm_calls_per_day": 50, "actions_per_day": 50, "run_timeout": 300}
@@ -652,13 +658,17 @@ def parse(files: dict[str, bytes], expected_name: str | None = None) -> Spec:
         raw = tomllib.loads(text_of(files, "watcher.toml"))
     except tomllib.TOMLDecodeError as e:
         raise SpecError(f"watcher.toml: {e}") from None
-    _only(raw, {"name", "description", "triggers", "steps", "limits"}, "watcher.toml")
+    _only(raw, {"name", "description", "triggers", "steps", "limits", "uses"}, "watcher.toml")
     name = raw.get("name")
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
         raise SpecError("name: lowercase letters, digits, - or _ (up to 40)")
     if expected_name is not None and name != expected_name:
         raise SpecError(f"name in watcher.toml is {name!r}, expected {expected_name!r}")
     description = _str(raw.get("description"), "description", 500)
+    uses = _str_list(raw.get("uses", []), "uses", 60, 20)
+    for u in uses:
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}(\.[a-z0-9_]{1,20}){0,2}", u):
+            raise SpecError(f"uses: {u!r} isn't a personal info entry or field (like home.location, me.email, card-main)")
     triggers = raw.get("triggers")
     if not isinstance(triggers, list) or not 1 <= len(triggers) <= 5:
         raise SpecError("a watcher needs 1-5 [[triggers]]")
@@ -682,7 +692,7 @@ def parse(files: dict[str, bytes], expected_name: str | None = None) -> Spec:
     if unused:
         raise SpecError(f"files not used by any step: {', '.join(unused)} (remove them)")
     return Spec(name=name, description=description, triggers=trig, steps=out_steps, limits=limits,
-                files=dict(files), hash=snapshot_hash(files))
+                files=dict(files), hash=snapshot_hash(files), uses=uses)
 
 
 # --- the manifest and risk --------------------------------------------------------------------------------
@@ -705,7 +715,10 @@ def _declared_entries(s: dict, by: str) -> list[dict]:
         entry = {"kind": "action", "step": s["id"], "op": a["op"], "write": is_write(a["op"]),
                  "route": route, "subject": {}, "declared_by": by}
         if a["op"] == "checkout.pay":
-            entry["limits"] = {"max_amount": float(a["max_amount"]), "per_week": int(a.get("per_week", 1))}
+            entry["limits"] = {"max_amount": float(a["max_amount"]), "per_week": int(a.get("per_week", 1)),
+                               "per_month": int(a.get("per_month", 1)),
+                               **({"card": a["card"]} if a.get("card") else {}),
+                               **({"item": a["item"]} if a.get("item") else {})}
         out.append(entry)
     return out
 
@@ -713,6 +726,8 @@ def _declared_entries(s: dict, by: str) -> list[dict]:
 def manifest(spec: Spec) -> list[dict]:
     """Everything the watcher can do. Route values: a fixed value, a list (allowlist), "*" or None (variable)."""
     out: list[dict] = []
+    if spec.uses:
+        out.append({"kind": "uses", "uses": list(spec.uses)})
     for t in spec.triggers:
         out.append({"kind": "trigger", "type": t["type"], **{k: v for k, v in t.items() if k != "type"}})
     for s in spec.steps:
@@ -863,9 +878,16 @@ def describe(spec: Spec, entries: list[dict]) -> str:
     if grants:
         lines.append("Actions it can take (granted together with \"allow all\"):")
         for g in grants:
-            lines.append(f"  · {g['op']}" + (f" → {_route_text(g['route'])}" if g["route"] else ""))
+            lim = g.get("limits") or {}
+            caps = (f" (at most {lim['max_amount']:g} per purchase, {lim['per_week']}/week, {lim.get('per_month', 1)}/month"
+                    + (f", card {_c(lim['card'], 30)}" if lim.get("card") else "")
+                    + (f", for {_c(lim['item'], 60)}" if lim.get("item") else "") + ")") if lim else ""
+            lines.append(f"  · {g['op']}" + (f" → {_route_text(g['route'])}" if g["route"] else "") + caps)
     else:
         lines.append("It changes nothing: it only reads and messages you.")
+    if spec.uses:
+        lines.append("Personal info it may use (filled or searched by the server; it never sees the values): "
+                     + ", ".join(_c(u, 60) for u in spec.uses))
     lim = spec.limits
     lines.append(f"Limits: {lim['runs_per_day']} runs, {lim['llm_calls_per_day']} AI calls, "
                  f"{lim['actions_per_day']} actions a day")

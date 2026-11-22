@@ -524,8 +524,9 @@ def info_parser() -> argparse.ArgumentParser:
     p.add_argument("-m", "--reason", help="why (shown to the owner)")
     p.add_argument("--wait", type=int, default=WAIT_DEFAULT)
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("fields", help="what is stored (masked) and which sites may be filled without asking")
-    sub.add_parser("reveal", help="see values (asks the owner; never the card)").add_argument("fields", nargs="+")
+    sub.add_parser("fields", help="the entries (me, home, work, cards…), masked, and which sites may fill them")
+    sub.add_parser("reveal", help="see values, e.g. me.email work.address.full (asks the owner every time; never "
+                   "cards, locations or timezones)").add_argument("fields", nargs="+")
     sub.add_parser("revoke", help="remove a site permission (or all)").add_argument("site")
     sub.add_parser("status", help="answer to a request").add_argument("approval", type=int)
     return p
@@ -574,6 +575,7 @@ def checkout_parser() -> argparse.ArgumentParser:
     s.add_argument("--amount", required=True)
     s.add_argument("--currency", required=True)
     s.add_argument("--what", required=True, help="what is bought, e.g. '2 × Pad thai, Thai Orchid'")
+    s.add_argument("--card", help="which card entry (default: the owner's default card); `info fields` lists them")
     sub.add_parser("status", help="answer to a request").add_argument("approval", type=int)
     return p
 
@@ -587,7 +589,8 @@ def checkout_main(argv: list[str] | None = None) -> int:
         return _run_waiting("checkout", _op("checkout.fill", fills=_fill_pairs(a.pairs)), a.reason, a.wait)
     if c == "pay":
         return _run_waiting("checkout", _op("checkout.pay", fills=_fill_pairs(a.pairs), button=a.button,
-                                            amount=a.amount, currency=a.currency, what=a.what), a.reason, a.wait)
+                                            amount=a.amount, currency=a.currency, what=a.what, card=a.card),
+                            a.reason, a.wait)
     args = {"open": {"url": getattr(a, "url", None)}, "click": {"ref": getattr(a, "ref", None)},
             "type": {"ref": getattr(a, "ref", None), "text": getattr(a, "text", None)},
             "choose": {"ref": getattr(a, "ref", None), "option": getattr(a, "option", None)}}.get(c, {})

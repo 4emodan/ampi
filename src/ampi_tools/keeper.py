@@ -332,6 +332,11 @@ class Keeper:
                                "('auto', 'done', 'approved', 'requested', 'failed', 'unknown')",
                                (profile, name, self.clock() - 24 * 3600)).fetchone()[0]
 
+    def pays_this_month(self, profile: str, name: str) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM audit WHERE profile=? AND name=? AND op='checkout.pay' AND at > ? "
+                               "AND status IN ('auto', 'done', 'approved', 'requested', 'unknown')",
+                               (profile, name, self.clock() - 30 * 24 * 3600)).fetchone()[0]
+
     def pays_this_week(self, profile: str, name: str) -> int:
         return self.db.execute("SELECT COUNT(*) FROM audit WHERE profile=? AND name=? AND op='checkout.pay' AND at > ? "
                                "AND status IN ('auto', 'done', 'approved', 'requested', 'unknown')",

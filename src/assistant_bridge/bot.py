@@ -38,6 +38,7 @@ COMMANDS = [
     {"command": "model", "description": "Show or set the model for this conversation"},
     {"command": "status", "description": "Show this conversation's status"},
     {"command": "watchers", "description": "List watchers (automations)"},
+    {"command": "info", "description": "Personal info (masked) and site permissions"},
     {"command": "watcher", "description": "One watcher: details, pause, resume, run, delete"},
     {"command": "help", "description": "How to use this assistant"},
 ]
@@ -49,7 +50,8 @@ HELP_TEXT = (
     "/cancel – stop the current task\n"
     "/model [name|default] – show or change the model here\n"
     "/status – session info and usage\n"
-    "/watchers – your watchers; /watcher NAME – details and buttons\n\n"
+    "/watchers – your watchers; /watcher NAME – details and buttons\n"
+    "/info – your personal info (masked) and which sites may fill it\n\n"
     "You can send photos and files; I save them to my workspace and can read them."
 )
 
@@ -168,6 +170,7 @@ class ProfileBot:
         self._watcher_slot = asyncio.Semaphore(1)
         self._stopped_by_owner: set[Key] = set()
         self.watch_ui: Any = None  # WatchUI (watchers v2), set by main
+        self.info_ui: Any = None  # InfoUI (/info), set by main
 
     # --- polling --------------------------------------------------------------------
 
@@ -365,6 +368,9 @@ class ProfileBot:
             await self._deliver(chat_id, thread_id, result, quiet_ok=group is not None)
 
     async def handle_callback(self, cq: dict) -> None:
+        if self.info_ui is not None and (cq.get("data") or "").startswith("pi:"):
+            await self.info_ui.handle_callback(cq)
+            return
         if self.watch_ui is not None and (cq.get("data") or "").startswith("wt:"):
             await self.watch_ui.handle_callback(cq)
             return
@@ -693,6 +699,12 @@ class ProfileBot:
         self.store.set_model(name, chat_id, thread_id, model)
         shown = model or self.profile.model or "Claude Code default"
         await self._send_text(chat_id, thread_id, f"Model for this conversation: {shown}", markdown=False)
+
+    async def _cmd_info(self, chat_id: int, thread_id: int, args: str) -> None:
+        if self.info_ui is None or chat_id != self.profile.owner_chat_id:
+            await self._send_text(chat_id, thread_id, "Personal info is shown only in the private chat.", markdown=False)
+            return
+        await self.info_ui.cmd_info(chat_id, thread_id)
 
     async def _cmd_watchers(self, chat_id: int, thread_id: int, args: str) -> None:
         if self.watch_ui is None or chat_id != self.profile.owner_chat_id:

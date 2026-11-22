@@ -44,6 +44,8 @@ query = "in:inbox"
 every_minutes = 5       # how often to check
 # batch = true          # one run for all new items of a check (default: one run per item)
 
+# uses = ["home.location", "me.email", "card-main"]   # personal info it may use by reference (shown to the owner)
+
 [limits]                # optional; defaults: 200 runs, 50 AI calls, 50 actions a day, run timeout 300 s
 llm_calls_per_day = 30
 
@@ -102,6 +104,13 @@ Common: `every_minutes`, `batch`, `ttl_minutes` (default a day), `latest_only` (
 - `web`: `url` (fixed https), `max_chars`. Output: `text`.
 Every step: `when = { path = "steps.x.field", equals | in | not_in | exists | true | false = ... }`,
 `on_error = "continue"`, `timeout`.
+
+### Personal info
+A watcher never sees personal values. It may use, by reference, only what `uses` lists: places for Maps/Wolt
+searches near them (`home.location`), fields to fill in a checkout (`me.email`, `home.address.*` as entries), and
+cards to pay with. Pre-approved payments: an agent step declaring
+`actions = [{ op = "checkout.pay", site = "https://shop.example", max_amount = 40, per_week = 1, per_month = 1,
+card = "card-main", item = "monthly fee" }]`; every purchase is reported to the owner.
 
 ### Templates
 `{{item.subject}}`, `{{steps.summary.summary}}`, `{{run.date}}`, `{{watcher.name}}`. A value that is exactly one

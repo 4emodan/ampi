@@ -356,7 +356,8 @@ class Maps:
     # --- the tools -----------------------------------------------------------------------
 
     async def search(self, query: str, *, near: str | None = None, radius: int | None = None, limit: int = 5,
-                     details: bool = False) -> dict:
+                     details: bool = False, bias: dict | None = None) -> dict:
+        """`bias`: a place the caller may use (the owner's home, decided per request by ampi-tools)."""
         body: dict[str, Any] = {"textQuery": query, "languageCode": self.language, "pageSize": max(1, min(limit, 10))}
         if self.region:
             body["regionCode"] = self.region
@@ -365,8 +366,8 @@ class Maps:
             raise ToolError("--near takes an address, a place name or lat,lng (not a place_id)")
         if near and not center:
             body["textQuery"] = f"{query} near {near}"  # an explicit place in the query wins over any bias anyway
-        elif center or self.near:
-            circle: dict[str, Any] = {"center": center or self.near}
+        elif center or bias:
+            circle: dict[str, Any] = {"center": center or bias}
             if radius:
                 circle["radiusMeters"] = max(100, min(radius, 50_000))
             body["locationBias"] = {"circle": circle}
@@ -376,7 +377,8 @@ class Maps:
         return await self.call("searchText", body, sku)
 
     async def route(self, origin: str, destination: str, *, mode: str = "drive", via: list[str] | None = None,
-                    depart: str | None = None, arrive: str | None = None, alternatives: bool = False) -> dict:
+                    depart: str | None = None, arrive: str | None = None, alternatives: bool = False,
+                    bias: dict | None = None) -> dict:
         body: dict[str, Any] = {"origin": waypoint(origin), "destination": waypoint(destination),
                                 "travelMode": TRAVEL_MODES[mode]}
         if via:
@@ -393,8 +395,8 @@ class Maps:
             body["arrivalTime"] = when(arrive, self.tz)
         if alternatives:
             body["computeAlternativeRoutes"] = True
-        if self.near:
-            body["locationBias"] = self.near
+        if bias:
+            body["locationBias"] = bias
         return await self.call("computeRoutes", body, "essentials")
 
     async def weather(self, place: str, *, date: str | None = None, hour: int | None = None, air: bool = False,

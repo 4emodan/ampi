@@ -167,11 +167,11 @@ def test_fill_asks_then_site_grant_skips_asking(tmp_path):
     d, side, ctl = make(tmp_path)
     fills = [{"ref": "f0:4", "field": "email"}, {"ref": "f0:5", "field": "name"}]
     res = run(d.run(req("checkout.fill", fills=fills), None, origin="private"))
-    assert res["approval"] and "Fill your email, name on https://shop.example" in res["text"]
+    assert res["approval"] and "Fill your me.email, me.name on https://shop.example" in res["text"]
     assert "anna" not in res["text"].lower()
     assert any(c["cmd"] == "hold" for c in ctl.calls)
     pending = d.approvals.unnotified()[0]
-    assert "fill email, name on https://shop.example without asking" in pending["grant_label"]
+    assert "fill me.email, me.name on https://shop.example without asking" in pending["grant_label"]
     out = approve(d, res, always=True)
     assert out["status"] == "done" and "doesn't ask" in out["text"]
     fill = [c for c in ctl.calls if c["cmd"] == "fill"][-1]
@@ -192,7 +192,7 @@ def test_grant_is_for_the_exact_site(tmp_path):
 
 def test_fill_refuses_wrong_kind_of_field(tmp_path):
     d, _, _ = make(tmp_path)
-    with pytest.raises(ToolError, match="doesn't look like a email"):
+    with pytest.raises(ToolError, match="doesn't look like a me.email"):
         run(d.run(req("checkout.fill", fills=[{"ref": "f0:8", "field": "email"}]), None, origin="private"))
 
 
@@ -202,13 +202,14 @@ def test_fill_never_takes_card_fields(tmp_path):
         run(d.run(req("checkout.fill", fills=[{"ref": "f2:3", "field": "card.number"}]), None, origin="private"))
 
 
-def test_snapshot_masks_unless_filled_or_granted_here(tmp_path):
+def test_snapshot_masks_even_where_filled_or_granted(tmp_path):
     d, side, ctl = make(tmp_path)
     res = run(d.run(req("checkout.snapshot"), None, origin="private"))
     assert "Anna" not in res["text"] and "anna.virtanen" not in res["text"] and "[vault]" in res["text"]
     side.vault.grant(SHOP, ["email"])
     res = run(d.run(req("checkout.snapshot"), None, origin="private"))
-    assert "anna.virtanen@example.fi" in res["text"] and "Anna Virtanen" not in res["text"]
+    # A granted site can't echo the value back to Ampi.
+    assert "anna.virtanen@example.fi" not in res["text"] and "Anna Virtanen" not in res["text"]
 
 
 # --- pay ----------------------------------------------------------------------------------------

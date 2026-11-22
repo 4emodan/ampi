@@ -35,7 +35,7 @@ def test_vault_home_merges_and_masks(tmp_path):
     v.set_home({"location": "35.1,33.3"})
     assert v.home() == {"timezone": "Europe/Nicosia", "location": "35.10000,33.30000"}
     shown = "\n".join(v.masked())
-    assert "35.1" not in shown and "Nicosia" not in shown and "home location: set" in shown
+    assert "35.1" not in shown and "Nicosia" not in shown and "home (place): location, timezone" in shown
 
 
 def test_services_use_home_from_the_vault(tmp_path, monkeypatch):
@@ -51,7 +51,8 @@ def test_services_use_home_from_the_vault(tmp_path, monkeypatch):
     s = run(build())
     assert s.maps_client.near == {"latitude": 35.1, "longitude": 33.3}
     assert s.maps_client.tz.key == "Europe/Nicosia"
-    assert s.wolt_client.near == {"latitude": 35.1, "longitude": 33.3}
+    assert s.wolt_client.near is None  # no built-in home: each request gets the places it may use
+    assert s.env_home == "60.1,24.9"
 
 
 class FakeMaps:
@@ -60,6 +61,7 @@ class FakeMaps:
         self.calls = []
 
     async def route(self, origin, destination, **kw):
+        self.bias = kw.get("bias")
         self.calls.append((origin, destination))
         return {"routes": [{"duration": "600s", "distanceMeters": 4200}]}
 
@@ -67,18 +69,19 @@ class FakeMaps:
 def test_route_from_and_to_home_never_shows_coordinates():
     m = FakeMaps({"latitude": 35.18561, "longitude": 33.3823})
     s = Services(maps_client=m)
-    out = run(ops_maps.maps_route(s, {"origin": "home", "destination": "Larnaca Airport"}))
+    places = {"home": "35.18561,33.3823"}
+    out = run(ops_maps.maps_route(s, {"origin": "home", "destination": "Larnaca Airport", "places_allowed": places}))
     assert m.calls[-1] == ("35.18561,33.3823", "Larnaca Airport")
     assert "35.18" not in out and "from home to Larnaca Airport" in out and "origin=" not in out
-    out = run(ops_maps.maps_route(s, {"origin": "Larnaca Airport", "destination": "Home"}))
+    out = run(ops_maps.maps_route(s, {"origin": "Larnaca Airport", "destination": "Home", "places_allowed": places}))
     assert m.calls[-1] == ("Larnaca Airport", "35.18561,33.3823")
-    assert "35.18" not in out and "choose Home" in out
+    assert "35.18" not in out and "choose it as the destination" in out
 
 
 def test_route_home_without_a_home_says_so():
     s = Services(maps_client=FakeMaps(None))
-    with pytest.raises(ToolError, match="vault-set home"):
-        run(ops_maps.maps_route(s, {"origin": "home", "destination": "x"}))
+    with pytest.raises(ToolError, match="isn.t available here"):
+        run(ops_maps.maps_route(s, {"origin": "home", "destination": "x"}))  # no places allowed (e.g. a group)
 
 
 def test_timezone_only_for_the_bridge(tmp_path):

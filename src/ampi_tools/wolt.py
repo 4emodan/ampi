@@ -238,13 +238,14 @@ class Wolt:
         return bool(self.auth and self.auth.configured())
 
     def status(self) -> str:
-        where = "home area set" if self.near else "no home area (WOLT_NEAR)"
+        where = "location: home from personal info, in the owner's chat"
         return f"{'account connected' if self.connected else 'not logged in (read-only lookups)'}, {where}"
 
     def location(self, near: dict | None = None) -> dict:
         loc = near or self.near
         if not loc:
-            raise ToolError("no location: give --near lat,lng, or set WOLT_NEAR on the server")
+            raise ToolError("no location: give --near lat,lng (or the owner sets up their home for searches on the "
+                            "server: `ampi-tools info-search home on`; it works only in the owner's own chat)")
         return loc
 
     async def request(self, method: str, base: str, path: str, *, params: dict | None = None, body: Any = None,

@@ -49,7 +49,7 @@ from . import ops_social
 from .maps import LATLNG_RE, Maps, latlng
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
-from .vault import Vault
+from .vault import Vault, mask_coords, mask_text
 from .wolt import Wolt, WoltAuth
 from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact, register_secret
 from .ops_telegram import (
@@ -63,6 +63,7 @@ MAX_REQUEST = 32 * 1024 * 1024  # watcher snapshots and space files (base64) tra
 # Only the bridge's main process may: answer approvals, post notices, say which claude runs exist and where
 # they come from, and say which chats the assistant reads itself.
 ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide", "notices.ack", "runs.register", "home.timezone",
+         "info.overview", "info.revoke_grant",
          "runs.unregister", "telegram.protect",
          # watchers v2: only the bridge's engine talks to the keeper
          "watch.propose", "watch.get", "watch.list", "watch.status", "watch.delete", "watch.space_get",
@@ -179,12 +180,26 @@ class Daemon:
                     raise ToolError("youtube.ids/youtube.show are for watchers; use `youtube feed` / `youtube video`")
                 # Where the request really comes from: the claude run it descends from (never what it says).
                 origin = self.runs.origin_of(pid)
-                return await self.run(ops, request.get("reason"), request.get("origin"), origin)
+                return self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin), ops)
             if cmd == "home.timezone":
                 # Only the bridge (schedules); Ampi never asks for it.
                 side = self.services.checkout_side
                 tz = side.vault.home().get("timezone") if side is not None else None
                 return {"ok": True, "timezone": tz}
+            if cmd in ("info.overview", "info.revoke_grant"):
+                # /info in the owner's Telegram chat (through the bridge): masked entries, and removing site grants.
+                side = self.services.checkout_side
+                if side is None:
+                    raise ToolError("personal info isn't set up")
+                if cmd == "info.revoke_grant":
+                    origin, fields = request.get("origin"), request.get("fields")
+                    if not isinstance(origin, str) or not isinstance(fields, str):
+                        raise ToolError("origin and fields")
+                    n = side.vault.db.execute("DELETE FROM grants WHERE origin=? AND fields=?", (origin, fields)).rowcount
+                    return {"ok": True, "removed": n}
+                return {"ok": True, "lines": side.vault.masked(),
+                        "grants": [{"origin": r["origin"], "fields": r["fields"], "expires": r["expires"]}
+                                   for r in side.vault.grants()]}
             if cmd == "approvals.list":
                 return {"ok": True, "text": self.list_text()}
             if cmd == "approvals.status":
@@ -262,6 +277,7 @@ class Daemon:
                 raise ToolError("one checkout or personal-info action per request")
             if ops[0]["op"] == "checkout.pay" and self._pending_pay():
                 raise ToolError("a payment is already waiting for the owner's answer")
+        self._add_places(ops, origin)
         ops = await pre_resolve(self.services, ops)
         for o in ops:
             if o["op"] == "telegram.revoke":
@@ -349,6 +365,59 @@ class Daemon:
         else:
             ok, text, extra = await execute(self.services, ops)
         return {"ok": ok, "text": text, **extra} if ok else {"ok": False, "error": text}
+
+    def _masked(self, resp: dict, ops: list[dict]) -> dict:
+        """Every reply to Ampi: card numbers and coordinates near the owner's places are masked everywhere; Maps, Wolt,
+        checkout and payment replies also mask every stored personal value. (`info collect` is the one reply meant
+        to carry values, after the owner approved; cards are never in it.)"""
+        side = self.services.checkout_side
+        if side is None or any(o["op"] == "info.collect" for o in ops):
+            return resp
+        full = any(o["op"].startswith(("maps.", "wolt.", "checkout.", "payment.")) for o in ops)
+        cards, locs = side.vault.card_numbers(), side.vault.locations()
+
+        def light(t: str) -> str:
+            for card in cards:
+                t = mask_text(t, [], card)
+            return mask_coords(t, locs) if locs else t
+        out = dict(resp)
+        for key in ("text", "error"):
+            if isinstance(out.get(key), str):
+                out[key] = side.mask_any(out[key]) if full else light(out[key])
+        return out
+
+    def places_for(self, origin: str) -> dict[str, str]:
+        """Places a request may use for searches ({name: "lat,lng"}): the owner's private chat gets the places with
+        searches switched on; a watcher only those it declares in `uses`; groups, forwarded messages and unknown
+        processes none (a few routes from "home" would pinpoint it)."""
+        side = self.services.checkout_side
+        places = dict(side.vault.search_places()) if side is not None else {}
+        env_home = getattr(self.services, "env_home", None)
+        if env_home and "home" not in places and not (side and side.vault.entry("home")):
+            places["home"] = env_home
+        if origin == "private":
+            return places
+        parsed = parse_origin(origin)
+        if parsed is not None and self.keeper is not None:
+            try:
+                w = self.keeper.active(parsed[0], parsed[1], parsed[2])
+            except ToolError:
+                return {}
+            uses = next((e.get("uses", []) for e in self.keeper.manifest(w) if e.get("kind") == "uses"), [])
+            names = {u.split(".", 1)[0] for u in uses if u.endswith(".location") or "." not in u}
+            return {n: v for n, v in places.items() if n in names}
+        return {}
+
+    def _add_places(self, ops: list[dict], origin: str) -> None:
+        if not any(o["op"].startswith(("maps.", "wolt.")) for o in ops):
+            return
+        places = self.places_for(origin)
+        for o in ops:
+            if o["op"].startswith("maps."):
+                o["args"]["places_allowed"] = places
+            elif o["op"].startswith("wolt.") and not o["args"].get("lat_lng"):
+                o["args"]["lat_lng"] = latlng(places["home"]) if places.get("home") else None
+                o["args"]["no_home"] = "home" not in places
 
     async def decide(self, approval_id: int, approve: bool, nonce: str, message_id: int | None,
                      always: bool = False, choice: str | None = None, confirmed: bool = False) -> dict:
@@ -545,8 +614,8 @@ class Daemon:
                 raise ToolError("ttl_seconds must be between 60 and 3 days")
             run_id = req.get("run") if isinstance(req.get("run"), str) else None
             ops = validate(req.get("ops"))
-            return await self.watcher_action(parsed[0], parsed[1], parsed[2], step, ops, req.get("reason"), idem,
-                                             float(ttl), run_id, agent=False)
+            return self._masked(await self.watcher_action(parsed[0], parsed[1], parsed[2], step, ops, req.get("reason"),
+                                                          idem, float(ttl), run_id, agent=False), ops)
         raise ToolError(f"unknown command {cmd!r}")
 
     async def watch_propose(self, profile: str, name: str, req: dict) -> dict:
@@ -688,6 +757,7 @@ class Daemon:
             if o["op"] in ws.NOT_FOR_WATCHERS:
                 raise ToolError(f"{o['op']} isn't available to watchers")
         if not any(ws.is_write(o["op"]) for o in ops):
+            self._add_places(ops, f"watcher:{profile}/{name}@{h[:12]}")
             if not agent:
                 # Engine reads too must be in the approved spec (an adapter step, or declared by the script step),
                 # so a script can't quietly read the mailbox and pass it on.
@@ -731,6 +801,14 @@ class Daemon:
         fits = [e for e in declared if route_fits(op, e["route"], route)]
         if declared and not fits and not agent:
             raise ToolError(f"{op} from step {step} would go somewhere the watcher didn't declare; refused")
+        if op in ("checkout.fill", "checkout.pay"):
+            # Personal info only as its spec declares (`uses`), shown in its approval.
+            uses = next((e.get("uses", []) for e in k.manifest(w) if e.get("kind") == "uses"), [])
+            allowed = {u.split(".", 1)[0] for u in uses if "." not in u} | set(uses)
+            for f in (o["args"].get("resolved") or {}).get("fills") or []:
+                entry = f["field"].split(".", 1)[0]
+                if entry not in allowed and f["field"] not in allowed:
+                    raise ToolError(f"watcher {name} didn't declare {f['field']} in `uses`; refused")
         amount = None
         if op == "checkout.pay":
             r = o["args"].get("resolved") or {}
@@ -743,6 +821,10 @@ class Daemon:
                 raise ToolError(f"{amount} is over this watcher's limit of {lim['max_amount']} per purchase")
             if k.pays_this_week(profile, name) >= int(lim["per_week"]):
                 raise ToolError(f"this watcher's purchases for the week ({lim['per_week']}) are used up")
+            if k.pays_this_month(profile, name) >= int(lim.get("per_month", 1)):
+                raise ToolError(f"this watcher's purchases for the month ({lim.get('per_month', 1)}) are used up")
+            if lim.get("card") and r.get("card") != lim["card"]:
+                raise ToolError(f"this watcher may pay only with {lim['card']}")
         # Engine actions must fit a declared entry; an agent's undeclared action may be covered by a runtime grant
         # ("Allow for this watcher": that exact op and destination, this step, this version).
         granted = (bool(fits) or agent) and k.granted(profile, name, h, step, op, route)
@@ -948,7 +1030,10 @@ def build_services(client: httpx.AsyncClient, home: Path) -> Services:
                                 region=os.environ.get("MAPS_REGION", "").strip(), near=maps_near, tz=tz)
     wolt_near = env_latlng("WOLT_NEAR") or maps_near
     near = latlng(wolt_near) if wolt_near else None
-    services.wolt_client = Wolt(client, home, near=near, language=os.environ.get("WOLT_LANGUAGE", "en").strip())
+    # No built-in home: each request gets the place it may use (see Daemon.places_for).
+    services.wolt_client = Wolt(client, home, near=None, language=os.environ.get("WOLT_LANGUAGE", "en").strip())
+    # The env settings stand in for a `home` place in personal info (same rules: private chat only).
+    services.env_home = env_latlng("MAPS_NEAR") or env_latlng("WOLT_NEAR") or None
     return services
 
 
@@ -1210,8 +1295,9 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="ampi-tools", description="Todoist, Gmail and YouTube for the assistant")
     parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "threads-login",
                                             "instagram-login", "wolt-login", "vault-set", "vault-show",
-                                            "vault-clear", "check"])
-    parser.add_argument("what", nargs="?", help="vault-set/vault-clear: card or profile")
+                                            "vault-clear", "check", "info-show", "info-set", "info-delete",
+                                            "info-default-card", "info-search", "info-reveal"])
+    parser.add_argument("what", nargs="*", help="vault-set/vault-clear: card, profile or home; info-*: NAME [FIELD|on|off]")
     parser.add_argument("--write", action="store_true", help="youtube-login: also allow changes (playlists, "
                         "subscriptions), each critical one still approved by you in Telegram")
     args = parser.parse_args(argv)
@@ -1230,7 +1316,11 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(_meta_login(home, THREADS if args.command == "threads-login" else INSTAGRAM, args.write))
         return
     if args.command.startswith("vault-"):
-        _vault_cmd(home, args.command, args.what)
+        _vault_cmd(home, args.command, args.what[0] if args.what else None)
+        return
+    if args.command.startswith("info-"):
+        from . import info_cli
+        info_cli.main(home, args.command, list(args.what), _geocode)
         return
     if args.command == "youtube-login":
         asyncio.run(_youtube_login(home, args.write))

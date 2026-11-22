@@ -23,7 +23,7 @@ from typing import Any
 from .ops import ALWAYS_CRITICAL, FIELDS, OPS, PRE_RESOLVE, Op, Result, Services, _text, clean, need
 from . import ops as _ops
 from .todoist import ToolError
-from .vault import CARD_FIELDS, PROFILE_FIELDS, Vault, mask_obj, mask_text
+from .vault import CARD_FIELDS, PROFILE_FIELDS, Vault, mask_coords, mask_obj, mask_text
 
 CTL_SOCKET = "/run/ampi-checkout.sock"  # root-owned (ampi-checkout.socket), group ampicheckoutctl-use
 REQUEST_TTL = 600            # fill/pay requests expire after 10 minutes (and with the session)
@@ -114,29 +114,29 @@ class CheckoutSide:
     clock: Any = time.time
 
     def mask(self, obj: Any, session: str | None, origin: str) -> Any:
-        ok = set(self.allowed.get(session or "", {}).get(origin, set())) | self.vault.granted_fields(origin)
-        if ok & {"name", "first_name", "last_name"}:
-            ok |= {"name", "first_name", "last_name"}
-        values = [v for f, v in self._profile_values() if f not in ok]
-        keep = [v for f, v in self._profile_values() if f in ok]
-        card = None
-        try:
-            card = self.vault.value("card.number")
+        """Everything stored stays masked in what Ampi sees, also on a site where it was filled or granted: a page
+        could echo it back to her ("confirm your email: …")."""
+        return self.mask_any(obj)
+
+    def mask_any(self, obj: Any) -> Any:
+        values, cards = self._values()
+        out = obj
+        for card in cards or [None]:
+            out = mask_obj(out, values, card)
+        locs = self.vault.locations()
+        if locs:
+            out = _map_strings(out, lambda t: mask_coords(t, locs))
+        return out
+
+    def _values(self) -> tuple[list[str], list[str]]:
+        values = list(self.vault.sensitive_values())
+        try:  # first names are short but personal
+            first = self.vault.value("me.first_name")
+            if len(first) >= 4:
+                values.append(first)
         except ToolError:
             pass
-        return mask_obj(obj, values, card, keep)
-
-    def _profile_values(self) -> list[tuple[str, str]]:
-        out = []
-        for f in ("name", "first_name", "last_name", "email", "phone", "address.line1", "address.line2",
-                  "address.full"):
-            try:
-                v = self.vault.value(f)
-            except ToolError:
-                continue
-            if len(v) >= (4 if f in ("first_name", "last_name") else 6):
-                out.append((f, v))
-        return out
+        return values, self.vault.card_numbers()
 
     def prune(self) -> None:
         now = self.clock()
@@ -145,12 +145,17 @@ class CheckoutSide:
 
     def scrub(self, text: str) -> str:
         """For texts that go to the owner's chat log or approvals: every vault value masked, whatever the site."""
-        card = None
-        try:
-            card = self.vault.value("card.number")
-        except ToolError:
-            pass
-        return mask_text(text, [v for _, v in self._profile_values()], card)
+        return self.mask_any(text)
+
+
+def _map_strings(obj: Any, fn) -> Any:
+    if isinstance(obj, str):
+        return fn(obj)
+    if isinstance(obj, list):
+        return [_map_strings(x, fn) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _map_strings(v, fn) for k, v in obj.items()}
+    return obj
 
 
 def cs(s: Services) -> CheckoutSide:
@@ -163,13 +168,30 @@ def cs(s: Services) -> CheckoutSide:
 # --- argument checks ----------------------------------------------------------------------------
 
 
+FIELD_REF_RE = re.compile(r"[a-z][a-z0-9_-]{0,30}(\.[a-z0-9_]{1,20}){0,2}")
+
+
+def _field_ref(v: Any) -> str:
+    """A personal info field: `entry.field` (`me.email`, `work.address.city`, `card-main.number`) or an old name
+    (`email`, `address.city`, `card.number`). Whether it exists is checked against the directory later."""
+    if not isinstance(v, str) or not FIELD_REF_RE.fullmatch(v):
+        raise ToolError(f"bad field {v!r} (like me.email, home.address.city; `info fields` lists what's stored)")
+    return v
+
+
 def _profile_fields(v: Any) -> list[str]:
-    if not isinstance(v, list) or not 1 <= len(v) <= len(PROFILE_FIELDS):
-        raise ToolError("fields: a list of " + ", ".join(PROFILE_FIELDS))
-    bad = [f for f in v if f not in PROFILE_FIELDS]
-    if bad:
-        raise ToolError(f"{bad[0]!r} can't be revealed" + (" (the card never is)" if str(bad[0]).startswith("card") else ""))
-    return list(dict.fromkeys(v))
+    if not isinstance(v, list) or not 1 <= len(v) <= 20:
+        raise ToolError("fields: a list of 1-20 fields, e.g. [\"me.email\", \"work.address.full\"]")
+    out = [_field_ref(f) for f in v]
+    if any(f.startswith("card.") for f in out):
+        raise ToolError("card details are never shown to Ampi")
+    return list(dict.fromkeys(out))
+
+
+def _card_name(v: Any) -> str:
+    if not isinstance(v, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", v):
+        raise ToolError("card: the card entry's name, e.g. card-main")
+    return v
 
 
 def _ref(v: Any) -> str:
@@ -183,9 +205,9 @@ def _fills(v: Any) -> list[dict]:
         raise ToolError('fills: a list of {"ref": "f0:12", "field": "email"}')
     out = []
     for x in v:
-        if not isinstance(x, dict) or set(x) - {"ref", "field"} or x.get("field") not in PROFILE_FIELDS + CARD_FIELDS:
-            raise ToolError("each fill is {ref, field}; fields: " + ", ".join(PROFILE_FIELDS + CARD_FIELDS))
-        out.append({"ref": _ref(x.get("ref")), "field": x["field"]})
+        if not isinstance(x, dict) or set(x) - {"ref", "field"}:
+            raise ToolError('each fill is {"ref": "f0:12", "field": "me.email"}')
+        out.append({"ref": _ref(x.get("ref")), "field": _field_ref(x.get("field"))})
     if len({x["ref"] for x in out}) != len(out):
         raise ToolError("each element once")
     return out
@@ -213,7 +235,7 @@ def _url(v: Any) -> str:
 FIELDS.update({
     "fields": _profile_fields, "ref": _ref, "fills": _fills, "button": _ref, "amount": _amount, "currency": _currency,
     "what": _text(200, True), "url": _url, "option": _text(200, True), "approval": lambda v: _int_id(v),
-    "site": _text(300, True),
+    "site": _text(300, True), "card": _card_name,
 })
 
 
@@ -235,8 +257,22 @@ async def info_fields(s: Services, a: dict) -> Result:
 
 
 async def describe_reveal(s: Services, a: dict) -> str:
-    return (f"Show Ampi your {', '.join(a.get('fields') or [])} (she'll see the values in this conversation; "
-            "they're kept nowhere else).")
+    return (f"Show Ampi your {', '.join(a.get('fields') or [])}. She gets the values once, in this conversation; "
+            "anything she then writes in a reply or message is visible like any reply.")
+
+
+async def _resolve_reveal(s: Services, a: dict) -> dict:
+    """Before asking the owner: the fields exist and may be shown (never cards, locations, timezones, or entries
+    switched to 'never shown')."""
+    vault = cs(s).vault
+    out = []
+    for f in a.get("fields") or []:
+        canon = vault.canonical(f)
+        vault.split(canon)
+        if not vault.revealable(canon):
+            raise ToolError(f"{canon} is never shown to Ampi")
+        out.append(canon)
+    return {**a, "fields": list(dict.fromkeys(out))}
 
 
 async def info_reveal(s: Services, a: dict) -> Result:
@@ -432,6 +468,17 @@ async def _bind(s: Services, a: dict, pay: bool) -> dict:
         raise ToolError("no checkout session")
     if st.get("state") == "readonly":
         raise ToolError("this session already paid; it's read-only")
+    card = a.get("card") or side.vault.default_card_name()
+    resolved = []
+    for f in fills:
+        canon = side.vault.canonical(f["field"], card)
+        kind = side.vault.kind(canon)
+        if kind is None:
+            raise ToolError(f"{canon} can't be filled into a form (it can only be shown to you after approval)")
+        if kind.startswith("card.") and canon.split(".", 1)[0] != card:
+            raise ToolError(f"one card per payment: {canon} isn't from {card}")
+        resolved.append({"ref": f["ref"], "field": canon, "kind": kind})
+    fills = resolved
     refs = [f["ref"] for f in fills] + ([a["button"]] if pay else [])
     b = await side.client.call({"cmd": "bind", "session": session, "refs": refs})
     bindings = {x["ref"]: x for x in b.get("bindings") or []}
@@ -449,13 +496,13 @@ async def _bind(s: Services, a: dict, pay: bool) -> dict:
         fo = str(bd.get("frame_origin") or "")
         if fo in ("", "opaque", "null"):
             raise ToolError(f"element {f['ref']} is in a frame without a real origin; refusing")
-        if not f["field"].startswith("card.") and fo != origin and not is_psp(fo, side.rules):
+        if not f["kind"].startswith("card.") and fo != origin and not is_psp(fo, side.rules):
             # Not into third-party widgets (chat, reviews, ads) embedded in the shop's page.
             raise ToolError(f"element {f['ref']} is in a frame from {fo}, not the shop's own page; refusing")
-        if not field_matches(f["field"], bd):
+        if not field_matches(f["kind"], bd):
             raise ToolError(f"element {f['ref']} (“{label}”, {bd.get('autocomplete') or bd.get('type') or 'text'}) "
                             f"doesn't look like a {f['field']} field")
-        if f["field"].startswith("card."):
+        if f["kind"].startswith("card."):
             if not pay:
                 raise ToolError("card fields are filled only by `checkout pay` (with the owner's approval of the purchase)")
             in_main = bool(bd.get("main")) if "main" in bd else bd.get("frame") == "f0"
@@ -463,7 +510,8 @@ async def _bind(s: Services, a: dict, pay: bool) -> dict:
                 raise ToolError(f"card details go only into a payment provider's field (Stripe, Adyen, …); "
                                 f"{f['ref']} is on {fo}. If this is a real payment provider, the owner can add it to "
                                 "[payment] psp_origins")
-    out = {"session": session, "origin": origin, "fills": [{**f, "binding": bindings[f["ref"]]} for f in fills],
+    out = {"session": session, "origin": origin, "card": card if pay else None,
+           "fills": [{**f, "binding": bindings[f["ref"]]} for f in fills],
            "expires": side.clock() + REQUEST_TTL, "totals": b.get("totals") or [],
            "risky": b.get("risky_checked") or []}
     if pay:
@@ -483,7 +531,7 @@ async def _resolve_fill(s: Services, a: dict) -> dict:
     side = cs(s)
     r["fields"] = sorted({f["field"] for f in r["fills"]})
     # A site permission covers only fields whose own autocomplete/type says what they are.
-    strict_ok = all(field_matches(f["field"], f["binding"], strict=True) for f in r["fills"])
+    strict_ok = all(field_matches(f["kind"], f["binding"], strict=True) for f in r["fills"])
     r["granted"] = strict_ok and side.vault.granted(r["origin"], r["fields"])
     return {"resolved": r}
 
@@ -509,8 +557,11 @@ def grand_total(totals: list[dict], currency: str, card_currency: str) -> Decima
 async def _resolve_pay(s: Services, a: dict) -> dict:
     side = cs(s)
     amount, currency, what = need(a, "amount", "currency", "what")
-    if not any(f["field"] == "card.number" for f in a.get("fills") or []):
+    if not any(str(f["field"]).endswith(".number") for f in a.get("fills") or []):
         raise ToolError("a payment needs at least card.number (plus card.exp, card.cvc as the page asks)")
+    card = a.get("card") or side.vault.default_card_name()
+    if not card or (side.vault.entry(card) or {}).get("type") != "card":
+        raise ToolError(f"no card {card or ''} stored (`info fields` lists the cards)".replace("  ", " "))
     if currency != side.rules.currency:
         raise ToolError(f"the card is set up for {side.rules.currency} payments ([payment] currency)")
     if side.vault.purchases_today() >= side.rules.max_per_day:
@@ -544,20 +595,21 @@ async def describe_fill(s: Services, a: dict) -> str:
         lines.append(side.scrub(f"  {f['field']} → “{clean(b.get('label'), 60)}” "
                                 f"({b.get('autocomplete') or b.get('type') or b.get('tag')})"
                                 + ("" if b.get("frame") == "f0" else f" in {b.get('frame_origin')}")))
-    lines.append("A site you allow can show these values on its pages, where Ampi can read them.")
+    lines.append("“Always here” lets Ampi fill exactly these fields on exactly this site for 30 days; she still never "
+                 "sees the values.")
     return "\n".join(lines)
 
 
 async def describe_pay(s: Services, a: dict) -> str:
     side = cs(s)
     r = a.get("resolved") or {}
-    card_frames = sorted({f["binding"].get("frame_origin") for f in r.get("fills") or [] if f["field"].startswith("card.")})
+    card_frames = sorted({f["binding"].get("frame_origin") for f in r.get("fills") or [] if f["kind"].startswith("card.")})
     page = "; ".join(f"{clean(t.get('label'), 30)} {t.get('amount')} {t.get('currency')}" for t in (r.get("totals") or [])[:10])
-    profile = sorted({f["field"] for f in r.get("fills") or [] if not f["field"].startswith("card.")})
+    profile = sorted({f["field"] for f in r.get("fills") or [] if not f["kind"].startswith("card.")})
     return side.scrub("\n".join([
         f"PAY {r.get('amount')} {r.get('currency')} at {r.get('origin')}",
         f"For: {clean(r.get('what'), 200)}",
-        f"Card: {side.vault.card_mask()} (into {', '.join(card_frames)})",
+        f"Card: {r.get('card')}: {side.vault.card_mask(r.get('card'))} (into {', '.join(card_frames)})",
         f"Page says: {clean(page, 400) or '?'}",
         *([f"Also fills: {', '.join(profile)}"] if profile else []),
         f"Then presses “{clean((r.get('button') or {}).get('binding', {}).get('label'), 60)}”.",
@@ -568,7 +620,7 @@ async def describe_pay(s: Services, a: dict) -> str:
 
 def _values(side: CheckoutSide, fills: list[dict]) -> list[dict]:
     return [{"ref": f["ref"], "binding": f["binding"], "value": side.vault.value(f["field"]),
-             "card": f["field"].startswith("card.")} for f in fills]
+             "card": f["kind"].startswith("card.")} for f in fills]
 
 
 async def _check_live(side: CheckoutSide, r: dict) -> None:
@@ -618,7 +670,7 @@ async def checkout_pay(s: Services, a: dict) -> Result:
     await _check_live(side, r)
     expect = [{"amount": t.get("amount"), "currency": t.get("currency")} for t in r["totals"]]
     log = lambda status: side.vault.log_purchase(  # noqa: E731
-        r["origin"], r["amount"], r["currency"], r["what"], status, a.get("approval_id"))
+        r["origin"], r["amount"], r["currency"], r["what"], status, a.get("approval_id"), r.get("card"))
     try:
         resp = await side.client.call({"cmd": "pay", "session": r["session"], "origin": r["origin"],
                                        "fields": _values(side, r["fills"]), "button": r["button"],
@@ -657,5 +709,5 @@ CHECKOUT_OPS = [
     Op("checkout.pay", True, checkout_pay, describe_pay, "PAY"),
 ]
 OPS.update({op.name: op for op in CHECKOUT_OPS})
-PRE_RESOLVE.update({"checkout.fill": _resolve_fill, "checkout.pay": _resolve_pay})
+PRE_RESOLVE.update({"checkout.fill": _resolve_fill, "checkout.pay": _resolve_pay, "info.reveal": _resolve_reveal})
 _ops.ALWAYS_CRITICAL = ALWAYS_CRITICAL | {"info.reveal", "checkout.pay"}

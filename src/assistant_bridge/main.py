@@ -22,6 +22,7 @@ from .watch.db import WatchDB
 from .watch.engine import WatchEngine
 from .watch.migrate import migrate
 from .watch.tgui import WatchUI
+from .info_ui import InfoUI
 from .claude_runner import BILLING_ENV_VARS, ClaudeRunner, clean_env
 from .config import Config, ConfigError, load_config
 from .services import ask
@@ -183,6 +184,7 @@ async def serve(config: Config) -> None:
                                  data_dir=config.db_path.parent)
             engines[b.profile.name] = engine
             b.watch_ui = WatchUI(b, engine)
+            b.info_ui = InfoUI(b, config.tools.socket) if config.tools.approvals else None
         control = Control(engines, watchers_socket)
         await control.start()
         for b in bots:

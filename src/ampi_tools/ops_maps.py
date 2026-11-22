@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from .maps import (
-    DAILY, Maps, TRAVEL_MODES, directions_link, distance, duration, maps_link, name_and_coords, one_line,
+    DAILY, Maps, TRAVEL_MODES, directions_link, distance, duration, latlng, maps_link, name_and_coords, one_line,
     place_text, safe_url, search_link, sources, untrusted,
 )
 from .ops import FIELDS, OPS, Op, Result, Services, _bool, _choice, _date, _int, need
@@ -73,11 +73,12 @@ async def maps_search(s: Services, a: dict) -> Result:
     (query,) = need(a, "query")
     query = place_text(query, "query")
     near = a.get("near")
-    if near and _is_home(near):
-        _home(s)  # says clearly when no home is set
-        near = None  # searches are centred on home by default
+    places = _places(a)
+    name = _place_name(near, places) if near else None
+    if name:
+        near = places[name]  # coordinates go to Google only, never into the reply
     data = await mp(s).search(query, near=near, radius=a.get("radius"), limit=min(a.get("limit", 5), 10),
-                              details=a.get("details", False))
+                              details=a.get("details", False), bias=_bias(a))
     summary = str(data.get("summary") or "").strip()
     places = [p for p in _place_lines(data) if p[1]]
     if not summary and not places:
@@ -88,12 +89,31 @@ async def maps_search(s: Services, a: dict) -> Result:
     return f"{body}\n{sources(places)}\nAll results on a map: {search_link(query)}".lstrip()
 
 
-def _home(s: Services) -> str:
-    """The owner's home as lat,lng for the API (from personal info); never put in anything Ampi sees."""
-    near = mp(s).near
-    if not near:
-        raise ToolError("no home location is set (the owner sets it on the server: `ampi-tools vault-set home`)")
-    return f"{near['latitude']},{near['longitude']}"
+def _places(a: dict) -> dict[str, str]:
+    """Places this request may use ({name: "lat,lng"}), set by ampi-tools from where the request comes from: the
+    owner's private chat gets the places with searches switched on; a watcher only what it declared; others none."""
+    p = a.get("places_allowed")
+    return p if isinstance(p, dict) else {}
+
+
+def _place_name(v: str, places: dict[str, str]) -> str | None:
+    v = v.strip().lower()
+    v = {"my home": "home", "at home": "home", "my work": "work", "the office": "work"}.get(v, v)
+    if v in places:
+        return v
+    if v in ("home", "work"):  # asked for, but not available here (or not set)
+        raise ToolError(f"“{v}” isn't available here: the owner hasn't set that place up for searches "
+                        f"(`ampi-tools info-search {v} on` on the server), or this chat can't use it")
+    return None
+
+
+def _bias(a: dict) -> dict | None:
+    home = _places(a).get("home")
+    return latlng(home) if home else None
+
+
+def _home(s: Services) -> str:  # kept for callers that only know about home
+    raise ToolError("no home location is set (the owner sets it on the server: `ampi-tools info-set home`)")
 
 
 def _is_home(v: str) -> bool:
@@ -103,16 +123,18 @@ def _is_home(v: str) -> bool:
 async def maps_route(s: Services, a: dict) -> Result:
     origin, destination = need(a, "origin", "destination")
     mode = a.get("mode", "drive")
-    from_home, to_home = _is_home(origin), _is_home(destination)
-    api_origin = _home(s) if from_home else origin
-    api_destination = _home(s) if to_home else destination
+    places = _places(a)
+    from_place, to_place = _place_name(origin, places), _place_name(destination, places)
+    api_origin = places[from_place] if from_place else origin
+    api_destination = places[to_place] if to_place else destination
     data = await mp(s).route(api_origin, api_destination, mode=mode, via=a.get("via"), depart=a.get("depart"),
-                             arrive=a.get("arrive"), alternatives=a.get("alternatives", False))
+                             arrive=a.get("arrive"), alternatives=a.get("alternatives", False), bias=_bias(a))
     routes = [r for r in data.get("routes") or [] if isinstance(r, dict)]
-    origin, destination = ("home" if from_home else origin), ("home" if to_home else destination)
-    if to_home:
-        # A link would carry the home coordinates; the owner's Maps app knows "Home" anyway.
-        link = "(no link for routes to home: in Google Maps, choose Home as the destination)"
+    origin, destination = (from_place or origin), (to_place or destination)
+    from_home = bool(from_place)
+    if to_place:
+        # A link would carry the place's coordinates; the owner's Maps app knows Home/Work anyway.
+        link = f"(no link for routes to {to_place}: in Google Maps, choose it as the destination)"
     elif from_home:
         # Without an origin, Google Maps starts from the phone's current location.
         link = directions_link("", destination, mode, a.get("via")).replace("origin=&", "")
