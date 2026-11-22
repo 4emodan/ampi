@@ -382,6 +382,24 @@ account. Ampi uses guest checkout only. After paying, the session is read-only; 
 your bank app. `payment log` lists purchases (card shown masked). If a payment step times out, Ampi is told it MAY
 have gone through and not to pay again before checking.
 
+## 8f. The hub: settings pages in your browser
+
+`ampi-hub` (installed and started by `install-tools.sh`) serves your settings pages; the first is the **address
+book** (home, work and other places: address, company, location, timezone, the search and reveal switches). It has
+no network port: it listens on `/run/ampi-hub/hub.sock`, which only root and `ampitools` can open (Ampi can't), and
+you reach it through SSH from your computer:
+
+```powershell
+.\scripts\ampi-hub.ps1                  # or: -Server <ssh alias> -Port 8766
+```
+
+The script reads the hub's access token over SSH (new at every hub restart), forwards `127.0.0.1:8765` to the
+socket, checks that the port is really the tunnel's, and opens the page; keep its window open while you use it.
+It needs an SSH host alias (`pipa-home` by default) that logs in as root, ideally with a key in ssh-agent (otherwise
+you type the passphrase twice). Changes apply at once (no restart). "Find from address" looks the location up on
+Google Maps (needs `MAPS_API_KEY`; at most 30 lookups a day from the hub). The page refuses other hostnames and
+cross-site requests, so a site open in your browser can't use the tunnel.
+
 ## 9. Watchers (automations)
 
 A watcher wakes on **triggers** (a time, a new email, a new Telegram message, a new Todoist task, a YouTube

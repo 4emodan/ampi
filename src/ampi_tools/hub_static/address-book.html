@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Address book · Ampi hub</title>
+<link rel="stylesheet" href="/hub.css">
+<script src="/hub.js"></script>
+<script src="/address-book.js" defer></script>
+</head>
+<body>
+<header><a class="brand" href="/">Ampi hub</a><nav><a class="on" href="/address-book">Address book</a></nav></header>
+<main>
+  <h1>Address book</h1>
+  <p class="sub">Places Ampi can use by name: <code>maps route work home</code>, <code>wolt venues --at gym</code>, filling
+    a delivery address. Ampi never sees coordinates; addresses only with your approval.</p>
+  <div id="msg" class="msg hidden" role="status"></div>
+  <div class="layout">
+    <div class="panel">
+      <ul id="list" class="list"></ul>
+      <div class="actions"><button id="add" class="btn" type="button">+ Add a place</button></div>
+    </div>
+    <div class="panel">
+      <p id="pick" class="empty">Pick a place, or add one.</p>
+      <form id="form" class="hidden" autocomplete="off">
+        <div class="row">
+          <div><label for="f-name">Name</label><input type="text" id="f-name" maxlength="31" required
+               pattern="[a-z][a-z0-9\-]{0,30}" title="lowercase letters, digits and -, starting with a letter"></div>
+          <div><label for="f-company">Company (for a workplace)</label><input type="text" id="f-company" maxlength="120"></div>
+        </div>
+        <label for="f-line1">Street address</label><input type="text" id="f-line1" maxlength="120">
+        <label for="f-line2">Line 2 (apartment, floor)</label><input type="text" id="f-line2" maxlength="120">
+        <div class="row">
+          <div><label for="f-postal">Postal code</label><input type="text" id="f-postal" maxlength="12"></div>
+          <div><label for="f-city">City</label><input type="text" id="f-city" maxlength="80"></div>
+        </div>
+        <div class="row">
+          <div><label for="f-region">Region / state</label><input type="text" id="f-region" maxlength="80"></div>
+          <div><label for="f-country">Country (2 letters)</label><input type="text" id="f-country" maxlength="2"></div>
+        </div>
+        <label for="f-location">Location (latitude,longitude): searches and routes start here</label>
+        <div class="inline"><input type="text" id="f-location" maxlength="40" placeholder="35.1700,33.3600">
+          <button id="find" class="btn" type="button">Find from address</button></div>
+        <div id="found" class="note hidden"></div>
+        <div id="stale" class="warn hidden">The address changed: the location may still point at the old one.
+          Press “Find from address”, or clear the location.</div>
+        <div class="row">
+          <div><label for="f-timezone">Timezone</label><input type="text" id="f-timezone" maxlength="60"
+               list="zones" placeholder="Europe/Nicosia"><datalist id="zones"></datalist></div>
+          <div></div>
+        </div>
+        <label class="check"><input type="checkbox" id="f-search"><span>Use for searches and routes
+          <small>Maps, Wolt and routes may start from here (your private chat, and watchers you allowed).</small></span></label>
+        <label class="check"><input type="checkbox" id="f-revealable"><span>Ampi may ask to see the address
+          <small>Each time with your approval in Telegram. Off: it can still be filled into forms you approve.</small></span></label>
+        <p id="home-note" class="note hidden">“home” is the place used when you don't name one, and its timezone sets
+          your schedules.</p>
+        <div class="actions">
+          <button id="save" class="btn primary" type="submit">Save</button>
+          <button id="cancel" class="btn" type="button">Cancel</button>
+          <span class="spacer"></span>
+          <button id="delete" class="btn danger" type="button">Delete</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</main>
+</body>
+</html>

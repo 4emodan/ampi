@@ -1,0 +1,55 @@
+[Unit]
+Description=Ampi hub: the owner's settings pages (address book), on a private socket reached through SSH
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ampitools
+Group=ampitools
+EnvironmentFile=/home/ampitools/env
+ExecStart=/home/ampitools/app/.venv/bin/ampi-tools hub
+# /run/ampi-hub/hub.sock and the access token: only ampitools (and root, i.e. your SSH login) can open them.
+# Keep the directory 0700: the assistant user is in the ampitools group.
+# No TCP port. Open it from your computer with scripts/ampi-hub.ps1.
+RuntimeDirectory=ampi-hub
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=always
+RestartSec=10
+
+MemoryMax=150M
+CPUQuota=25%
+TasksMax=24
+ProtectHome=tmpfs
+BindPaths=/home/ampitools
+ProtectSystem=strict
+ReadWritePaths=/home/ampitools
+# Its own code stays as installed.
+ReadOnlyPaths=/home/ampitools/app
+PrivateTmp=true
+NoNewPrivileges=true
+InaccessiblePaths=-/opt -/srv -/var/www
+# AF_INET/6: the "Find from address" lookup at Google Maps.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+PrivateDevices=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RemoveIPC=true
+
+[Install]
+WantedBy=multi-user.target

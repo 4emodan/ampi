@@ -11,10 +11,12 @@ separate user and file mode are the protection, as for the other tokens). Grants
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import unicodedata
 from datetime import date
@@ -29,6 +31,32 @@ PROFILE_FIELDS = ("name", "first_name", "last_name", "email", "phone", "address.
 CARD_FIELDS = ("card.number", "card.exp", "card.exp_month", "card.exp_year", "card.cvc", "card.name")
 ALL_FIELDS = PROFILE_FIELDS + CARD_FIELDS
 GRANT_DAYS = 30
+
+try:
+    import fcntl
+except ImportError:  # Windows (tests only)
+    fcntl = None  # type: ignore[assignment]
+
+
+def _locked(method):
+    """Changes of vault.json are load, change, save; two processes change it (ampi-tools and the hub), so each
+    change holds an exclusive lock on vault.lock (re-entrant within one Vault)."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._mutex:
+            self._depth += 1
+            fd = None
+            try:
+                if self._depth == 1 and fcntl is not None:
+                    fd = os.open(self.path.with_name("vault.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                return method(self, *args, **kwargs)
+            finally:
+                self._depth -= 1
+                if fd is not None:
+                    os.close(fd)  # releases the lock
+    return wrapper
+
 
 
 # --- checks ---------------------------------------------------------------------------------------
@@ -214,6 +242,16 @@ def check_entry(kind: str, fields: dict, current: dict | None = None) -> dict:
     raise ToolError(f"type must be one of {', '.join(TYPES)}")
 
 
+class Conflict(ToolError):
+    """The entry changed since the editor loaded it."""
+
+
+def entry_rev(e: dict) -> str:
+    """A short fingerprint of an entry as stored (the hub's edit check)."""
+    import hashlib
+    return hashlib.sha256(json.dumps(e, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def check_name(name: str) -> str:
     if not isinstance(name, str) or not NAME_RE.fullmatch(name) or name in RESERVED:
         raise ToolError("entry names: lowercase letters, digits and -, starting with a letter, no dots "
@@ -224,7 +262,8 @@ def check_name(name: str) -> str:
 class Vault:
     def __init__(self, home: Path):
         self.path = home / "vault.json"
-        self.db = sqlite3.connect(home / "vault.sqlite3", isolation_level=None)
+        # check_same_thread=False: the hub serves requests on threads (each change holds _mutex).
+        self.db = sqlite3.connect(home / "vault.sqlite3", isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS grants (origin TEXT, fields TEXT, created REAL, expires REAL,
@@ -234,6 +273,7 @@ class Vault:
                                                   approval INTEGER);
         """)
         self.clock = time.time
+        self._mutex, self._depth = threading.RLock(), 0
         if self.path.exists():
             data = self._read()
             if data and "version" not in data:
@@ -297,6 +337,7 @@ class Vault:
             default = "e3"
         return {"version": 2, "entries": entries, "default_card": default, "next": 4}
 
+    @_locked
     def _migrate(self, old: dict) -> None:
         self.save(self._converted(old))
         # Site grants used the old field names; the aliases keep them meaning the same, but store them canonically.
@@ -322,6 +363,7 @@ class Vault:
         hit = self._find(self.load(), name)
         return {"id": hit[0], **hit[1]} if hit else None
 
+    @_locked
     def set_entry(self, name: str, kind: str, fields: dict) -> None:
         """Create an entry or change some of its fields."""
         data = self.load()
@@ -346,6 +388,51 @@ class Vault:
         if kind == "card":
             register_secret(e["fields"]["number"])
 
+    @_locked
+    def replace_entry(self, name: str, kind: str, fields: dict, *, new_name: str | None = None,
+                      flags: dict | None = None, rev: str | None = None, create: bool = False) -> None:
+        """The owner's editor (the hub): sets an entry's fields as a whole (nothing merged from before), optionally
+        renames it and sets its switches. A rename drops the old name's site permissions. rev: the entry as the
+        editor last saw it (entry_rev); a changed entry is refused. create: only a new entry (never replaces one)."""
+        data = self.load()
+        hit = self._find(data, check_name(name))
+        if create and hit:
+            raise Conflict(f"there is already an entry {name}")
+        if not create and not hit:
+            raise ToolError(f"no entry {name} (deleted meanwhile?)")
+        if rev is not None and hit and entry_rev(hit[1]) != rev:
+            raise Conflict(f"{name} was changed meanwhile; reload")
+        target = check_name(new_name or name)
+        if target != name and self._find(data, target):
+            raise Conflict(f"there is already an entry {target}")
+        checked = check_entry(kind, fields)
+        if hit:
+            eid, e = hit
+            if e["type"] != kind:
+                raise ToolError(f"{name} is a {e['type']}, not a {kind}")
+        else:
+            if kind not in TYPES:
+                raise ToolError(f"type must be one of {', '.join(TYPES)}")
+            eid = self._new_id(data)
+            e = {"type": kind, "revealable": kind != "card", "created": self.clock()}
+            if kind == "place":
+                e["search"] = True
+            data["entries"][eid] = e
+            if kind == "card" and not data.get("default_card"):
+                data["default_card"] = eid
+        e["name"], e["fields"] = target, checked
+        for flag, value in (flags or {}).items():
+            if flag == "search" and kind == "place":
+                e["search"] = bool(value)
+            elif flag == "revealable":
+                e["revealable"] = bool(value) and kind != "card"
+        self.save(data)
+        if target != name and hit:
+            for r in list(self.db.execute("SELECT origin, fields FROM grants")):
+                if any(f.split(".", 1)[0] == name for f in r["fields"].split(",")):
+                    self.db.execute("DELETE FROM grants WHERE origin=? AND fields=?", (r["origin"], r["fields"]))
+
+    @_locked
     def save_place(self, name: str, address: dict, company: str | None = None, location: str | None = None) -> bool:
         """Creates or updates a place: the address is replaced as a whole; company and location only when given
         (an existing place keeps its timezone). Returns whether it replaced an existing place's address."""
@@ -372,11 +459,14 @@ class Vault:
         self.save(data)
         return replaced
 
-    def delete(self, name: str) -> None:
+    @_locked
+    def delete(self, name: str, rev: str | None = None) -> None:
         data = self.load()
         hit = self._find(data, name)
         if not hit:
             raise ToolError(f"no entry {name}")
+        if rev is not None and entry_rev(hit[1]) != rev:
+            raise Conflict(f"{name} was changed meanwhile; reload")
         eid, e = hit
         del data["entries"][eid]
         if data.get("default_card") == eid:
@@ -387,6 +477,7 @@ class Vault:
             if any(f.split(".", 1)[0] == name for f in r["fields"].split(",")):
                 self.db.execute("DELETE FROM grants WHERE origin=? AND fields=?", (r["origin"], r["fields"]))
 
+    @_locked
     def set_flag(self, name: str, flag: str, on: bool) -> None:
         data = self.load()
         hit = self._find(data, name)
@@ -404,6 +495,7 @@ class Vault:
         e[flag] = bool(on)
         self.save(data)
 
+    @_locked
     def set_default_card(self, name: str) -> None:
         data = self.load()
         hit = self._find(data, name)
@@ -414,6 +506,7 @@ class Vault:
 
     # --- compatibility with version 1 commands ----------------------------------------------
 
+    @_locked
     def set_profile(self, profile: dict) -> None:
         """Like version 1: the profile is replaced as a whole (blank fields are cleared); home keeps its location
         and timezone."""
@@ -443,6 +536,7 @@ class Vault:
             data["next"] += 1
         return eid
 
+    @_locked
     def _strip(self, name: str, keys: tuple[str, ...]) -> None:
         """Removes some fields of an entry; the entry goes when nothing is left."""
         data = self.load()
@@ -457,10 +551,12 @@ class Vault:
             return
         self.save(data)
 
+    @_locked
     def set_card(self, card: dict) -> None:
         name = self.default_card_name() or "card-main"
         self.set_entry(name, "card", card)
 
+    @_locked
     def set_home(self, home: dict) -> None:
         self.set_entry("home", "place", check_home(home))
 
@@ -470,6 +566,7 @@ class Vault:
         f = (e or {}).get("fields") or {}
         return {k: f[k] for k in ("location", "timezone") if f.get(k)}
 
+    @_locked
     def clear(self, what: str) -> None:
         if what == "card":
             name = self.default_card_name()

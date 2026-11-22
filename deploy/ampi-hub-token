@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Writes a fresh access token for the Ampi hub and prints it (run as root by scripts/ampi-hub.ps1 over SSH).
+# Each run replaces the previous token, so an old page or a leaked link stops working.
+set -euo pipefail
+dir=/run/ampi-hub
+[[ -d $dir ]] || { echo "the hub isn't running: systemctl status ampi-hub" >&2; exit 1; }
+umask 077
+token=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
+tmp=$(mktemp "$dir/.token.XXXXXX")
+printf '%s\n' "$token" > "$tmp"
+chown ampitools:ampitools "$tmp"
+chmod 600 "$tmp"
+mv -f "$tmp" "$dir/token"
+printf '%s\n' "$token"

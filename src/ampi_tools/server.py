@@ -46,7 +46,7 @@ from .keeper import (
 )
 from .todoist import Todoist, ToolError
 from . import ops_social
-from .maps import LATLNG_RE, Maps, latlng
+from .maps import LATLNG_RE, Maps, latlng, zone
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
 from .vault import Vault, mask_cards, mask_coords, mask_text
@@ -442,9 +442,21 @@ class Daemon:
             return {n: v for n, v in places.items() if n in names}
         return {}
 
+    def _refresh_timezone(self) -> None:
+        """Route times use home's timezone as it is now (the owner may change it in the hub without a restart)."""
+        maps, side = getattr(self.services, "maps_client", None), self.services.checkout_side
+        if maps is None or side is None:
+            return
+        try:
+            tz = side.vault.home().get("timezone") or getattr(self.services, "env_tz", "UTC")
+            maps.tz = zone(tz)
+        except (ToolError, ValueError):
+            pass
+
     def _add_places(self, ops: list[dict], origin: str) -> None:
         if not any(o["op"].startswith(("maps.", "wolt.")) for o in ops):
             return
+        self._refresh_timezone()
         places = self.places_for(origin)
         for o in ops:
             if o["op"].startswith("maps."):
@@ -1103,6 +1115,7 @@ def build_services(client: httpx.AsyncClient, home: Path) -> Services:
     services.wolt_client = Wolt(client, home, near=None, language=os.environ.get("WOLT_LANGUAGE", "en").strip())
     # The env settings stand in for a `home` place in personal info (same rules: private chat only).
     services.env_home = env_latlng("MAPS_NEAR") or env_latlng("WOLT_NEAR") or None
+    services.env_tz = os.environ.get("MAPS_TIMEZONE", "").strip() or "UTC"
     return services
 
 
@@ -1366,7 +1379,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "threads-login",
                                             "instagram-login", "wolt-login", "vault-set", "vault-show",
                                             "vault-clear", "check", "info-show", "info-set", "info-delete",
-                                            "info-default-card", "info-search", "info-reveal"])
+                                            "info-default-card", "info-search", "info-reveal", "hub"])
     parser.add_argument("what", nargs="*", help="vault-set/vault-clear: card, profile or home; info-*: NAME [FIELD|on|off]")
     parser.add_argument("--write", action="store_true", help="youtube-login: also allow changes (playlists, "
                         "subscriptions), each critical one still approved by you in Telegram")
@@ -1391,6 +1404,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.command.startswith("info-"):
         from . import info_cli
         info_cli.main(home, args.command, list(args.what), _geocode)
+        return
+    if args.command == "hub":
+        from . import hub
+        hub.main(home)
         return
     if args.command == "youtube-login":
         asyncio.run(_youtube_login(home, args.write))

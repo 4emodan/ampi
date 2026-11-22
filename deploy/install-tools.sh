@@ -81,6 +81,12 @@ install -m 644 "$SRC_DIR/deploy/ampi-tools.service" /etc/systemd/system/ampi-too
 systemctl daemon-reload
 systemctl enable ampi-tools >/dev/null 2>&1 || true
 systemctl restart ampi-tools
+# The hub (settings pages): its own service on /run/ampi-hub/hub.sock; open it with scripts/ampi-hub.ps1.
+install -m 644 "$SRC_DIR/deploy/ampi-hub.service" /etc/systemd/system/ampi-hub.service
+install -o root -g root -m 755 "$SRC_DIR/deploy/ampi-hub-token" /usr/local/sbin/ampi-hub-token
+systemctl daemon-reload
+systemctl enable ampi-hub >/dev/null 2>&1 || true
+systemctl restart ampi-hub
 # Group membership only applies to new processes.
 systemctl is-active --quiet claude-assistant && systemctl restart claude-assistant
 
