@@ -58,6 +58,10 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
                         rate limiter and daily quota budgets
   meta.py, ops_social.py Threads + Instagram (Meta's official APIs: own posts and replies/comments only);
                         token refresh, secret redaction, checks on published text
+  meta_session.py, ops_social_session.py, social_dm.py
+                        Instagram/Threads through the owner's own web session (owner's choice, against Meta's
+                        terms): allow-listed endpoints, pause on any challenge, budgets; reads only in /social
+                        conversations (origin forwarded:social), DMs only for the DM watcher, every write approved
   maps.py, ops_maps.py  Google Maps via Google's agent API (mapstools.googleapis.com, MAPS_API_KEY): places,
                         routes, weather, link resolving; local daily/monthly budget; answers carry source links
   wolt.py, ops_wolt.py  Wolt via wolt.com's own (unofficial) web API, owner's choice: venues, menus, orders,

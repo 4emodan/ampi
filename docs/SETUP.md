@@ -280,6 +280,95 @@ Optional watchers (section 9): `kind = "threads"` (`query = "replies"`) and `kin
 instructions in `watchers/social-replies.md`. More than 30 new items at once, or more than 24 runs a day,
 become a one-line notice instead of a Claude run.
 
+## 8c-2. Instagram and Threads through your own web session (optional, risky)
+
+The official APIs above can't read your feed, other people's profiles or posts, stories or messages, and don't
+work for a personal Instagram account at all. This section lets Ampi use **your own logged-in web session**
+instead, the way instagram.com and threads.com use it in your browser.
+
+**Risks you accept:** this is against Meta's terms. Instagram or Threads may ask you to confirm it's you
+(a "checkpoint"), lock the account for a while, or ban it. That is more likely here because the requests come from
+a Hetzner datacenter address far from where you usually log in. Ampi keeps it small and honest: one fixed user
+agent that says what it is, about one request a second at most, at most 120 reads an hour and 600 a day, 20
+changes an hour and 60 a day, 20 follows a day, and it never pretends to be a browser, never solves a challenge and
+never touches account settings. Only the requests listed in `src/ampi_tools/meta_session.py` (`ENDPOINTS`,
+`TH_DOCS`) are ever sent. **They have not been checked against the real sites yet**; see "First session" below.
+
+### Connect (cookies, never your password)
+
+1. In a desktop browser, log in at <https://www.instagram.com> yourself (for Threads: <https://www.threads.com>;
+   it has its own session).
+2. Open the developer tools (F12) → **Application** (Chrome/Edge) or **Storage** (Firefox) → **Cookies** →
+   `https://www.instagram.com`. Keep the tab open: you'll copy three values, `sessionid`, `csrftoken` and
+   `ds_user_id` (optionally also `mid`, `ig_did` and `datr`, your browser's own device cookies; never made up).
+3. On the server:
+   ```bash
+   sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools instagram-session'   # or threads-session
+   ```
+   Paste each value when asked (nothing is shown as you paste). Ampi checks that the session is the account in
+   `ds_user_id` (one request; never the endpoint that returns your email/phone), then saves it in
+   `/home/ampitools/instagram-session.json` (mode 600). The running service picks it up without a restart.
+4. **Don't log out** in that browser (it would end this session too); just close the tab. Add
+   `"Bash(instagram:*)"` / `"Bash(threads:*)"` to `allowed_tools` if they aren't there yet.
+
+`ampi-tools check` shows each session (on / paused / cooling down). `ampi-tools instagram-session --forget`
+deletes the saved session; logging out of all sessions in the Instagram app ends it on Meta's side too.
+
+### When Instagram asks to confirm it's you
+
+Any redirect (to a login or challenge page), a 401/403, `checkpoint_required` / `challenge_required` /
+`login_required`, a removed session cookie or a refused user agent **pauses** that session: every request fails
+with "Instagram wants you to confirm it's you…", the DM watcher stops quietly, and you get **one** Telegram notice.
+Open the Instagram app (or website), do what it asks, then run
+`sudo -u ampitools -H bash -c '~/app/.venv/bin/ampi-tools instagram-session --resume'` (or save fresh cookies with
+`instagram-session`). A "please slow down" answer (429, `feedback_required`) pauses reads for an hour; on a change
+(comment, like, follow) it pauses until you resume.
+
+### Social mode: reading in chat
+
+Feeds, profiles, bios, captions, comments, replies and stories are written by strangers, so Ampi only reads them in
+a conversation that **can't use the web**: send `/social` in a topic of your private chat. From then on, until
+`/new` (or `/reset`), that conversation runs like a group: no WebFetch, WebSearch or `browse`, and every action it
+asks for comes to you with a ⚠ ("asked for by a social-mode conversation"). In any other conversation Ampi answers
+that it can't read Instagram there and asks you to send `/social`. Only your own `/social` switches it on. Tip:
+keep one topic called "Social" for this.
+
+In social mode: `instagram feed`, `instagram profile USER`, `instagram posts USER`, `instagram post LINK`
+(with comments), `instagram stories`, `instagram story USER` (nothing is marked as seen, media isn't downloaded),
+`threads feed`, `threads profile USER`, `threads posts USER`, `threads post LINK` (with replies).
+
+Changes **always** come to you as Approve/Reject, showing exactly what will happen, and are checked again just
+before they run (if the post's caption, the comment or the account changed, nothing is done): `instagram comment
+LINK "TEXT" [--reply-to COMMENT_ID]`, `instagram like|unlike LINK [--comment ID]`, `instagram follow|unfollow
+USER`, `instagram delete-comment ID --post LINK` (your own comments, or anyone's on your posts), `threads
+like|unlike LINK`, `threads follow|unfollow USER`. A comment containing something stored in your personal info is
+flagged with ⚠ in the request. Posting on Threads stays on the official API (section 8c). Not possible: sending
+DMs, search, saved posts, follower lists, posting media.
+
+### Direct messages: only a watcher, never a chat
+
+Ampi never reads your DMs in a conversation. A watcher does: the daemon reads the inbox (no AI), a tool-less AI step
+summarizes the new messages as untrusted data, and the summary comes to your chat as a watcher message (links and
+code in it are defanged). Message requests and group chats you never wrote in are left out, nothing is marked as
+read, and it doesn't check at night (23:00-08:00 in your home timezone; change `quiet` in the file). To set it up:
+```bash
+sudo -u assistant -H bash -c 'mkdir -p ~/profiles/personal/watchers && cp -r ~/app/templates/watchers-v2/instagram-dms ~/profiles/personal/watchers/'
+```
+then ask Ampi in your private chat: *"build the watcher instagram-dms from the files that are already in
+watchers/instagram-dms, without changing them"*. You get the usual approval request (🟢 low risk: it only reads
+and messages you); its test run uses made-up messages, not yours. It checks every 15 minutes (4 of the 30
+watcher reads an hour the session allows); `instagram dms` in chat, or **Run** in `/watcher instagram-dms`, checks
+now. To stop it: `/watcher instagram-dms` → Pause or Delete.
+
+### First session: what to check
+
+The endpoints and GraphQL ids come from public knowledge of the web apps. Try one read of each kind in a social
+topic. If something fails with "changed its web app; the `X` query needs updating", or a request is refused,
+open DevTools → **Network** on the same page in your browser, find the request the site itself makes, and correct
+its path, `doc_id` or name in `ENDPOINTS` / `TH_DOCS` in `meta_session.py` (Threads `doc_id`s marked as
+placeholders there certainly need this). Don't change the user agent: if Meta refuses it, the session stops by
+design.
+
 ## 8d. Web browser (optional)
 
 `browse` opens public web pages in a headless browser that runs JavaScript ([Obscura](https://github.com/h4ckf0r0day/obscura),

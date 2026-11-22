@@ -42,7 +42,9 @@ model = "sonnet"
 # Tools Claude may use without asking. Anything else is denied (nobody can approve prompts).
 # With the Telegram reader (docs/SETUP.md, section 7) also add "Skill" and "Bash(tg-read:*)";
 # with Todoist/Gmail (section 8) add "Bash(todoist:*)" and "Bash(gmail:*)"; with YouTube (8b) "Bash(youtube:*)";
-# with Threads/Instagram (8c) "Bash(threads:*)" / "Bash(instagram:*)"; with the web browser (8d) "Bash(browse:*)"
+# with Threads/Instagram (8c) "Bash(threads:*)" / "Bash(instagram:*)" (with your own web session, 8c-2, they read
+# feeds, profiles and stories only in conversations you switch to /social mode: those run without WebFetch,
+# WebSearch and browse until /new); with the web browser (8d) "Bash(browse:*)"
 # (watchers and groups never get browse, whatever is listed here); to write in Telegram as you (7b)
 # "Bash(telegram:*)" (what goes out without asking is set in /home/ampitools/config.toml).
 allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"]
@@ -79,6 +81,9 @@ extra_args = []
 # query = "@veritasium, @3blue1brown"   # or "subscriptions"
 # every_minutes = 60
 # allowed_tools = ["Read", "Bash(youtube:*)"]
+#
+# Instagram direct messages (8c-2) are read only by the watchers v2 template templates/watchers-v2/instagram-dms
+# (copied into <workspace>/watchers/ and approved by you), never by a chat.
 #
 # [[profiles.watchers]]
 # name = "morning-briefing"
