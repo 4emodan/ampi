@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import urllib.parse
 from dataclasses import replace
@@ -27,13 +28,17 @@ def run(coro):
     return asyncio.run(coro)
 
 
+# Uploads are "recent" relative to today, so watcher windows (a few days) keep working whenever the tests run.
+RECENT = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+
 def feed_xml(cid: str, entries: list[tuple[str, str, bool]]) -> str:
     items = "".join(f"""
  <entry>
   <yt:videoId>{vid}</yt:videoId><yt:channelId>{cid}</yt:channelId><title>{title}</title>
   <link rel="alternate" href="https://www.youtube.com/{'shorts/' + vid if short else 'watch?v=' + vid}"/>
   <author><name>Chan {cid[-4:]}</name></author>
-  <published>2026-11-19T10:00:00+00:00</published>
+  <published>{RECENT}</published>
   <media:group><media:description>About {title}
 0:00 Intro
 1:30 Main part</media:description>

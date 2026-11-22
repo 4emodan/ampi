@@ -37,6 +37,8 @@ COMMANDS = [
     {"command": "cancel", "description": "Stop the current task"},
     {"command": "model", "description": "Show or set the model for this conversation"},
     {"command": "status", "description": "Show this conversation's status"},
+    {"command": "watchers", "description": "List watchers (automations)"},
+    {"command": "watcher", "description": "One watcher: details, pause, resume, run, delete"},
     {"command": "help", "description": "How to use this assistant"},
 ]
 
@@ -46,7 +48,8 @@ HELP_TEXT = (
     "/reset – forget this conversation's context\n"
     "/cancel – stop the current task\n"
     "/model [name|default] – show or change the model here\n"
-    "/status – session info and usage\n\n"
+    "/status – session info and usage\n"
+    "/watchers – your watchers; /watcher NAME – details and buttons\n\n"
     "You can send photos and files; I save them to my workspace and can read them."
 )
 
@@ -104,12 +107,10 @@ def _conversations_prompt(profile: Profile) -> str:
             f"- {CHATS_DIR}/{g.name}/ – the Telegram group \"{g.name}\", where you act on everything the owner "
             f"posts or forwards (your instructions there: groups/{g.name}.md)"
         )
-    for w in profile.watchers:
-        lines.append(
-            f"- {CHATS_DIR}/watch-{w.name}/ – runs of your watcher \"{w.name}\" ({w.kind}"
-            + (f": {w.query}" if w.query else "")
-            + f"; instructions: watchers/{w.name}.md). Its reports to the owner are also in the main chat log."
-        )
+    lines.append(
+        "- watchers/INDEX.md – your watchers (automations): what each does, its status and recent runs; use the "
+        "watchers skill (`watchers list`, `watchers show NAME`, `watchers runs NAME`) for details"
+    )
     example = profile.groups[0].name if profile.groups else "the other chat"
     if (profile.workspace / TELEGRAM_SKILL).is_file():
         history = (
@@ -166,6 +167,7 @@ class ProfileBot:
         self.permissions: Any = None  # PermissionBroker, set by main when the profile has ask_permissions
         self._watcher_slot = asyncio.Semaphore(1)
         self._stopped_by_owner: set[Key] = set()
+        self.watch_ui: Any = None  # WatchUI (watchers v2), set by main
 
     # --- polling --------------------------------------------------------------------
 
@@ -336,6 +338,10 @@ class ProfileBot:
                         origin=f"group:{group.name}" if group is not None else (
                             "forwarded:private" if any(m.get("forward_origin") for m, _ in bodies) else None),
                         extra_env=extra_env,
+                        # The owner's own words in their private chat (e.g. what `watchers build` records as the
+                        # original request); never set for groups or forwarded messages.
+                        tag=None if group is not None or any(m.get("forward_origin") for m, _ in bodies)
+                        else ("chat", self.profile.name, chat_id, thread_id, prompt[:4000]),
                     )
             except asyncio.CancelledError:
                 self._record(conv, started_at, RunResult(ok=False, text="", error="cancelled"), prompt)
@@ -359,6 +365,9 @@ class ProfileBot:
             await self._deliver(chat_id, thread_id, result, quiet_ok=group is not None)
 
     async def handle_callback(self, cq: dict) -> None:
+        if self.watch_ui is not None and (cq.get("data") or "").startswith("wt:"):
+            await self.watch_ui.handle_callback(cq)
+            return
         if self.approvals is not None and (cq.get("data") or "").startswith("ap:"):
             await self.approvals.handle_callback(cq)
             return
@@ -684,6 +693,18 @@ class ProfileBot:
         self.store.set_model(name, chat_id, thread_id, model)
         shown = model or self.profile.model or "Claude Code default"
         await self._send_text(chat_id, thread_id, f"Model for this conversation: {shown}", markdown=False)
+
+    async def _cmd_watchers(self, chat_id: int, thread_id: int, args: str) -> None:
+        if self.watch_ui is None or chat_id != self.profile.owner_chat_id:
+            await self._send_text(chat_id, thread_id, "Watchers are managed in the private chat.", markdown=False)
+            return
+        await self.watch_ui.cmd_watchers(chat_id, thread_id)
+
+    async def _cmd_watcher(self, chat_id: int, thread_id: int, args: str) -> None:
+        if self.watch_ui is None or chat_id != self.profile.owner_chat_id:
+            await self._send_text(chat_id, thread_id, "Watchers are managed in the private chat.", markdown=False)
+            return
+        await self.watch_ui.cmd_watcher(chat_id, thread_id, args)
 
     async def _cmd_status(self, chat_id: int, thread_id: int, args: str) -> None:
         conv = self.store.get_or_create(self.profile.name, chat_id, thread_id)

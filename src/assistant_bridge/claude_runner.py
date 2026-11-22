@@ -64,9 +64,17 @@ DENIED_TOOLS = (
     "Edit(./CLAUDE.local.md)",
     "Edit(./**/CLAUDE.md)",
     "Edit(./**/CLAUDE.local.md)",
+    # Watchers v2: generated status files (the registry itself lives in ampi-tools).
+    "Edit(./watchers/INDEX.md)",
+    "Edit(./watchers/*/STATUS.md)",
     # The permission prompt tool is Claude Code's to call, not Claude's (see permissions.py).
     "mcp__ampi__approve",
 )
+
+
+# Only the watcher builder writes watcher files (and only its own folder); every other run, including groups and
+# watcher agent steps, may read them but never change them.
+WATCHERS_DENY = "Edit(./watchers/**)"
 
 
 def scope_tools(allowed: Sequence[str]) -> list[str]:
@@ -91,8 +99,18 @@ def build_args(
     append_system_prompt: str | None,
     extra_args: Sequence[str] = (),
     settings_file: str | None = None,
+    tools: str | None = None,
+    system_prompt: str | None = None,
+    json_schema: str | None = None,
+    watchers_edit: bool = False,
 ) -> list[str]:
     args = [*command, "-p", "--output-format", "json", "--strict-mcp-config"]
+    if tools is not None:  # the built-in tools that exist at all ("" = none: a pure text-in, text-out call)
+        args += ["--tools", tools]
+    if system_prompt is not None:  # replaces Claude Code's own system prompt (watcher pipeline components)
+        args += ["--system-prompt", system_prompt]
+    if json_schema is not None:
+        args += ["--json-schema", json_schema]
     if settings_file:  # root-owned; blocks all reads and writes outside the workspace (deploy/claude-settings.json)
         args += ["--settings", settings_file]
     args += ["--resume", session_id] if resume else ["--session-id", session_id]
@@ -100,7 +118,8 @@ def build_args(
         args += ["--model", model]
     if allowed_tools:
         args += ["--allowedTools", ",".join(scope_tools(allowed_tools))]
-    args += ["--disallowedTools", ",".join(DENIED_TOOLS)]
+    denied = DENIED_TOOLS if watchers_edit else (*DENIED_TOOLS, WATCHERS_DENY)
+    args += ["--disallowedTools", ",".join(denied)]
     if append_system_prompt:
         args += ["--append-system-prompt", append_system_prompt]
     args += list(extra_args)
@@ -124,6 +143,8 @@ def parse_output(returncode: int, stdout: str, stderr: str) -> RunResult:
         return RunResult(ok=False, text="", error=detail)
 
     text = payload.get("result") or ""
+    if not text and isinstance(payload.get("structured_output"), (dict, list)):
+        text = json.dumps(payload["structured_output"], ensure_ascii=False)
     is_error = bool(payload.get("is_error")) or payload.get("subtype", "success") != "success"
     cost = payload.get("total_cost_usd")
     duration = payload.get("duration_ms")
@@ -149,11 +170,11 @@ class ClaudeRunner:
         self._sem = asyncio.Semaphore(max_concurrent)
         self._env = dict(env) if env is not None else clean_env(os.environ, ())
         # Tells ampi-tools which process each run is and where it comes from (see RunTracker); optional.
-        self.on_spawn: Callable[[int, str], Awaitable[None]] | None = None
+        self.on_spawn: Callable[[int, str, object], Awaitable[None]] | None = None
         self.on_exit: Callable[[int], Awaitable[None]] | None = None
 
     async def _exec(self, args: list[str], prompt: str, cwd: Path, origin: str | None = None,
-                    extra_env: Mapping[str, str] | None = None) -> RunResult:
+                    extra_env: Mapping[str, str] | None = None, tag: object = None) -> RunResult:
         env = {**self._env, **(extra_env or {})}
         if origin:
             # Tells the tool commands (and so the owner's approval requests) that this run handles outside
@@ -170,7 +191,7 @@ class ClaudeRunner:
         if self.on_spawn is not None:
             # Before claude reads its prompt (stdin), so no tool call can come before the registration.
             try:
-                await self.on_spawn(proc.pid, origin or "private")
+                await self.on_spawn(proc.pid, origin or "private", tag)
             except Exception:
                 log.warning("could not register run %s with the tools service", proc.pid, exc_info=True)
         try:
@@ -202,6 +223,12 @@ class ClaudeRunner:
         extra_args: Sequence[str] = (),
         origin: str | None = None,
         extra_env: Mapping[str, str] | None = None,
+        tag: object = None,
+        tools: str | None = None,
+        system_prompt: str | None = None,
+        json_schema: str | None = None,
+        semaphore: bool = True,
+        watchers_edit: bool = False,
     ) -> RunResult:
         """Send one message to the conversation's Claude session. `origin` (e.g. "watcher:gmail-inbox") marks
         runs that handle outside content rather than the owner's own messages.
@@ -210,7 +237,7 @@ class ClaudeRunner:
         If the stored state disagrees with Claude Code's (session missing or already created),
         retries once the other way, keeping the same session ID.
         """
-        async with self._sem:
+        async with (self._sem if semaphore else contextlib.nullcontext()):
             resume = started
             result = RunResult(ok=False, text="", error="not run")
             for attempt in range(2):
@@ -223,8 +250,12 @@ class ClaudeRunner:
                     append_system_prompt=append_system_prompt,
                     extra_args=extra_args,
                     settings_file=self._settings_file,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    json_schema=json_schema,
+                    watchers_edit=watchers_edit,
                 )
-                result = await self._exec(args, prompt, cwd, origin, extra_env)
+                result = await self._exec(args, prompt, cwd, origin, extra_env, tag)
                 if result.ok or attempt == 1 or not result.error:
                     break
                 if resume and _MISSING_SESSION.search(result.error):

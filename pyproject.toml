@@ -27,6 +27,7 @@ info = "ampi_tools.client:info_main"
 checkout = "ampi_tools.client:checkout_main"
 payment = "ampi_tools.client:payment_main"
 ampi-tools = "ampi_tools.server:main"
+watchers = "assistant_bridge.watch.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "tzdata>=2024.1"]

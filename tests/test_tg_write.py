@@ -661,7 +661,7 @@ def test_runs_are_registered_for_every_claude_process(tmp_path, fake_claude_env)
     runner = ClaudeRunner(FAKE_CLAUDE, timeout_seconds=30, max_concurrent=1, env=clean_env(os.environ, []))
     seen = []
 
-    async def spawn(pid, origin):
+    async def spawn(pid, origin, tag=None):
         seen.append(("spawn", origin))
 
     async def gone(pid):
