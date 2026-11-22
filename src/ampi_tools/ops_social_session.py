@@ -44,13 +44,16 @@ PRIVATE_REFUSAL = ("This conversation can use the web, so it can't read Instagra
                    "can read Instagram and Threads there.")
 OTHER_REFUSAL = ("Instagram and Threads content can only be read in a conversation the owner switched to social mode "
                  "(/social in their private chat), not from here.")
+WRITE_REFUSAL = ("Instagram and Threads changes (comments, likes, follows) can only be asked for from a conversation the "
+                 "owner switched to social mode (/social in their private chat).")
 DM_REFUSAL = ("Instagram direct messages are read only by the owner's DM watcher (the owner can run it with "
               "`instagram dms`); they never come into a chat.")
 
 
 def check_origin(ops: list[dict], origin: str, via: str) -> None:
     """`via` is the daemon command: "run" (a chat or agent run's tool call) or "watch.run" (a watcher's own step).
-    Reads: exactly a social conversation. DMs: only watcher steps. Watchers never get the other reads."""
+    Reads and writes: exactly a social conversation (a write's approval text quotes captions, comments and names,
+    and goes back to the calling run). DMs: only watcher steps."""
     for o in ops:
         op = o["op"]
         if op in DM_OPS:
@@ -59,6 +62,9 @@ def check_origin(ops: list[dict], origin: str, via: str) -> None:
         elif op in SOCIAL_READS:
             if via != "run" or origin != SOCIAL_ORIGIN:
                 raise ToolError(PRIVATE_REFUSAL if origin == "private" and via == "run" else OTHER_REFUSAL)
+        elif op in WRITES:
+            if via != "run" or origin != SOCIAL_ORIGIN:
+                raise ToolError(WRITE_REFUSAL)
 
 
 # --- arguments ----------------------------------------------------------------------------------------------
@@ -87,7 +93,13 @@ def _quiet(v: Any) -> str:
     return v
 
 
-FIELDS.update({"user": _username, "comment": _num_id, "thread": _num_id, "quiet": _quiet})
+def _manual(v: Any) -> bool:
+    if not isinstance(v, bool):
+        raise ToolError("manual is true or false")
+    return v
+
+
+FIELDS.update({"user": _username, "comment": _num_id, "thread": _num_id, "quiet": _quiet, "manual": _manual})
 
 
 # --- helpers ------------------------------------------------------------------------------------------------
@@ -179,15 +191,32 @@ def _count(u: dict, edge: str, flat: str) -> Any:
     return e.get("count", "?") if isinstance(e, dict) else u.get(flat, "?")
 
 
+def _ig_medias(data: Any) -> list[dict]:
+    """Media objects in a GraphQL answer (shapes change often), in order; ads left out; not inside each other."""
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def walk(x: Any) -> None:
+        if isinstance(x, dict):
+            if _pk(x) and isinstance(x.get("user"), dict) and "code" in x:
+                if _pk(x) not in seen and not x.get("ad_id") and not x.get("injected") and not x.get("ad_action"):
+                    seen.add(_pk(x))
+                    out.append(x)
+                return
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+
+    walk(data)
+    return out
+
+
 async def ig_feed(s: Services, a: dict) -> Result:
     c = igw(s)
-    data = await c.call("ig.timeline")
-    items = []
-    for it in (data.get("feed_items") or data.get("items") or []) if isinstance(data, dict) else []:
-        m = it.get("media_or_ad") if isinstance(it, dict) and "media_or_ad" in it else it
-        if isinstance(m, dict) and _pk(m) and not m.get("ad_id") and not m.get("injected"):
-            items.append(m)
-    items = items[:a.get("limit", 20)]
+    data = await c.call("ig.graphql", doc="feed", variables={"data": {"device_id": "", "is_async_ads_rti": False}})
+    items = _ig_medias(data.get("xdt_api__v1__feed__timeline__connection"))[:a.get("limit", 20)]
     if not items:
         return "Nothing in the feed."
     return _done(f"Instagram feed, newest first {DATA_NOTE}:\n" + "\n".join(_ig_media_line(m) for m in items))
@@ -342,7 +371,7 @@ def _in_quiet(s: Services, quiet: str | None) -> bool:
 
 async def ig_inbox(s: Services, a: dict) -> Result:
     c = getattr(s, "igweb_client", None)
-    if _in_quiet(s, a.get("quiet")):
+    if not a.get("manual") and _in_quiet(s, a.get("quiet")):  # a run the owner asked for checks anyway
         return {"text": "Quiet hours: not checked.", "stop": True}
     if c is not None and c.configured() and c.auth.state() in ("paused", "cooldown"):
         # The owner already got one notice; the watcher stops quietly instead of failing every 15 minutes.
@@ -352,8 +381,9 @@ async def ig_inbox(s: Services, a: dict) -> Result:
     data = await c.call("ig.inbox", params={"persistentBadging": "true", "limit": "20"}, watch=True)
     threads = social_dm.inbox_threads(data, owner)
     if not threads:
-        return {"text": "No new direct messages.", "key": "", "count": 0, "stop": True}
-    return {"text": _done(social_dm.inbox_text(threads)), "key": social_dm.inbox_key(threads), "count": len(threads)}
+        return {"text": "No new direct messages.", "key": "", "count": 0, "threads": [], "stop": True}
+    return {"text": _done(social_dm.inbox_text(threads)), "key": social_dm.inbox_key(threads), "count": len(threads),
+            "threads": social_dm.redact_threads(threads, _done)}
 
 
 async def ig_dm(s: Services, a: dict) -> Result:
@@ -378,6 +408,7 @@ def _th_posts(data: Any) -> list[dict]:
                 if _pk(x) not in seen:
                     seen.add(_pk(x))
                     out.append(x)
+                return  # a quoted or reposted post inside it belongs to it (shown by _th_line)
             for v in x.values():
                 walk(v)
         elif isinstance(x, list):
@@ -394,9 +425,15 @@ def _th_line(p: dict) -> str:
     replies = info.get("direct_reply_count", "?")
     code = p.get("code") or pk_to_shortcode(_pk(p))
     liked = " · ♥ liked by you" if p.get("has_liked") else ""
-    return (f"[{_pk(p)}] @{one(u['username'], 40)} · {_date(p.get('taken_at'))} · {p.get('like_count', '?')} likes · "
-            f"{replies} replies{liked} · https://www.threads.com/@{u['username']}/post/{code}\n"
-            f"  {one(_caption(p) or '(no text)', 500)}")
+    out = (f"[{_pk(p)}] @{one(u['username'], 40)} · {_date(p.get('taken_at'))} · {p.get('like_count', '?')} likes · "
+           f"{replies} replies{liked} · https://www.threads.com/@{u['username']}/post/{code}\n"
+           f"  {one(_caption(p) or '(no text)', 500)}")
+    share = info.get("share_info") if isinstance(info.get("share_info"), dict) else {}
+    for key, label in (("quoted_post", "quoting"), ("reposted_post", "reposting")):
+        q = share.get(key)
+        if isinstance(q, dict) and _pk(q):
+            out += f"\n  ({label} @{one(_user(q)['username'], 40)}: {one(_caption(q) or '(no text)', 300)})"
+    return out
 
 
 async def _th_user(c: WebClient, username: str) -> dict:
@@ -483,11 +520,35 @@ def _ig_comment_target(cm: dict) -> dict:
     return {"id": _pk(cm), "user_id": u["id"], "username": u["username"], "text": str(cm.get("text") or "")}
 
 
+COMMENT_PAGES = 5      # newest comments first; older ones beyond ~5 pages aren't searched
+CHILD_LOOKUPS = 10     # top comments whose replies are searched
+
+
 async def _find_comment(c: WebClient, media_id: str, comment_id: str) -> dict:
-    for cm in await _ig_comments(c, media_id):
-        if _pk(cm) == comment_id:
-            return cm
-    raise ToolError("that comment isn't among the post's comments (deleted, or a reply: use the top comment)")
+    """A comment by id: in the post's comment pages, then among the replies to them (both bounded)."""
+    parents: list[str] = []
+    cursor = None
+    for _ in range(COMMENT_PAGES):
+        data = await c.call("ig.media_comments", ids={"media": media_id},
+                            params={"min_id": cursor} if cursor else None)
+        page = [x for x in (data.get("comments") or []) if isinstance(x, dict)] if isinstance(data, dict) else []
+        for cm in page:
+            if _pk(cm) == comment_id:
+                return cm
+            if cm.get("child_comment_count"):
+                parents.append(_pk(cm))
+            for child in cm.get("preview_child_comments") or []:
+                if isinstance(child, dict) and _pk(child) == comment_id:
+                    return child
+        cursor = data.get("next_min_id") if isinstance(data, dict) and data.get("has_more_comments") else None
+        if not cursor or not isinstance(cursor, str):
+            break
+    for parent in parents[:CHILD_LOOKUPS]:
+        data = await c.call("ig.child_comments", ids={"media": media_id, "comment": parent})
+        for cm in (data.get("child_comments") or []) if isinstance(data, dict) else []:
+            if isinstance(cm, dict) and _pk(cm) == comment_id:
+                return cm
+    raise ToolError("that comment wasn't found on the post (deleted, or too far down)")
 
 
 def _same_media(old: dict, now: dict) -> None:

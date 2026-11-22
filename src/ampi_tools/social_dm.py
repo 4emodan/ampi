@@ -114,6 +114,13 @@ def inbox_text(threads: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def redact_threads(threads: list[dict], clean=lambda t: t) -> list[dict]:
+    """The structured form a watcher step gets (its own script keeps a per-conversation cursor)."""
+    return [{"thread": t["thread"], "title": clean(t["title"]), "group": t["group"], "with": t["with"],
+             "items": [{"id": i["id"], "from": i["from"], "time": i["time"], "ts": i["ts"], "text": clean(i["text"])}
+                       for i in t["items"]]} for t in threads]
+
+
 def inbox_key(threads: list[dict]) -> str:
     """Changes only when a new message arrives (for the watcher's dedupe step)."""
     return ";".join(sorted(f"{t['thread']}:{t['items'][-1]['id']}" for t in threads))
@@ -165,7 +172,7 @@ def stub_reply(op: str, args: dict | None = None) -> dict:
     if op == "igweb.inbox":
         threads = inbox_threads(FIXTURE_INBOX, FIXTURE_OWNER)
         return {"text": "(test data, not your real messages)\n" + inbox_text(threads), "key": inbox_key(threads),
-                "count": len(threads), "test": True}
+                "count": len(threads), "threads": redact_threads(threads), "test": True}
     if op == "igweb.dm":
         return {"text": "(test data, not your real messages)\n" + thread_text(FIXTURE_THREAD, FIXTURE_OWNER),
                 "test": True}

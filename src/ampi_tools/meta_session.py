@@ -101,16 +101,21 @@ class Endpoint:
 
 ENDPOINTS: dict[str, Endpoint] = {
     # Instagram (www.instagram.com, REST endpoints its web app calls)
-    "ig.home": Endpoint("instagram", "GET", "www.instagram.com", "/", "read", "html", "html"),  # unused so far
+    # The logged-in page, for the page tokens Instagram's own GraphQL requests carry (fb_dtsg, lsd).
+    "ig.home": Endpoint("instagram", "GET", "www.instagram.com", "/", "read", "html", "html"),
     "ig.user_info": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/users/{user}/info/", "read", "ig"),
     "ig.web_profile_info": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/users/web_profile_info/",
                                     "read", "ig"),                           # ?username=
-    # GUESS: the web app now loads the home feed mostly through GraphQL; this REST path still answered in 2024.
-    "ig.timeline": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/feed/timeline/", "read", "ig"),
+    # The home feed comes from GraphQL on the web (IG_DOCS["feed"]); /api/v1/feed/timeline/ is the mobile app's and
+    # is deliberately not listed.
+    "ig.graphql": Endpoint("instagram", "POST", "www.instagram.com", "/graphql/query", "read", "ig_gql", "graphql"),
     "ig.user_feed": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/feed/user/{user}/", "read", "ig"),
     "ig.media_info": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/media/{media}/info/", "read", "ig"),
     "ig.media_comments": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/media/{media}/comments/", "read",
-                                  "ig"),
+                                  "ig"),                                     # ?min_id= (next page)
+    # GUESS: replies under one comment (the web app's "View replies").
+    "ig.child_comments": Endpoint("instagram", "GET", "www.instagram.com",
+                                  "/api/v1/media/{media}/comments/{comment}/child_comments/", "read", "ig"),
     "ig.reels_tray": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/feed/reels_tray/", "read", "ig"),
     "ig.reels_media": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/feed/reels_media/", "read", "ig"),
     "ig.inbox": Endpoint("instagram", "GET", "www.instagram.com", "/api/v1/direct_v2/inbox/", "read", "ig"),
@@ -129,9 +134,10 @@ ENDPOINTS: dict[str, Endpoint] = {
                                 "write", "ig_post"),
     "ig.comment_unlike": Endpoint("instagram", "POST", "www.instagram.com", "/api/v1/web/comments/unlike/{comment}/",
                                   "write", "ig_post"),
-    "ig.follow": Endpoint("instagram", "POST", "www.instagram.com", "/api/v1/web/friendships/{user}/follow/",
+    # GUESS: the current web app's Follow button posts here (older web builds: /web/friendships/{id}/follow/).
+    "ig.follow": Endpoint("instagram", "POST", "www.instagram.com", "/api/v1/friendships/create/{user}/",
                           "follow", "ig_post"),
-    "ig.unfollow": Endpoint("instagram", "POST", "www.instagram.com", "/api/v1/web/friendships/{user}/unfollow/",
+    "ig.unfollow": Endpoint("instagram", "POST", "www.instagram.com", "/api/v1/friendships/destroy/{user}/",
                             "write", "ig_post"),
     # Threads (www.threads.com): the logged-in page (for fb_dtsg / lsd) and its GraphQL endpoint.
     "th.home": Endpoint("threads", "GET", "www.threads.com", "/", "read", "html", "html"),
@@ -146,24 +152,34 @@ class Doc:
     name: str       # fb_api_req_friendly_name the web app sends with it
     root: str       # the key under "data" a good answer has ("" = any data)
     cls: str        # read | write | follow
+    status: str = "known"  # known | stale (real but old: sent, may fail) | placeholder (never sent)
+
+    @property
+    def sendable(self) -> bool:
+        return self.status != "placeholder" and bool(re.fullmatch(r"[1-9][0-9]{8,24}", self.doc_id))
 
 
-# Threads GraphQL queries and mutations (doc_id, operation name). Meta changes doc_ids with new web builds: a doc that
-# stops answering fails with "Threads changed its web app; the `X` query needs updating", never with a guess.
+# GraphQL queries and mutations (doc_id, operation name). Meta changes doc_ids with new web builds: a doc that stops
+# answering fails with "… changed its web app; the `X` query needs updating", never with a guess. Placeholders are
+# refused locally (nothing is sent) until the real doc_id is copied from DevTools (SETUP §8c-2).
 TH_DOCS: dict[str, Doc] = {
-    # From 2023 public threads.net clients; likely stale, the names are what to look for in DevTools.
-    "profile": Doc("23996318473300828", "BarcelonaProfileRootQuery", "user", "read"),           # {userID}
-    "posts": Doc("6232751443445612", "BarcelonaProfileThreadsTabQuery", "mediaData", "read"),     # {userID}
-    "post": Doc("5587632691339264", "BarcelonaPostPageQuery", "data", "read"),                   # {postID}
-    # PLACEHOLDERS: not known; copy the real doc_id from DevTools (Network → graphql/query → doc_id).
-    "profile_by_name": Doc("0000000000000001", "BarcelonaUsernameHovercardImplQuery", "user", "read"),  # {username}
-    "feed": Doc("0000000000000002", "BarcelonaFeedTimelineQuery", "feedData", "read"),
-    "like": Doc("0000000000000003", "useTHLikeMutationLikeMutation", "", "write"),               # {mediaID}
-    "unlike": Doc("0000000000000004", "useTHLikeMutationUnlikeMutation", "", "write"),           # {mediaID}
-    "follow": Doc("0000000000000005", "useTHFollowMutationFollowMutation", "", "follow"),         # {target_user_id}
-    "unfollow": Doc("0000000000000006", "useTHUnfollowMutationUnfollowMutation", "", "write"),   # {target_user_id}
+    # STALE: from 2023 public threads.net clients; the names are what to look for in DevTools.
+    "profile": Doc("23996318473300828", "BarcelonaProfileRootQuery", "user", "read", "stale"),           # {userID}
+    "posts": Doc("6232751443445612", "BarcelonaProfileThreadsTabQuery", "mediaData", "read", "stale"),     # {userID}
+    "post": Doc("5587632691339264", "BarcelonaPostPageQuery", "data", "read", "stale"),                   # {postID}
+    # PLACEHOLDERS: unknown doc_ids, operation names guessed. Never sent.
+    "profile_by_name": Doc("0", "BarcelonaUsernameHovercardImplQuery", "user", "read", "placeholder"),   # {username}
+    "feed": Doc("0", "BarcelonaFeedTimelineQuery", "feedData", "read", "placeholder"),
+    "like": Doc("0", "useTHLikeMutationLikeMutation", "", "write", "placeholder"),                       # {mediaID}
+    "unlike": Doc("0", "useTHLikeMutationUnlikeMutation", "", "write", "placeholder"),                   # {mediaID}
+    "follow": Doc("0", "useTHFollowMutationFollowMutation", "", "follow", "placeholder"),     # {target_user_id}
+    "unfollow": Doc("0", "useTHUnfollowMutationUnfollowMutation", "", "write", "placeholder"),  # {target_user_id}
 }
-IG_DOCS: dict[str, Doc] = {}  # Instagram uses REST endpoints only (no GraphQL doc is allowed)
+IG_DOCS: dict[str, Doc] = {
+    # PLACEHOLDER: the web home feed query (answer under data.xdt_api__v1__feed__timeline__connection). Never sent.
+    "feed": Doc("0", "PolarisFeedRootPaginationCachedQuery_subscribe", "xdt_api__v1__feed__timeline__connection",
+                "read", "placeholder"),
+}
 DOCS = {"instagram": IG_DOCS, "threads": TH_DOCS}
 IG_ENDPOINTS = {k: v for k, v in ENDPOINTS.items() if v.service == "instagram"}
 TH_ENDPOINTS = {k: v for k, v in ENDPOINTS.items() if v.service == "threads"}
@@ -176,6 +192,9 @@ HEADERS: dict[str, dict[str, str]] = {
     "ig_post": {"Accept": "*/*", "X-IG-App-ID": IG_APP_ID, "X-ASBD-ID": ASBD_ID, "X-Requested-With": "XMLHttpRequest",
                 "X-CSRFToken": "{csrf}", "Referer": "https://www.instagram.com/", "Origin": "https://www.instagram.com",
                 "Content-Type": "application/x-www-form-urlencoded"},
+    "ig_gql": {"Accept": "*/*", "X-IG-App-ID": IG_APP_ID, "X-ASBD-ID": ASBD_ID, "X-CSRFToken": "{csrf}",
+               "X-FB-LSD": "{lsd}", "X-FB-Friendly-Name": "{friendly}", "Referer": "https://www.instagram.com/",
+               "Origin": "https://www.instagram.com", "Content-Type": "application/x-www-form-urlencoded"},
     "th": {"Accept": "*/*", "X-IG-App-ID": TH_APP_ID, "X-ASBD-ID": ASBD_ID, "X-CSRFToken": "{csrf}",
            "X-FB-LSD": "{lsd}", "X-FB-Friendly-Name": "{friendly}", "Referer": "https://www.threads.com/",
            "Origin": "https://www.threads.com", "Content-Type": "application/x-www-form-urlencoded"},
@@ -193,7 +212,7 @@ def allowed(method: str, host: str, path: str, doc: str | None = None, friendly:
     for name, ep in ENDPOINTS.items():
         if ep.method == method and ep.host == host and _PATHS[name].fullmatch(path):
             if ep.kind == "graphql":
-                d = next((d for d in DOCS[ep.service].values() if d.doc_id == doc), None)
+                d = next((d for d in DOCS[ep.service].values() if d.doc_id == doc and d.sendable), None)
                 if d is None or d.name != friendly:
                     return None
             elif doc is not None:
@@ -313,7 +332,7 @@ class SessionAuth:
         d = self.load()
         if not d:
             raise ToolError(f"no {self.s.name} session saved")
-        d.update(state="ok", cooldown_until=0)
+        d.update(state="ok", cooldown_until=0, resumed_at=self.clock())  # page tokens are fetched again
         d.pop("paused_reason", None)
         self.save(d)
 
@@ -342,9 +361,11 @@ PAUSE_NOTICE = ("⚠️ Ampi stopped using your {name} session: {name} asked to 
                 "out. Open the {name} app (or website) and confirm, then on the server run `ampi-tools {command} "
                 "--resume` (or save fresh cookies with `ampi-tools {command}`). Nothing more is sent until then.")
 COOLDOWN_NOTICE = "⚠️ {name} asked Ampi to slow down: no {name} requests for an hour."
-UA_TEXT = ("{name} refused the assistant's honest user agent, and Ampi doesn't pretend to be a browser, so the "
-           "{name} session is stopped (`ampi-tools {command} --resume` after checking)")
-UA_NOTICE = "⚠️ {name} refused Ampi's honest user agent; the {name} session is stopped. Ampi won't pretend to be a browser."
+UA_TEXT = ("{name}'s web endpoints refuse non-browser clients (they refused the assistant's honest user agent), and "
+           "Ampi doesn't pretend to be a browser, so the {name} session is stopped (`ampi-tools {command} --resume` "
+           "only if that changes)")
+UA_NOTICE = ("⚠️ {name}'s web endpoints refuse non-browser clients: they refused Ampi's honest user agent, so the "
+             "{name} session is stopped. Ampi won't pretend to be a browser.")
 
 
 # --- budgets ------------------------------------------------------------------------------------------------
@@ -423,6 +444,12 @@ def pk_to_shortcode(pk: str | int) -> str:
 
 
 _CHALLENGES = ("checkpoint_required", "challenge_required", "login_required")
+_LOGIN_MARKERS = ("/accounts/login", '"is_logged_in":false', 'id="loginForm"', '"viewer":null')
+HOME = {"instagram": "ig.home", "threads": "th.home"}
+
+
+class _StaleTokens(Exception):
+    """The page tokens (fb_dtsg/lsd) were refused (Meta error 1357004): fetch them once more, never a pause."""
 _SLOW_DOWN = ("feedback_required", "please wait a few minutes", "rate_limit")
 
 
@@ -449,6 +476,18 @@ class WebClient:
     async def call(self, name: str, *, ids: dict[str, str] | None = None, params: dict | None = None,
                    form: dict | None = None, doc: str | None = None, variables: dict | None = None,
                    watch: bool = False) -> Any:
+        try:
+            return await self._call(name, ids, params, form, doc, variables, watch)
+        except _StaleTokens:
+            self._tokens = {}
+        try:
+            return await self._call(name, ids, params, form, doc, variables, watch)
+        except _StaleTokens:
+            self._tokens = {}
+            raise ToolError(f"{self.s.name} refused the page tokens twice; try again later") from None
+
+    async def _call(self, name: str, ids: dict[str, str] | None, params: dict | None, form: dict | None,
+                    doc: str | None, variables: dict | None, watch: bool) -> Any:
         ep = ENDPOINTS.get(name)
         if ep is None or ep.service != self.s.key:
             raise ToolError(f"refusing an unlisted {self.s.name} request")
@@ -468,6 +507,9 @@ class WebClient:
             d = DOCS[self.s.key].get(doc or "")
             if d is None:
                 raise ToolError(f"refusing an unlisted {self.s.name} query")
+            if not d.sendable:  # nothing is sent with a made-up doc_id
+                raise ToolError(f"this {self.s.name} query ({d.name}) isn't known yet: copy its doc_id from "
+                                "DevTools (SETUP §8c-2)")
             cls, friendly = d.cls, d.name
         if allowed(ep.method, ep.host, path, d.doc_id if d else None, friendly) != name:
             raise ToolError(f"refusing {self.s.name} request outside the allow-list")
@@ -544,6 +586,8 @@ class WebClient:
         if problem == "challenge":
             self.auth.pause("challenge" if status not in (401, 403) else f"http_{status}")
             raise ToolError(self.s.paused_text)
+        if problem == "stale_tokens":
+            raise _StaleTokens()
         if problem == "user_agent":
             self.auth.pause("user_agent")
             raise ToolError(UA_TEXT.format(name=self.s.name, command=self.s.command))
@@ -575,19 +619,33 @@ class WebClient:
             raise ToolError(changed)
         return inner
 
+    def _token_key(self, cookies: dict[str, str]) -> tuple:
+        """Page tokens belong to one session: new cookies or a --resume mean fetching them again."""
+        d = self.auth.load()
+        return cookies.get("sessionid"), d.get("saved_at"), d.get("resumed_at")
+
     async def _graphql_form(self, cookies: dict[str, str]) -> dict:
         """fb_dtsg, lsd and jazoest from the owner's logged-in page (fetched again every 30 minutes)."""
-        if not self._tokens or self._clock() - self._tokens.get("at", -1e9) > TOKEN_AGE:
-            page = await self.call("th.home")
+        key = self._token_key(cookies)
+        if not self._tokens or self._tokens.get("key") != key or self._clock() - self._tokens.get("at", -1e9) > TOKEN_AGE:
+            self._tokens = {}
+            page = await self._call(HOME[self.s.key], None, None, None, None, None, False)
             dtsg = re.search(r'"DTSGInitialData",\[\],\{"token":"([^"]{8,200})"', page)
             lsd = re.search(r'"LSD",\[\],\{"token":"([^"]{4,200})"', page)
             if not dtsg or not lsd:
-                raise ToolError(f"{self.s.name} changed its web app; the page tokens (fb_dtsg/lsd) need updating")
+                # A 200 page without the tokens: logged out, or a page for clients that aren't browsers. Either way
+                # stop (paused, so this is never fetched again in a loop).
+                if any(m in page for m in _LOGIN_MARKERS):
+                    self.auth.pause("login_required")
+                    raise ToolError(self.s.paused_text)
+                self.auth.pause("user_agent")
+                raise ToolError(UA_TEXT.format(name=self.s.name, command=self.s.command))
             fb_dtsg, lsd_token = dtsg.group(1), lsd.group(1)
             jazoest = "2" + str(sum(ord(c) for c in fb_dtsg))
             for v in (fb_dtsg, lsd_token):
                 register_secret(v)
-            self._tokens = {"fb_dtsg": fb_dtsg, "lsd": lsd_token, "jazoest": jazoest, "at": self._clock()}
+            self._tokens = {"fb_dtsg": fb_dtsg, "lsd": lsd_token, "jazoest": jazoest, "at": self._clock(),
+                            "key": key}
         return {"av": cookies["ds_user_id"], "__user": "0", "__a": "1", "__comet_req": "29",
                 "fb_dtsg": self._tokens["fb_dtsg"], "jazoest": self._tokens["jazoest"], "lsd": self._tokens["lsd"]}
 
@@ -598,9 +656,11 @@ def _problem(status: int, data: Any, text: str) -> str | None:
         msg = str(data.get("message", "")).lower()
         summary = str(data.get("errorSummary", "")).lower()
         if any(c in msg for c in _CHALLENGES) or "challenge" in data or "checkpoint_url" in data \
-                or data.get("require_login") is True or data.get("error") in (1357001, 1357004) \
-                or "not logged in" in summary or "login" in summary:
+                or data.get("require_login") is True or data.get("error") == 1357001 \
+                or "not logged in" in summary or "log in" in summary:
             return "challenge"
+        if data.get("error") == 1357004:
+            return "stale_tokens"
         if "useragent" in msg or "user agent" in msg:
             return "user_agent"
         if any(c in msg for c in _SLOW_DOWN) or data.get("spam") is True:

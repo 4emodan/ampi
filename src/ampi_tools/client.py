@@ -787,7 +787,11 @@ def instagram_ops(a: argparse.Namespace) -> list[dict]:
 
 
 def _web_session(service: str) -> bool:
-    """Whether the owner saved an Instagram/Threads web session (then post links go through it)."""
+    """Whether post links go through the owner's web session: only in a social-mode conversation (AMPI_ORIGIN; the
+    daemon decides that from the process tree anyway) and only if a session is saved. Everywhere else the official
+    API keeps working as before."""
+    if os.environ.get("AMPI_ORIGIN") != "forwarded:social":
+        return False
     try:
         return bool(request({"cmd": "social.sessions"}).get(service))
     except (OSError, AttributeError):
@@ -824,8 +828,8 @@ def _main(prog: str, parser: argparse.ArgumentParser, to_ops, argv: list[str] | 
         # Direct messages never come into a chat: this only starts the owner's DM watcher, whose summary goes to them.
         response = _watcher_run(DM_WATCHER)
         if response.get("ok"):
-            response["text"] = (f"{response['text']} The summary goes to the owner's chat as a watcher message; you "
-                                "won't see the messages here.")
+            response["text"] = (f"{response['text']} The summary goes to the owner's chat as a watcher message (also "
+                                "in quiet hours, since they asked); you won't see the messages here.")
         else:
             response["error"] = (f"{response.get('error') or 'failed'} (the DM watcher is “{DM_WATCHER}”: see "
                                  "docs/SETUP.md §8c-2)")
