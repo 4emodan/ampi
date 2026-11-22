@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
@@ -41,8 +42,26 @@ def fit(text: str, limit: int) -> str:
     return text + "\n[…cut]"
 
 
+CHOICE_KEY = re.compile(r"[a-z]{1,12}")
+CONFIRM_WINDOW = 30  # seconds for the second tap on a high-risk choice
+
+
+def choices_of(item: dict) -> list[dict]:
+    """The request's own buttons (watchers v2), if valid; else [] (the default Approve / Reject)."""
+    raw = item.get("choices")
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 4:
+        return []
+    out = []
+    for c in raw:
+        if not isinstance(c, dict) or not CHOICE_KEY.fullmatch(str(c.get("key", ""))) or not isinstance(c.get("label"), str):
+            return []
+        out.append({"key": c["key"], "label": c["label"][:40]})
+    return out
+
+
 def request_text(item: dict) -> str:
-    text = f"🔐 Approve? (request #{item['id']})\n\n{item['summary']}"
+    head = "🔐 Your decision" if choices_of(item) else "🔐 Approve?"
+    text = f"{head} (request #{item['id']})\n\n{item['summary']}"
     if item.get("reason"):
         text += f"\n\nThe assistant says why: {item['reason']}"
     if item.get("grant_label"):
@@ -52,6 +71,9 @@ def request_text(item: dict) -> str:
 
 def buttons_for(item: dict) -> list[list[dict]]:
     approval_id, nonce = item["id"], item.get("nonce") or ""
+    choices = choices_of(item)
+    if choices:  # one per row, so none is tapped by mistake; data stays well under Telegram's 64 bytes
+        return [[{"text": c["label"], "callback_data": f"ap:{approval_id}:{nonce}:x{c['key']}"}] for c in choices]
     rows = [[
         {"text": "✅ Approve", "callback_data": f"ap:{approval_id}:{nonce}:y"},
         {"text": "❌ Reject", "callback_data": f"ap:{approval_id}:{nonce}:n"},
@@ -74,6 +96,8 @@ class ApprovalRelay:
         self.protected = protected
         self._clock = clock or time.monotonic
         self._sent: set[int] = set()  # requests shown already in this process (never send one twice)
+        self._confirm_keys: dict[int, set[str]] = {}  # request -> choices that need a second tap (high risk)
+        self._armed: dict[tuple[int, str], float] = {}  # (request, choice) -> time of the first tap
         self._down = False
         self._protected_at: float | None = None
 
@@ -140,6 +164,8 @@ class ApprovalRelay:
                                           "it was not carried out.")
                 continue  # 429 / network: try again on the next tick
             self._sent.add(approval_id)
+            if isinstance(item.get("confirm_keys"), list):
+                self._confirm_keys[approval_id] = {k for k in item["confirm_keys"] if isinstance(k, str)}
             notified = await self.ask(
                 self.socket, {"cmd": "approvals.notified", "id": approval_id, "message_id": sent.get("message_id")}
             )
@@ -174,13 +200,32 @@ class ApprovalRelay:
         except ValueError:
             await self.answer_quietly(cq)
             return
-        if answer not in ("y", "a", "n"):  # anything unexpected is ignored, never taken as an answer
+        choice = answer[1:] if answer.startswith("x") else None
+        if choice is not None and not CHOICE_KEY.fullmatch(choice):
             await self.answer_quietly(cq)
             return
-        approve = answer in ("y", "a")
+        if choice is None and answer not in ("y", "a", "n"):  # anything unexpected is ignored, never taken as an answer
+            await self.answer_quietly(cq)
+            return
+        confirmed = False
+        if choice is not None:
+            now = self._clock()
+            armed = self._armed.get((approval_id, choice))
+            confirmed = armed is not None and now - armed <= CONFIRM_WINDOW
+            if choice in self._confirm_keys.get(approval_id, set()) and not confirmed:
+                self._armed[(approval_id, choice)] = now
+                await self.answer_quietly(cq, f"🔴 High risk: tap the same button again within {CONFIRM_WINDOW} s "
+                                              "to confirm.")
+                return
+            self._armed.pop((approval_id, choice), None)
+            approve = choice != "reject"
+        else:
+            approve = answer in ("y", "a")
         await self.answer_quietly(cq, "Working on it…" if approve else "Rejected")
         payload = {"cmd": "approvals.decide", "id": approval_id, "approve": approve, "nonce": nonce,
                    "message_id": message.get("message_id"), "always": answer == "a"}
+        if choice is not None:
+            payload.update(choice=choice, confirmed=confirmed)
         try:
             resp = await self.ask(self.socket, payload, timeout=DECIDE_TIMEOUT)
         except ServiceUnavailable:
@@ -191,6 +236,18 @@ class ApprovalRelay:
         except ServiceError as e:
             resp = {"ok": False, "error": f"no answer from the tools service ({e}); the outcome is unknown. "
                                           "Ask me to check `approvals` before trying again."}
+        if resp.get("need_confirm") and choice is not None:
+            # The relay didn't know this needs a second tap (e.g. it restarted): nothing happened yet.
+            self._armed[(approval_id, choice)] = self._clock()
+            await self.bot.notify(f"🔴 Request #{approval_id} is high risk: tap the same button again within "
+                                  f"{CONFIRM_WINDOW} s to confirm.")
+            return
+        if resp.get("ok") and resp.get("watcher"):
+            # A watcher was turned on (or its action decided): let the engine pick it up now, not in a minute.
+            ui = getattr(self.bot, "watch_ui", None)
+            if ui is not None:
+                ui.engine.mark_dirty()
+                asyncio.get_running_loop().create_task(ui.engine.sync_soon())
         if not resp.get("ok"):
             outcome = f"⚠️ Request #{approval_id}: {resp.get('error', 'failed')}"
         else:

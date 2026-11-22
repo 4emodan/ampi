@@ -52,13 +52,13 @@ fi
 
 echo "==> todoist, gmail, youtube, threads, instagram, telegram, maps, wolt, info, checkout and payment commands for $APP_USER"
 install -d -o "$APP_USER" -g "$APP_USER" "$APP_HOME/.local/bin"
-for cmd in todoist gmail youtube threads instagram telegram maps wolt info checkout payment; do
+for cmd in todoist gmail youtube threads instagram telegram maps wolt info checkout payment watchers; do
   ln -sfn "$APP_HOME/app/.venv/bin/$cmd" "$APP_HOME/.local/bin/$cmd"
 done
 
 echo "==> Skills and watcher instructions in each profile workspace"
 for ws in "$APP_HOME"/profiles/*/; do
-  for skill in todoist gmail telegram youtube threads instagram maps wolt personal-info payment; do
+  for skill in todoist gmail telegram youtube threads instagram maps wolt personal-info payment watchers; do
     install -d -m 755 "$ws.claude/skills/$skill"
     install -m 644 "$SRC_DIR/templates/skills/$skill/SKILL.md" "$ws.claude/skills/$skill/SKILL.md"
   done
@@ -70,6 +70,10 @@ for ws in "$APP_HOME"/profiles/*/; do
     target="$ws/watchers/$(basename "$f")"
     [[ -f $target ]] || install -o "$APP_USER" -g "$APP_USER" -m 644 "$f" "$target"
   done
+  # Shared helper scripts for watchers v2: root-owned, so neither Ampi nor the builder can change them (a watcher
+  # gets a frozen copy of the ones it uses when it is approved).
+  install -d -o root -g root -m 755 "$ws/watchers/lib"
+  install -o root -g root -m 644 "$SRC_DIR"/templates/watcher-lib/*.py "$ws/watchers/lib/"
 done
 
 echo "==> systemd service"

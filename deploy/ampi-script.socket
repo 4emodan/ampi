@@ -1,0 +1,22 @@
+[Unit]
+Description=Sandbox for watcher scripts (one script run per connection)
+
+[Socket]
+# Root owns the socket, so nothing a script does can re-bind it. Group ampiscript-use = the assistant only
+# (the bridge's watcher engine); the sandbox's own user (ampiscript) is deliberately not in it.
+ListenStream=/run/ampi-script.sock
+SocketUser=root
+SocketGroup=ampiscript-use
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+# Rate cap: every claude run is the same Linux user as the engine and could connect too. PollLimit (systemd 255+)
+# pauses accepting for a moment when exceeded; TriggerLimit would put the socket into a failed state, which a
+# flood could use to stop all watcher scripts, so it is set far above what PollLimit lets through.
+PollLimitIntervalSec=10s
+PollLimitBurst=60
+TriggerLimitIntervalSec=1s
+TriggerLimitBurst=10000
+
+[Install]
+WantedBy=sockets.target

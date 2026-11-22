@@ -494,6 +494,20 @@ async def gm_show(s: Services, a: dict) -> Result:
     return "\n".join(await s.gmail.summaries(id_list(a)[:100]))
 
 
+async def gm_meta(s: Services, a: dict) -> Result:
+    """For watchers: headers and snippet of messages, as data (a script can filter by sender without an LLM)."""
+    from .gmail import headers as gm_headers
+    ids = id_list(a)[:100]
+    names = await s.gmail.label_names()
+    items = []
+    for m in await s.gmail.metadata(ids):
+        h = gm_headers(m)
+        items.append({"id": m.get("id", ""), "from": h.get("from", ""), "to": h.get("to", ""),
+                      "subject": h.get("subject", ""), "date": h.get("date", ""), "snippet": m.get("snippet", ""),
+                      "labels": [names.get(x, x) for x in m.get("labelIds", [])]})
+    return {"items": items, "text": ""}
+
+
 def _check_safe_labels(names: list[str]) -> None:
     for n in names:
         up = n.upper()
@@ -1149,6 +1163,7 @@ OPS: dict[str, Op] = {op.name: op for op in [
     Op("gmail.drafts", False, gm_drafts),
     Op("gmail.ids", False, gm_ids),
     Op("gmail.show", False, gm_show),
+    Op("gmail.meta", False, gm_meta),
     Op("gmail.label", False, gm_label),
     Op("gmail.archive", False, _gm_labels_op([], ["INBOX"], "Archived")),
     Op("gmail.mark_read", False, _gm_labels_op([], ["UNREAD"], "Marked as read:")),
@@ -1226,24 +1241,47 @@ class Approvals:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
         have = {r[1] for r in self.db.execute("PRAGMA table_info(approvals)")}
-        for column, kind in (("nonce", "TEXT"), ("message_id", "INTEGER"), ("grants", "TEXT")):
+        for column, kind in (("nonce", "TEXT"), ("message_id", "INTEGER"), ("grants", "TEXT"),
+                             # watchers v2: what kind of request, its buttons, its own expiry, a dedupe key, extra data
+                             ("kind", "TEXT"), ("choices", "TEXT"), ("confirm_keys", "TEXT"), ("expires", "REAL"),
+                             ("idem_key", "TEXT"), ("meta", "TEXT")):
             if column not in have:  # databases created by older versions
                 self.db.execute(f"ALTER TABLE approvals ADD COLUMN {column} {kind}")
         # Requests from before nonces existed can never be answered safely.
         self.db.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND nonce IS NULL")
         self.db.commit()
 
-    def add(self, ops: list[dict], summary: str, reason: str | None, grants: list[dict] | None = None) -> int:
+    def add(self, ops: list[dict], summary: str, reason: str | None, grants: list[dict] | None = None, *,
+            kind: str | None = None, choices: list[dict] | None = None, confirm_keys: list[str] | None = None,
+            ttl: float | None = None, idem_key: str | None = None, meta: dict | None = None) -> int:
+        now = time.time()
         cur = self.db.execute(
-            "INSERT INTO approvals (created, ops, summary, reason, nonce, grants) VALUES (?, ?, ?, ?, ?, ?)",
-            (time.time(), json.dumps(ops), summary, reason, secrets.token_hex(8),
-             json.dumps(grants) if grants else None),
+            "INSERT INTO approvals (created, ops, summary, reason, nonce, grants, kind, choices, confirm_keys, expires, "
+            "idem_key, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (now, json.dumps(ops), summary, reason, secrets.token_hex(8),
+             json.dumps(grants) if grants else None, kind, json.dumps(choices) if choices else None,
+             json.dumps(confirm_keys) if confirm_keys else None, now + ttl if ttl else None, idem_key,
+             json.dumps(meta) if meta else None),
         )
         self.db.commit()
         return int(cur.lastrowid)
 
+    def by_idem(self, idem_key: str) -> dict | None:
+        row = self.db.execute("SELECT * FROM approvals WHERE idem_key=? ORDER BY id DESC", (idem_key,)).fetchone()
+        return dict(row) if row else None
+
+    def watcher_pending(self, watcher: str | None = None) -> int:
+        """Open requests from watchers (all, or one watcher "profile/name"); counted apart from chat requests."""
+        self.expire()
+        rows = self.db.execute("SELECT meta FROM approvals WHERE status='pending' AND kind='watch.action'").fetchall()
+        if watcher is None:
+            return len(rows)
+        return sum(1 for (m,) in rows if (json.loads(m or "{}")).get("watcher") == watcher)
+
     def expire(self) -> None:
         now = time.time()
+        self.db.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND expires IS NOT NULL AND "
+                        "expires < ?", (now,))
         self.db.execute("UPDATE approvals SET status='expired' WHERE status='pending' AND created < ?",
                         (now - APPROVAL_TTL,))
         # A Telegram message approved days later would be stale ("on my way"): those expire after a day.
@@ -1252,8 +1290,9 @@ class Approvals:
         self.db.commit()
 
     def pending_count(self, telegram: bool = False) -> int:
+        """Open requests from chats and old-style runs (watchers v2 have their own caps, see watcher_pending)."""
         self.expire()
-        q = "SELECT COUNT(*) FROM approvals WHERE status='pending'"
+        q = "SELECT COUNT(*) FROM approvals WHERE status='pending' AND (kind IS NULL OR kind NOT LIKE 'watch.%')"
         if telegram:
             q += " AND ops LIKE '%\"op\": \"telegram.%'"
         return self.db.execute(q).fetchone()[0]
@@ -1261,12 +1300,18 @@ class Approvals:
     def unnotified(self) -> list[dict]:
         self.expire()
         rows = self.db.execute(
-            "SELECT id, summary, reason, nonce, created, grants FROM approvals WHERE status='pending' AND notified=0 "
-            "ORDER BY id"
+            "SELECT id, summary, reason, nonce, created, grants, kind, choices, confirm_keys FROM approvals "
+            "WHERE status='pending' AND notified=0 ORDER BY id"
         )
         out = []
         for r in rows:
             item = dict(r)
+            for key in ("choices", "confirm_keys"):  # the buttons of watcher requests (default: Approve / Reject)
+                value = json.loads(item.pop(key) or "null")
+                if value:
+                    item[key] = value
+            if not item.get("kind"):
+                item.pop("kind", None)
             grants = json.loads(item.pop("grants") or "null")
             if grants:  # what the "always" button would allow, shown in the request text
                 item["grant_label"] = "; ".join(

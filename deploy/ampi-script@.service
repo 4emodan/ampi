@@ -1,0 +1,79 @@
+[Unit]
+Description=Watcher script sandbox (connection %i)
+# Watcher scripts are written by an AI and run unattended. Each run gets a fresh instance as its own user with
+# no network and no socket of any kind (the connection arrives as stdin/stdout), no home directories, no /run,
+# a read-only system and only a private /tmp. Everything in this cgroup dies when the request ends.
+CollectMode=inactive-or-failed
+
+[Service]
+Type=simple
+User=ampiscript
+Group=ampiscript
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+Environment=AMPI_SCRIPT_SANDBOX=1
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-script/script_runner.py
+RuntimeMaxSec=90
+KillMode=control-group
+TimeoutStopSec=5
+
+# Resources
+MemoryHigh=200M
+MemoryMax=256M
+MemorySwapMax=0
+OOMPolicy=continue
+OOMScoreAdjust=900
+CPUQuota=50%
+CPUWeight=20
+IOWeight=20
+Nice=10
+TasksMax=16
+LimitNOFILE=64
+LimitFSIZE=24M
+LimitCORE=0
+
+# Privileges
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+KeyringMode=private
+RemoveIPC=true
+UMask=0077
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# (Not @resources: the runner lowers its child's rlimits with setrlimit, which is all an unprivileged process can do.)
+SystemCallFilter=~@privileged @mount @debug @cpu-emulation @obsolete @clock @module @reboot @swap io_uring_setup io_uring_enter io_uring_register
+SystemCallErrorNumber=EPERM
+
+# Filesystem: the system read-only, the runner, and a private /tmp; nothing else
+ProtectSystem=strict
+ProtectHome=tmpfs
+PrivateTmp=yes
+PrivateDevices=true
+PrivateIPC=true
+PrivateUsers=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# (A denylist of top-level directories: if a project ever adds one, e.g. /data, add it here.)
+TemporaryFileSystem=/etc:ro /var:ro /srv:ro /opt:ro /mnt:ro /media:ro /usr/local:ro /run:ro /boot:ro /snap:ro /root:ro
+TemporaryFileSystem=/tmp:size=64M,mode=1777
+BindReadOnlyPaths=/etc/ld.so.cache -/etc/localtime /etc/ampi-script/passwd:/etc/passwd /etc/ampi-script/group:/etc/group
+BindReadOnlyPaths=/usr/local/lib/ampi-script
+InaccessiblePaths=-/sys/firmware
+
+# Network: none at all
+PrivateNetwork=yes
+RestrictAddressFamilies=none
+IPAddressDeny=any

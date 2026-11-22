@@ -36,8 +36,13 @@ import httpx
 
 from .gmail import Gmail, GmailAuth, GoogleAuth
 from .ops import (
-    MAX_PENDING, OPS, Approvals, Policy, Services, clean, execute, pre_resolve, prepare, shares_with_others, summarize,
-    validate,
+    MAX_PENDING, MAX_SUMMARY, OPS, Approvals, Policy, Services, clean, clean_block, execute, pre_resolve, prepare,
+    shares_with_others, summarize, validate,
+)
+from . import watch_spec as ws
+from .keeper import (
+    ACTIVATE_TTL, ALL_WATCHERS_PENDING_CAP, DEFAULT_ACTION_TTL, MAX_ACTION_TTL, ORIGIN_RE, WATCHER_PENDING_CAP, Keeper,
+    actual_route, b64decode_files, b64encode_files, parse_origin, resolve_routes, route_fits,
 )
 from .todoist import Todoist, ToolError
 from . import ops_social
@@ -54,12 +59,25 @@ from .ops_telegram import (
 from .youtube import SCOPE_READ, SCOPE_WRITE, YouTube
 
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
-MAX_REQUEST = 1024 * 1024
+MAX_REQUEST = 32 * 1024 * 1024  # watcher snapshots and space files (base64) travel in one line
 # Only the bridge's main process may: answer approvals, post notices, say which claude runs exist and where
 # they come from, and say which chats the assistant reads itself.
 ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide", "notices.ack", "runs.register",
-         "runs.unregister", "telegram.protect"}
-WATCHER_ONLY = {"youtube.ids", "youtube.show"} | ops_social.WATCHER_ONLY
+         "runs.unregister", "telegram.protect",
+         # watchers v2: only the bridge's engine talks to the keeper
+         "watch.propose", "watch.get", "watch.list", "watch.status", "watch.delete", "watch.space_get",
+         "watch.space_put", "watch.audit", "watch.run"}
+WATCHER_ONLY = {"youtube.ids", "youtube.show", "gmail.meta"} | ops_social.WATCHER_ONLY
+ACTIVATE_CHOICES = [{"key": "all", "label": "✅ Turn on and allow all"},
+                    {"key": "ask", "label": "▶️ Turn on, ask each time"},
+                    {"key": "reject", "label": "❌ Reject"}]
+ACTION_CHOICES = [{"key": "approve", "label": "✅ Approve"},
+                  {"key": "watcher", "label": "✅ Allow for this watcher"},
+                  {"key": "reject", "label": "❌ Reject"}]
+# For an action with no destination to pin (nothing a lifetime grant could be limited to): approve once only.
+ONCE_CHOICES = [ACTION_CHOICES[0], ACTION_CHOICES[2]]
+PROPOSALS_PENDING_CAP = 5
+RISK_ICON = ws.RISK_ICON
 log = logging.getLogger("ampi-tools")
 
 PidCheck = Callable[[int], Awaitable[bool]]
@@ -134,13 +152,15 @@ def peer_pid(writer: asyncio.StreamWriter) -> int:
 
 class Daemon:
     def __init__(self, services: Services, approvals: Approvals, policy: Policy, trusted: PidCheck,
-                 runs: RunRegistry | None = None):
+                 runs: RunRegistry | None = None, keeper: Keeper | None = None):
         self.services = services
         self.approvals = approvals
         self.policy = policy
         self.trusted = trusted
         self.runs = runs or RunRegistry()
+        self.keeper = keeper
         self._tg_lock = asyncio.Lock()
+        self._limits: dict[str, dict] = {}  # snapshot hash -> its [limits]
 
     @property
     def tg_store(self) -> TelegramStore | None:
@@ -176,18 +196,27 @@ class Daemon:
                     self.tg_store.ack_notice(_int(request.get("id")))
                 return {"ok": True}
             if cmd == "approvals.decide":
+                choice = request.get("choice")
                 return await self.decide(
                     _int(request.get("id")), request.get("approve") is True,
                     str(request.get("nonce") or ""), _opt_int(request.get("message_id")),
                     always=request.get("always") is True,
+                    choice=choice if isinstance(choice, str) else None,
+                    confirmed=request.get("confirmed") is True,
                 )
             if cmd == "runs.register":
                 origin = request.get("origin")
                 if not isinstance(origin, str) or not (
                         origin == "private" or origin.startswith(("group:", "watcher:", "forwarded:"))):
                     raise ToolError("origin must be private, group:NAME, watcher:NAME or forwarded:…")
-                self.runs.register(_int(request.get("pid")), origin[:100])
+                if origin.startswith("watcher:") and ("/" in origin or "@" in origin) and not ORIGIN_RE.fullmatch(origin):
+                    raise ToolError("bad watcher origin (watcher:<profile>/<name>@<hash12>#<step>)")
+                if len(origin) > 200:
+                    raise ToolError("origin too long")
+                self.runs.register(_int(request.get("pid")), origin)
                 return {"ok": True}
+            if isinstance(cmd, str) and cmd.startswith("watch."):
+                return await self.watch_cmd(cmd, request)
             if cmd == "runs.unregister":
                 self.runs.unregister(_int(request.get("pid")))
                 return {"ok": True}
@@ -208,6 +237,15 @@ class Daemon:
     async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "unknown") -> dict:
         """`origin` is where the request really came from ("private", "group:…", "watcher:…" or "unknown");
         `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
+        parsed = parse_origin(origin)
+        if parsed is not None:
+            # A Claude run of a watcher's agent step (watchers v2): changes go through the keeper.
+            if any(ws.is_write(o["op"]) or o["op"] in ws.NOT_FOR_WATCHERS for o in ops):
+                profile, name, hash12, step = parsed
+                if step is None:
+                    raise ToolError("watcher actions go through the watcher engine")
+                return await self.watcher_action(profile, name, hash12, step, ops, reason, None,
+                                                 DEFAULT_ACTION_TTL, None, agent=True)
         if sum(o["op"] in WOLT_BASKET_OPS for o in ops) > 1:  # each would replace the one before it
             raise ToolError("one Wolt basket per request")
         if any(o["op"] in CHECKOUT_PRIVATE for o in ops):
@@ -308,7 +346,7 @@ class Daemon:
         return {"ok": ok, "text": text, **extra} if ok else {"ok": False, "error": text}
 
     async def decide(self, approval_id: int, approve: bool, nonce: str, message_id: int | None,
-                     always: bool = False) -> dict:
+                     always: bool = False, choice: str | None = None, confirmed: bool = False) -> dict:
         current = self.approvals.get(approval_id)
         # The nonce is only ever given to the bridge (approvals.pending) and the button it sent; the
         # message id is the one the bridge recorded for that button. A forged button fails both.
@@ -316,6 +354,17 @@ class Daemon:
             raise ToolError("unknown or forged approval button")
         if current.get("message_id") is not None and message_id != current["message_id"]:
             raise ToolError("this button isn't the approval message that was sent for this request")
+        choices = json.loads(current.get("choices") or "null")
+        if choices or choice is not None:
+            keys = [c["key"] for c in choices or []]
+            if choice not in keys:
+                raise ToolError("that isn't one of this request's buttons")
+            if choice in json.loads(current.get("confirm_keys") or "[]") and not confirmed:
+                return {"ok": False, "need_confirm": True,
+                        "error": "High risk: tap the same button again to confirm."}
+            if current.get("kind") == "watch.activate":
+                return self._decide_activate(current, choice)
+            return await self._decide_watch_action(current, choice)
         grants = json.loads(current.get("grants") or "null")
         if always and not (approve and grants):
             raise ToolError("this request has no “always” option")
@@ -347,6 +396,411 @@ class Daemon:
             text += f"\nFrom now on (30 days) sending there doesn't need your approval: {grants[0]['title']}."
             log.info("approval #%s approved with a standing permission", approval_id)
         return {"ok": True, "status": status, "text": text}
+
+    # --- watchers v2 (the keeper) ----------------------------------------------------------------------
+
+    def _keeper(self) -> Keeper:
+        if self.keeper is None:
+            raise ToolError("the watcher keeper isn't set up")
+        return self.keeper
+
+    def _decide_activate(self, current: dict, choice: str) -> dict:
+        k = self._keeper()
+        meta = json.loads(current.get("meta") or "{}")
+        item = self.approvals.claim(current["id"], "rejected" if choice == "reject" else "approved")
+        if item is None:
+            state = (self.approvals.get(current["id"]) or {}).get("status", "unknown")
+            return {"ok": True, "status": state, "text": f"Request #{current['id']} is already {state}."}
+        pid = int(meta.get("proposal", 0))
+        if choice == "reject":
+            k.close_proposal(pid, "rejected")
+            self.approvals.finish(current["id"], "rejected", "Rejected; the watcher wasn't turned on.")
+            return {"ok": True, "status": "rejected", "text": "Rejected; the watcher wasn't turned on.",
+                    "watcher": meta.get("name")}
+        try:
+            w = k.activate(pid, "all" if choice == "all" else "ask")
+        except ToolError as e:
+            k.close_proposal(pid, "failed")
+            self.approvals.finish(current["id"], "failed", str(e))
+            return {"ok": True, "status": "failed", "text": str(e), "watcher": meta.get("name")}
+        how = ("everything it lists is allowed until you change or delete it" if choice == "all"
+               else "each change it wants asks you first")
+        text = f"Watcher “{w.get('name')}” is on ({how})."
+        self.approvals.finish(current["id"], "done", text)
+        log.info("watcher %s/%s activated (%s, %s)", w.get("profile"), w.get("name"), choice, (w.get("hash") or "")[:12])
+        return {"ok": True, "status": "done", "text": text, "watcher": w.get("name")}
+
+    async def _decide_watch_action(self, current: dict, choice: str) -> dict:
+        k = self._keeper()
+        meta = json.loads(current.get("meta") or "{}")
+        approve = choice in ("approve", "watcher")
+        item = self.approvals.claim(current["id"], "approved" if approve else "rejected")
+        audit = k.audit_for_approval(current["id"])
+        if item is None:
+            state = (self.approvals.get(current["id"]) or {}).get("status", "unknown")
+            if audit and state == "expired":
+                k.audit_update(audit["id"], "expired")
+            return {"ok": True, "status": state, "text": f"Request #{current['id']} is already {state}."}
+        if not approve:
+            if audit:
+                k.audit_update(audit["id"], "rejected", "rejected by the owner")
+            return {"ok": True, "status": "rejected", "text": "Rejected; nothing was done."}
+        try:  # the watcher may have been paused, deleted or replaced while the request waited
+            k.active(meta["profile"], meta["name"], str(meta["hash"])[:12])
+        except (ToolError, KeyError):
+            text = "Not done: the watcher was paused, changed or deleted since it asked."
+            self.approvals.finish(current["id"], "failed", text)
+            if audit:
+                k.audit_update(audit["id"], "failed", text)
+            return {"ok": True, "status": "failed", "text": text}
+        if audit:
+            k.audit_update(audit["id"], "approved")
+        ok, text, status = False, "interrupted", "failed"
+        try:
+            ops = json.loads(item["ops"])
+            for o in ops:
+                o["args"]["approval_id"] = current["id"]
+            ok, text, _ = await execute(self.services, ops)
+            status = "done" if ok else "failed"
+        finally:
+            self.approvals.finish(current["id"], status, text)
+            if audit:
+                k.audit_update(audit["id"], status, text)
+        if choice == "watcher" and ok:
+            k.add_grant(meta["profile"], meta["name"], meta["hash"], meta["step"], meta["op"], meta["route"])
+            text += (f"\nFrom now on watcher “{meta['name']}” may do this ({meta['op']}, same destination) without "
+                     "asking, until you change or delete it.")
+        return {"ok": True, "status": status, "text": text}
+
+    def _limits_of(self, h: str) -> dict:
+        if h not in self._limits:
+            self._limits[h] = ws.parse(self._keeper().files(h)).limits
+        return self._limits[h]
+
+    async def watch_cmd(self, cmd: str, req: dict) -> dict:
+        k = self._keeper()
+        profile, name = req.get("profile"), req.get("name")
+        if cmd not in ("watch.run",) and (not isinstance(profile, str) or not ws.NAME_RE.fullmatch(profile)):
+            raise ToolError("bad profile")
+        if cmd not in ("watch.list", "watch.run") and (not isinstance(name, str) or not ws.NAME_RE.fullmatch(name)):
+            raise ToolError("bad watcher name")
+        if cmd == "watch.propose":
+            return await self.watch_propose(profile, name, req)
+        if cmd == "watch.get":
+            w = k.watcher(profile, name)
+            if not w or w["status"] not in ("active", "paused", "failing") or not w["hash"]:
+                raise ToolError(f"no approved watcher {name}")
+            return {"ok": True, "status": w["status"], "hash": w["hash"], "mode": w["mode"], "risk": w["risk"],
+                    "manifest": k.manifest(w), "files": b64encode_files(k.files(w["hash"])), "request": w["request"],
+                    "created": w["created"], "approved": w["approved"], "description": w["description"]}
+        if cmd == "watch.list":
+            return {"ok": True, "watchers": k.list(profile)}
+        if cmd == "watch.status":
+            status = req.get("status")
+            if status not in ("paused", "failing", "active"):
+                raise ToolError("status must be paused, failing or active")
+            k.set_status(profile, name, status)
+            return {"ok": True, "status": status}
+        if cmd == "watch.delete":
+            k.delete(profile, name)
+            return {"ok": True}
+        if cmd == "watch.space_get":
+            return {"ok": True, "files": b64encode_files(k.space_get(profile, name))}
+        if cmd == "watch.space_put":
+            w = k.watcher(profile, name)
+            h = req.get("hash")
+            if not w or not isinstance(h, str) or len(h) < 12 or not (w["hash"] or "").startswith(h):
+                raise ToolError("space can only be changed by the approved version of the watcher")
+            raw = req.get("changes")
+            if not isinstance(raw, dict):
+                raise ToolError("changes must be an object")
+            changes = {p: None for p, v in raw.items() if v is None}
+            changes.update(b64decode_files({p: v for p, v in raw.items() if v is not None}, "changes"))
+            run_id = req.get("run") if isinstance(req.get("run"), str) else None
+            try:
+                n = k.space_put(profile, name, w["hash"], run_id, changes)
+            except ws.SpecError as e:
+                raise ToolError(str(e)) from None
+            return {"ok": True, "changed": n}
+        if cmd == "watch.audit":
+            limit = req.get("limit", 20)
+            return {"ok": True, "items": k.audit(profile, name, min(_int(limit), 200))}
+        if cmd == "watch.run":
+            parsed = parse_origin(req.get("origin") or "")
+            if parsed is None or parsed[3] is not None:
+                raise ToolError("origin must be watcher:<profile>/<name>@<hash12>")
+            step = req.get("step")
+            if not isinstance(step, str) or not ws.STEP_ID_RE.fullmatch(step):
+                raise ToolError("step must be the step id")
+            idem = req.get("idem_key")
+            if idem is not None and (not isinstance(idem, str) or not 1 <= len(idem) <= 200):
+                raise ToolError("idem_key must be text (run id + step)")
+            ttl = req.get("ttl_seconds", DEFAULT_ACTION_TTL)
+            if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not 60 <= ttl <= MAX_ACTION_TTL:
+                raise ToolError("ttl_seconds must be between 60 and 3 days")
+            run_id = req.get("run") if isinstance(req.get("run"), str) else None
+            ops = validate(req.get("ops"))
+            return await self.watcher_action(parsed[0], parsed[1], parsed[2], step, ops, req.get("reason"), idem,
+                                             float(ttl), run_id, agent=False)
+        raise ToolError(f"unknown command {cmd!r}")
+
+    async def watch_propose(self, profile: str, name: str, req: dict) -> dict:
+        k = self._keeper()
+        files = b64decode_files(req.get("files"))
+        try:
+            spec = ws.parse(files, expected_name=name)
+        except ws.SpecError as e:
+            raise ToolError(f"the watcher isn't valid: {e}") from None
+        current = k.watcher(profile, name)
+        if current and current["status"] == "deleted":
+            pass  # a new watcher under an old name: allowed
+        pending = k.pending_proposal(profile, name)
+        if pending:
+            # A proposal whose request expired (or failed) is closed, so it can't block the name forever.
+            self.approvals.expire()
+            ap = self.approvals.get(pending["approval_id"]) if pending.get("approval_id") else None
+            if ap is not None and ap.get("status") == "pending":
+                raise ToolError(f"a proposal for {name} is already waiting for the owner's answer")
+            k.close_proposal(pending["id"], "expired")
+        if current and current.get("hash") == spec.hash and current["status"] in ("active", "paused", "failing"):
+            raise ToolError("that exact version is already approved")
+        self.approvals.expire()
+        waiting = self.approvals.db.execute(
+            "SELECT COUNT(*) FROM approvals WHERE status='pending' AND kind='watch.activate'").fetchone()[0]
+        if waiting >= PROPOSALS_PENDING_CAP:
+            raise ToolError(f"{PROPOSALS_PENDING_CAP} watcher proposals are already waiting for the owner's answer")
+        entries = await resolve_routes(self.services, ws.manifest(spec))
+        level, _ = ws.risk(entries)
+        request = req.get("request") if isinstance(req.get("request"), str) else ""
+        requester = req.get("requester") if isinstance(req.get("requester"), str) else ""
+        test_text = req.get("test_text") if isinstance(req.get("test_text"), str) else ""
+        pid = k.store_proposal(profile, name, spec, entries, level, request[:4000], requester[:200], test_text[:20000])
+        changed = current and current.get("hash") and current["status"] != "deleted"
+        head = (f"🧩 {'Changed' if changed else 'New'} watcher “{name}”" + (f" (profile {profile})" if profile != "personal" else "")
+                + f"\n{clean(spec.description, 300)}")
+        asked = f"Requested by {clean(requester, 80) or 'Ampi'}; your words:\n{clean_block(request[:600] or '(none recorded)')}"
+        body = ws.describe(spec, entries)
+        titles = [f"  chat {cid} = {clean(t, 60)}" for e in entries for cid, t in
+                  zip((e['route']['chat'] if isinstance(e.get('route', {}).get('chat'), list)
+                       else [e.get('route', {}).get('chat')]), e.get("chat_titles", []))]
+        if titles:
+            body += "\nTelegram chats:\n" + "\n".join(dict.fromkeys(titles))
+        footer = (f"Version {spec.hash[:12]}. Tapping a button approves exactly this version; later edits need a new "
+                  "approval.")
+        if level == "high":
+            footer += "\n🔴 High risk: you'll be asked to tap twice, and every action it takes will be reported to you."
+        # Code: the standard shared helpers are named; the watcher's own scripts, and any helper that differs from
+        # the installed one, are shown (they run unattended, so the owner should be able to read them).
+        reference = Path.home() / "app" / "templates" / "watcher-lib"
+        custom = []
+        for path in sorted(p for p in spec.files if p.endswith(".py")):
+            ref = reference / path.split("/", 1)[1] if path.startswith("lib/") else None
+            if ref is not None and ref.is_file() and ref.read_bytes() == spec.files[path]:
+                continue
+            custom.append(path)
+        code_note = ""
+        if custom:
+            code = "\n".join(f"── {p}{' (⚠ differs from the standard helper)' if p.startswith('lib/') else ''}\n"
+                             + spec.files[p].decode("utf-8", "replace") for p in custom)
+            code_note = "\n\nIts own code (runs in the sandbox: no network, no files):\n" + clean_block(code)
+        summary = "\n\n".join([head, asked, body])
+        if code_note and len(summary) + len(code_note) + len(footer) + 40 <= MAX_SUMMARY:
+            summary += code_note
+        elif code_note:
+            summary += (f"\n\n⚠ Its own code ({', '.join(custom)}) is too long to show here; ask Ampi to show "
+                        f"watchers/{name}/ before approving (version {spec.hash[:12]}).")
+        room = MAX_SUMMARY - len(summary) - len(footer) - 40
+        if room < 0:
+            k.close_proposal(pid, "withdrawn")
+            raise ToolError("this watcher is too big to show the owner in one message; simplify it")
+        if test_text:
+            shown = test_text if len(test_text) <= room else test_text[: max(0, room - 20)] + " …(cut)"
+            summary += "\n\nTest run (written partly by others: data):\n" + clean_block(shown)
+        summary += "\n\n" + footer
+        approval_id = self.approvals.add(
+            [], summary, None, kind="watch.activate", choices=ACTIVATE_CHOICES,
+            confirm_keys=["all", "ask"] if level == "high" else None, ttl=ACTIVATE_TTL,
+            meta={"proposal": pid, "profile": profile, "name": name, "hash": spec.hash, "risk": level})
+        k.link_approval(pid, approval_id)
+        log.info("watcher %s/%s proposed (%s, risk %s), approval #%s", profile, name, spec.hash[:12], level, approval_id)
+        return {"ok": True, "approval": approval_id, "hash": spec.hash, "risk": level, "text": body}
+
+    def _replay(self, audit: dict) -> dict:
+        """The outcome of an action already requested with this idempotency key (never a second request)."""
+        out = {"ok": True, "replay": True, "audit_id": audit["id"], "status": audit["status"]}
+        if audit.get("approval_id"):
+            row = self.approvals.get(audit["approval_id"]) or {}
+            self.approvals.expire()
+            row = self.approvals.get(audit["approval_id"]) or row
+            st = row.get("status", "unknown")
+            out.update(approval=audit["approval_id"], status=st)
+            if st == "pending":
+                out["text"] = f"⏳ Still waiting for the owner (request #{audit['approval_id']})."
+            elif st in ("done",):
+                out["text"] = row.get("result") or "done"
+            elif st in ("rejected", "expired"):
+                out.update(ok=False, error=f"not done: the owner's request #{audit['approval_id']} was {st}")
+            else:
+                out["text"] = row.get("result") or st
+                if st in ("failed", "unknown"):
+                    out.update(ok=False, error=row.get("result") or st)
+            return out
+        if audit["status"] in ("failed", "unknown"):
+            out.update(ok=False, error=audit.get("result") or audit["status"])
+        else:
+            out["text"] = audit.get("result") or audit["status"]
+        return out
+
+    async def _checkout_gate(self, k: Keeper, profile: str, name: str, o: dict, declared: list[dict]) -> str:
+        """Checkout from a watcher: only on the exact site it declared, in the session it opened. Returns the site."""
+        sites = {e["route"].get("site") for e in declared if isinstance(e["route"].get("site"), str)}
+        if not sites:
+            raise ToolError(f"{o['op']} isn't declared with a fixed site for this watcher step")
+        side = self.services.checkout_side
+        if side is None:
+            raise ToolError("the checkout browser isn't set up")
+        if o["op"] == "checkout.open":
+            from urllib.parse import urlsplit
+            u = urlsplit(o["args"].get("url", ""))
+            site = f"{u.scheme}://{u.hostname or ''}" + (f":{u.port}" if u.port else "")
+            if u.scheme != "https" or site not in sites:
+                raise ToolError(f"this watcher may only open {', '.join(sorted(sites))}")
+            return site
+        st = await side.client.call({"cmd": "status"})
+        rec = k.checkout_sessions.get(st.get("session") or "")
+        if not rec or rec[:2] != (profile, name) or rec[2] not in sites:
+            raise ToolError("the checkout session wasn't opened by this watcher on its site")
+        return rec[2]
+
+    async def watcher_action(self, profile: str, name: str, hash12: str, step: str, ops: list[dict], reason: Any,
+                             idem_key: str | None, ttl: float, run_id: str | None, agent: bool) -> dict:
+        """An action of a watcher (engine adapter step / script action, or an agent step's Claude run)."""
+        k = self._keeper()
+        w = k.active(profile, name, hash12)
+        h = w["hash"]
+        origin = f"watcher:{profile}/{name}@{h[:12]}"
+        for o in ops:
+            if o["op"] in ws.NOT_FOR_WATCHERS:
+                raise ToolError(f"{o['op']} isn't available to watchers")
+        if not any(ws.is_write(o["op"]) for o in ops):
+            if not agent:
+                # Engine reads too must be in the approved spec (an adapter step, or declared by the script step),
+                # so a script can't quietly read the mailbox and pass it on.
+                listed = {e.get("op") for e in k.manifest(w) if e.get("kind") == "action" and e.get("step") == step}
+                missing = [o["op"] for o in ops if o["op"] not in listed]
+                if missing:
+                    raise ToolError(f"step {step} of watcher {name} didn't declare {', '.join(missing)}; refused")
+            ops = await pre_resolve(self.services, ops)
+            ok, text, extra = await execute(self.services, ops)
+            return {"ok": ok, "text": text, **extra} if ok else {"ok": False, "error": text}
+        if len(ops) != 1:
+            raise ToolError("one change per request from a watcher (send them one at a time)")
+        if idem_key:
+            seen = k.audit_by_key(idem_key)
+            if seen:
+                return self._replay(seen)
+        o = ops[0]
+        op = o["op"]
+        raw_args = dict(o["args"])
+        declared = [e for e in k.manifest(w) if e.get("kind") == "action" and e.get("step") == step and e.get("op") == op]
+        if not declared and not agent:
+            raise ToolError(f"step {step} of watcher {name} didn't declare {op}; refused (not asked)")
+        if k.actions_today(profile, name) >= self._limits_of(h)["actions_per_day"]:
+            raise ToolError(f"watcher {name} reached its daily action limit")
+        site = None
+        if op.startswith("checkout."):
+            site = await self._checkout_gate(k, profile, name, o, declared)
+            if op == "checkout.pay" and self._pending_pay():
+                raise ToolError("a payment is already waiting for the owner's answer")
+        ops = await pre_resolve(self.services, ops)
+        o = ops[0]
+        if op in WRITE_OPS:
+            needs_approval(self.services, o, origin)  # refuses "never" and protected chats; the answer itself is ours
+        ops = await prepare(self.services, ops)
+        o = ops[0]
+        route = actual_route(op, o["args"], raw_args)
+        if op.startswith("checkout."):
+            route["site"] = route.get("site") or site
+            if route["site"] != site:
+                raise ToolError(f"the checkout page is on {route['site']}, not the watcher's site {site}")
+        fits = [e for e in declared if route_fits(op, e["route"], route)]
+        if declared and not fits and not agent:
+            raise ToolError(f"{op} from step {step} would go somewhere the watcher didn't declare; refused")
+        amount = None
+        if op == "checkout.pay":
+            r = o["args"].get("resolved") or {}
+            amount = str(r.get("amount"))
+            lim = next((e.get("limits") for e in fits if e.get("limits")), None)
+            if not lim:
+                raise ToolError("checkout.pay needs a declared max_amount for this watcher")
+            from decimal import Decimal
+            if Decimal(amount) > Decimal(str(lim["max_amount"])):
+                raise ToolError(f"{amount} is over this watcher's limit of {lim['max_amount']} per purchase")
+            if k.pays_this_week(profile, name) >= int(lim["per_week"]):
+                raise ToolError(f"this watcher's purchases for the week ({lim['per_week']}) are used up")
+        # Engine actions must fit a declared entry; an agent's undeclared action may be covered by a runtime grant
+        # ("Allow for this watcher": that exact op and destination, this step, this version).
+        granted = (bool(fits) or agent) and k.granted(profile, name, h, step, op, route)
+        if granted and await shares_with_others(self.services, o):
+            granted = False  # a shared Todoist project or a public playlist: other people see it, so ask (as in chat)
+        summary = await summarize(self.services, ops, self.policy)
+        if granted:
+            audit_id = k.audit_add(profile, name, h, run_id, step, op, summary, idem_key, "auto", amount)
+            if op in WRITE_OPS:
+                o["args"]["resolved"]["auto"] = True
+                try:
+                    await asyncio.wait_for(self._tg_lock.acquire(), 10)
+                except asyncio.TimeoutError:
+                    k.audit_update(audit_id, "failed", "busy")
+                    raise ToolError("another Telegram message is being sent; nothing was sent, try again shortly") from None
+                try:
+                    ok, text, extra = await execute(self.services, ops)
+                finally:
+                    self._tg_lock.release()
+            else:
+                ok, text, extra = await execute(self.services, ops)
+            k.audit_update(audit_id, "done" if ok else "failed", text)
+            if ok and op == "checkout.open":
+                st = await self.services.checkout_side.client.call({"cmd": "status"})
+                if st.get("session"):
+                    k.checkout_sessions[st["session"]] = (profile, name, site)
+            if ok and w["risk"] == "high" and self.tg_store:
+                self.tg_store.notice(f"🔴 Watcher “{name}” did: {summary.splitlines()[-1][:300]}")
+            out = {"ok": ok, "text": text, "audit_id": audit_id, **extra} if ok else \
+                {"ok": False, "error": text, "audit_id": audit_id}
+            return out
+        if op == "checkout.open":
+            raise ToolError("opening the checkout from a watcher needs \"allow all\" or a grant for this step")
+        who = f"{profile}/{name}"
+        if self.approvals.watcher_pending(who) >= WATCHER_PENDING_CAP:
+            raise ToolError(f"{WATCHER_PENDING_CAP} requests of this watcher are already waiting for the owner")
+        if self.approvals.watcher_pending() >= ALL_WATCHERS_PENDING_CAP:
+            raise ToolError(f"{ALL_WATCHERS_PENDING_CAP} watcher requests are already waiting for the owner")
+        if op in WRITE_OPS:
+            check_approval_size(o)
+        risk = w["risk"] or "?"
+        note = "" if fits else "\n(Not in the watcher's approved list: an AI step decided this.)"
+        summary = (f"⚠ Asked for by watcher “{name}” ({RISK_ICON.get(risk, '')} {risk} risk, step {step}) while "
+                   f"handling outside content, not by you in chat.{note}\n{summary}")
+        if op in ("checkout.fill", "checkout.pay"):
+            with contextlib.suppress(ToolError):
+                await self.services.checkout_side.client.call(
+                    {"cmd": "hold", "session": o["args"]["resolved"]["session"], "until": o["args"]["resolved"]["expires"]})
+        reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
+        info = ws.WRITE_OPS.get(op)
+        pinnable = bool(route) and all(v not in (None, "*") for v in route.values())
+        choices = ACTION_CHOICES if pinnable else ONCE_CHOICES
+        approval_id = self.approvals.add(
+            ops, summary, reason, kind="watch.action", choices=choices, ttl=ttl, idem_key=idem_key,
+            confirm_keys=["watcher"] if pinnable and info is not None and info.level == "high" else None,
+            meta={"watcher": who, "profile": profile, "name": name, "hash": h, "step": step, "op": op, "route": route})
+        if op == "telegram.send":
+            note_requested(self.services, o)
+        audit_id = k.audit_add(profile, name, h, run_id, step, op, summary, idem_key, "requested", amount)
+        k.audit_update(audit_id, "requested", approval_id=approval_id)
+        return {"ok": True, "approval": approval_id, "audit_id": audit_id, "text": (
+            f"⏳ Not done yet: this needs the owner's approval (request #{approval_id}); it expires in "
+            f"{int(ttl // 60)} min.\n" + summary)}
 
     def _expire_checkout(self) -> None:
         """Fill/pay requests are only good for 10 minutes (and their session): mark older ones expired, so a request
@@ -505,7 +959,7 @@ async def _serve(home: Path) -> None:
         for approval_id in approvals.recover():
             store.notice(f"⚠️ Request #{approval_id} was approved, but the tools service stopped while running it; "
                          "the outcome is unknown. Check before asking again.")
-        daemon = Daemon(services, approvals, policy, systemd_main_pid_check(unit))
+        daemon = Daemon(services, approvals, policy, systemd_main_pid_check(unit), keeper=Keeper(home / "watch.sqlite3"))
         refresher = asyncio.create_task(refresh_meta_tokens(services))  # noqa: F841 (runs for the daemon's life)
         server = await serve_socket(daemon, socket_path())
         log.info("listening on %s", socket_path())

@@ -17,7 +17,11 @@ import httpx
 from .approvals import ApprovalRelay
 from .bot import ProfileBot
 from .permissions import PermissionBroker
-from .watchers import Watch
+from .watch.control import Control
+from .watch.db import WatchDB
+from .watch.engine import WatchEngine
+from .watch.migrate import migrate
+from .watch.tgui import WatchUI
 from .claude_runner import BILLING_ENV_VARS, ClaudeRunner, clean_env
 from .config import Config, ConfigError, load_config
 from .services import ask
@@ -90,7 +94,8 @@ async def check(config: Config) -> int:
     return 0 if ok else 1
 
 
-def protected_chats(config: Config, store: Store) -> tuple[list[int], bool]:
+def protected_chats(config: Config, store: Store, wdb: WatchDB | None = None,
+                    engines: dict | None = None) -> tuple[list[int], bool]:
     """Chats the assistant reads itself, where a message from the owner's account would count as the owner's
     own command: every profile's bot, its groups, and the chats its Telegram watchers follow. Returns
     (ids, complete); incomplete while a Telegram watcher hasn't learned its chat's id yet."""
@@ -104,6 +109,18 @@ def protected_chats(config: Config, store: Store) -> tuple[list[int], bool]:
         for w in p.watchers:
             if w.kind == "telegram":
                 peer = (store.get_watch_state(p.name, w.name) or {}).get("peer_id")
+                if isinstance(peer, int) and not isinstance(peer, bool):
+                    ids.append(peer)
+                else:
+                    complete = False
+    # Watchers v2: chats their telegram.new triggers read.
+    for name, engine in (engines or {}).items():
+        from ampi_tools.watch_spec import trigger_identity
+        for w in engine.watchers.values():
+            for t in w.spec.triggers:
+                if t["type"] != "telegram.new":
+                    continue
+                peer = (wdb.trigger_state(name, w.name, trigger_identity(t)) or {}).get("peer_id") if wdb else None
                 if isinstance(peer, int) and not isinstance(peer, bool):
                     ids.append(peer)
                 else:
@@ -133,6 +150,10 @@ async def serve(config: Config) -> None:
     if not make_undumpable():
         log.warning("could not make the process non-dumpable; the bot token is visible in /proc to the same user")
     store = Store(config.db_path)
+    wdb = WatchDB(config.db_path)
+    run_dir = os.environ.get("RUNTIME_DIRECTORY") or tempfile.gettempdir()  # systemd: /run/claude-assistant
+    watchers_socket = os.path.join(run_dir, "watchers.sock")
+    os.environ["AMPI_WATCHERS_SOCKET"] = watchers_socket  # the `watchers` command in claude runs finds the bridge
     env = clean_env(os.environ, [p.bot_token_env for p in config.profiles])
     runner = ClaudeRunner(
         config.claude_command,
@@ -156,7 +177,14 @@ async def serve(config: Config) -> None:
                 log.warning("[%s] %s is missing or not owned by root: Claude could give itself settings or hooks. "
                             "Run deploy/install.sh as root.", p.name, dot)
             bots.append(ProfileBot(p, TelegramAPI(p.bot_token, client), store, runner))
-        run_dir = os.environ.get("RUNTIME_DIRECTORY") or tempfile.gettempdir()  # systemd: /run/claude-assistant
+        engines: dict[str, WatchEngine] = {}
+        for b in bots:
+            engine = WatchEngine(b, wdb, tools_socket=config.tools.socket, tg_socket=config.tools.tg_reader_socket,
+                                 data_dir=config.db_path.parent)
+            engines[b.profile.name] = engine
+            b.watch_ui = WatchUI(b, engine)
+        control = Control(engines, watchers_socket)
+        await control.start()
         for b in bots:
             if b.profile.ask_permissions:
                 b.permissions = PermissionBroker(b, os.path.join(run_dir, f"permission-{b.profile.name}.sock"),
@@ -166,24 +194,45 @@ async def serve(config: Config) -> None:
         if config.tools.approvals:
             # Approval requests go to the first profile's owner chat (one relay, so no duplicates).
             bots[0].approvals = ApprovalRelay(bots[0], config.tools.socket,
-                                              protected=lambda: protected_chats(config, store))
+                                              protected=lambda: protected_chats(config, store, wdb, engines))
             pollers.append(asyncio.create_task(bots[0].approvals.run_forever(), name="approvals"))
             # ampi-tools learns which process each claude run is and where it comes from.
             socket_path = config.tools.socket
 
-            async def on_spawn(pid: int, origin: str) -> None:
-                reply = await ask(socket_path, {"cmd": "runs.register", "pid": pid, "origin": origin}, timeout=10)
-                if not reply.get("ok"):  # the run then counts as "unknown" (everything asks the owner)
-                    log.warning("ampi-tools refused to register run %s: %s", pid, reply.get("error"))
+        else:
+            socket_path = None
 
-            async def on_exit(pid: int) -> None:
+        async def on_spawn(pid: int, origin: str, tag: object = None) -> None:
+            await control.on_spawn(pid, origin, tag)
+            # The builder never talks to ampi-tools; leaving it unregistered makes it "unknown" there.
+            if socket_path is None or (isinstance(tag, tuple) and tag and tag[0] == "builder"):
+                return
+            reply = await ask(socket_path, {"cmd": "runs.register", "pid": pid, "origin": origin}, timeout=10)
+            if not reply.get("ok"):  # the run then counts as "unknown" (everything asks the owner)
+                log.warning("ampi-tools refused to register run %s: %s", pid, reply.get("error"))
+
+        async def on_exit(pid: int) -> None:
+            await control.on_exit(pid)
+            if socket_path is not None:
                 await ask(socket_path, {"cmd": "runs.unregister", "pid": pid}, timeout=10)
 
-            runner.on_spawn, runner.on_exit = on_spawn, on_exit
-        for b in bots:
-            for w in b.profile.watchers:
-                watch = Watch(b, w, config.tools)
-                pollers.append(asyncio.create_task(watch.run_forever(), name=f"watch-{b.profile.name}-{w.name}"))
+        runner.on_spawn, runner.on_exit = on_spawn, on_exit
+        background: list[asyncio.Task] = []
+        for name, engine in engines.items():
+            pollers.append(asyncio.create_task(engine.run_forever(), name=f"watchers-{name}"))
+
+            async def migrate_later(e: WatchEngine = engine) -> None:
+                await asyncio.sleep(20)
+                try:
+                    done = await migrate(e)
+                    if done:
+                        await e.notify("Watchers were upgraded. Your old watchers are converted and wait for your "
+                                       f"approval (one request each): {', '.join(done)}. Until you approve them, they "
+                                       "don't run. \"Ask each time\" keeps today's behaviour exactly.")
+                except Exception:
+                    log.exception("[%s] watcher migration failed", e.profile.name)
+            if config.tools.approvals:  # a one-off task: not in pollers (any poller ending stops the bridge)
+                background.append(asyncio.create_task(migrate_later(), name=f"migrate-{name}"))
         stopper = asyncio.create_task(stop.wait())
         log.info("running %d profile(s): %s", len(bots), ", ".join(p.name for p in config.profiles))
         done, _ = await asyncio.wait([stopper, *pollers], return_when=asyncio.FIRST_COMPLETED)
@@ -191,10 +240,12 @@ async def serve(config: Config) -> None:
             if task is not stopper and task.exception():
                 log.error("poller %s crashed", task.get_name(), exc_info=task.exception())
         log.info("shutting down")
-        for task in [stopper, *pollers]:
+        for task in [stopper, *pollers, *background]:
             task.cancel()
         await asyncio.gather(stopper, *pollers, return_exceptions=True)
         await asyncio.gather(*(b.shutdown() for b in bots), return_exceptions=True)
+        await asyncio.gather(*(e.shutdown() for e in engines.values()), return_exceptions=True)
+        await control.close()
     store.close()
 
 

@@ -356,41 +356,42 @@ account. Ampi uses guest checkout only. After paying, the session is read-only; 
 your bank app. `payment log` lists purchases (card shown masked). If a payment step times out, Ampi is told it MAY
 have gone through and not to pay again before checking.
 
-## 9. Watchers and briefings (optional)
+## 9. Watchers (automations)
 
-Watchers let the assistant act without being asked. They check Gmail, Todoist, a Telegram chat, YouTube channels, or the clock, and start Claude with instructions from `<workspace>/watchers/<name>.md`. Starter instructions are installed by `install-tools.sh` (from `templates/watchers/`). Ask the assistant to change them, or edit them yourself.
+A watcher wakes on **triggers** (a time, a new email, a new Telegram message, a new Todoist task, a YouTube
+upload, a web page changing) and runs a **pipeline** of steps: scripts, AI steps, actions (Todoist, Gmail,
+Telegram…) and messages to you. Ask Ampi in your private chat ("send me a summary of every email from Pascal
+school"); a builder that always uses Opus writes it, tests it on recent real items, and you get one approval
+request with what it does, its risk (🟢🟡🔴), what it may do, and the test result:
 
-```toml
-[[profiles]]
-timezone = "Europe/Athens"
+- **✅ Turn on and allow all**: it acts on its own from then on (until it changes or you delete it).
+- **▶️ Turn on, ask each time**: every change it wants asks you (✅ Approve / ✅ Allow for this watcher / ❌ Reject).
+- 🔴 high-risk watchers (agent steps that act, targets decided at run time, sending email, deleting, payments) need
+  a second tap and report every action they take.
 
-[[profiles.watchers]]
-name = "gmail-inbox"        # instructions: watchers/gmail-inbox.md
-kind = "gmail"              # gmail | todoist | telegram | youtube | threads | instagram | schedule
-query = "in:inbox"          # Gmail search / Todoist filter / Telegram chat name, @username or id
-every_minutes = 15
+**Who holds what.** Approved watchers (the exact files, their hash, what they may do, their saved data and every
+action they took) are kept by ampi-tools, which Ampi can't reach. The bridge runs them from that frozen copy;
+editing `watchers/<name>/` in the workspace only prepares a new version for your approval. Scripts run in their
+own sandbox (`ampi-script@`, user `ampiscript`: no network, no files). Shared helper scripts are in
+`watchers/lib/` (root-owned).
 
-[[profiles.watchers]]
-name = "morning-briefing"
-kind = "schedule"
-at = ["08:00"]              # local times
-days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+**Seeing them.** `/watchers` and `/watcher NAME` (Pause, Resume, Run now, Delete) in Telegram;
+`watchers/INDEX.md` and `watchers/<name>/STATUS.md`; Ampi's `watchers list|show|runs|logs|space|audit` commands.
+Full run details are in `/home/assistant/data/watch-runs/` (60 days).
+
+**Limits.** Each watcher has daily caps (runs, AI calls, actions; the builder sets them); reaching one pauses it
+until the next day with one message. 5 failed runs in a row pause it as "failing". Watcher AI steps share one slot
+for short structured calls and one for agent steps, so your chats keep theirs.
+
+Setup (after section 8, with `[tools] approvals = true`):
+```bash
+sudo bash deploy/install-script-sandbox.sh
+sudo bash deploy/install.sh && sudo bash deploy/install-tools.sh
+# config.toml: add "Bash(watchers:*)" to allowed_tools; max_concurrent_runs = 3 is recommended
+systemctl restart ampi-tools claude-assistant
 ```
-
-- The first check only records what already exists. Only items that arrive later are handled, so you won't get your whole backlog at once.
-- Each run is a fresh Claude session. The report goes to your private chat, starting with 🔔 and the watcher's name, and only if there's something worth saying. Runs are logged in `chats/watch-<name>/`, and reports also go to the main chat's log, so you can reply to them normally.
-- If a watcher keeps failing (e.g. Gmail isn't connected yet), you get one ⚠️ message, then nothing more until it works again.
-- `telegram` watchers need the reader from section 7 (e.g. a channel you repost things to).
-- `youtube` watchers report new uploads (no Shorts) from channels. Channels added later are taken in quietly,
-  without their backlog. `subscriptions` needs `youtube-login`; a list of channels works without any setup:
-  ```toml
-  [[profiles.watchers]]
-  name = "youtube-uploads"    # instructions: watchers/youtube-uploads.md
-  kind = "youtube"
-  query = "@veritasium, @3blue1brown"   # or "subscriptions" (at most 200 channels are checked)
-  every_minutes = 60
-  allowed_tools = ["Read", "Bash(youtube:*)"]  # titles are written by strangers: no writing files, no web
-  ```
+The old `[[profiles.watchers]]` are converted once on the first start: each comes to you as an approval request
+("ask each time" keeps today's behaviour). After approving them, delete the `[[profiles.watchers]]` blocks.
 
 ## 10. Running scripts and installing things, with your approval (optional)
 
