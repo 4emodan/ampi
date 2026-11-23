@@ -976,7 +976,7 @@ class Daemon:
                 if st.get("session"):
                     k.checkout_sessions[st["session"]] = (profile, name, site)
             if ok and w["risk"] == "high" and self.tg_store and not routine:
-                self.tg_store.notice(f"🔴 Watcher “{name}” did: {summary.splitlines()[-1][:300]}")
+                self.tg_store.notice(f"🔴 Watcher “{name}” did: {summary.split(chr(10), 2)[min(1, summary.count(chr(10)))][:300]}")
             out = {"ok": ok, "text": text, "audit_id": audit_id, **extra} if ok else \
                 {"ok": False, "error": text, "audit_id": audit_id}
             return out

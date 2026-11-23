@@ -101,7 +101,7 @@ Common: `every_minutes`, `batch`, `ttl_minutes` (default a day), `latest_only` (
   operation's reply (`text`, …). Reads run directly; changes are checked against what the owner approved.
 - `notify`: `template = "templates/x.txt"` or `text = "..."`, `format = "rich"` (default: Markdown bold, lists,
   headings, code; `[text](url)` stays as written, plain addresses work), `"markdown"` (your own `[text](url)` links
-  work; outside text is defanged, its addresses too) or `"plain"` (exactly as written). A message to the owner.
+  work; outside text can't form links or code, and in Instagram/Threads watchers its addresses are broken up too) or `"plain"` (exactly as written). A message to the owner.
 - `web`: `url` (fixed https), `max_chars`. Output: `text`.
 Every step: `when = { path = "steps.x.field", equals | in | not_in | exists | true | false = ... }`,
 `on_error = "continue"`, `timeout`.

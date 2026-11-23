@@ -81,6 +81,8 @@ SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP", "kr": "KR", "zł": "PLN", "CA$
            "AU$": "AUD", "US$": "USD", "NZ$": "NZD"}
 _CUR = r"(?:CA|AU|US|NZ|A|C)\$|€|\$|£"
 CONFIRMATION = re.compile(r"order|confirm|thank|kiitos|tilaus|vahvist", re.I)
+COUNTDOWN = re.compile(r"\b(?:held|hold|left|remaining|expires?( in)?|reserved for|time)\b[^\d\n]{0,15}\d{1,2}:\d{2}(:\d{2})?|"
+                       r"\d{1,2}:\d{2}(:\d{2})?\s*(?:min(utes)?\s*)?(?:left|remaining)\b", re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 AMOUNT = re.compile(
     rf"(?P<pre>{_CUR}|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr)\b)?\s?"
@@ -991,6 +993,12 @@ class Controller:
                 **self._gate(s, frame, n)}
 
     @staticmethod
+    def _seen(g: dict, title: str) -> str:
+        """A fingerprint of the text the owner is shown next to the button (a running countdown doesn't count)."""
+        text = COUNTDOWN.sub(" ", f"{title}\n{g['around']}")
+        return hashlib.sha256(re.sub(r"\s+", " ", text).encode()).hexdigest()
+
+    @staticmethod
     def _press(g: dict) -> dict:
         return {k: g[k] for k in ("tag", "texts", "dest", "method", "submits")}
 
@@ -1007,6 +1015,7 @@ class Controller:
         return {"ok": True, "session": s.id, "origin": b["origin"], "url": frames[0]["url"], "button": b["bindings"][0],
                 "totals": snap["totals"], "risky_checked": snap["risky_checked"], "captcha": snap["captcha"],
                 "title": snap["title"], "form": fields, "digest": digest, "gen": s.gen, "press": self._press(g),
+                "seen": self._seen(g, snap["title"]),
                 "around": g["around"], "frames": sorted({f["origin"] for f in frames})}
 
     def submit(self, req: dict) -> dict:
@@ -1029,9 +1038,12 @@ class Controller:
             raise changed
         if req.get("gen") != s.gen:
             raise Refused("something else was done in the browser since the approval; nothing was pressed")
-        if self._press(self._gate(s, bframe, n)) != req.get("press"):
+        g = self._gate(s, bframe, n)
+        if self._press(g) != req.get("press"):
             raise changed
         snap = self.snapshot(s)
+        if self._seen(g, snap["title"]) != req.get("seen"):
+            raise changed
         if totals_key(snap["totals"]) != totals_key(req.get("expect_totals") or []) or snap["captcha"] \
                 or snap["risky_checked"] or sorted({f["origin"] for f in frames}) != req.get("frames"):
             raise changed

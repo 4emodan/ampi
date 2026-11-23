@@ -727,7 +727,8 @@ def submit_request(c, sid, snap, label="Pay 23,90 €"):
     b = c.handle({"cmd": "bind_submit", "session": sid, "ref": ref(snap, label)})
     assert b["ok"], b
     return b, {"cmd": "submit", "session": sid, "origin": b["origin"], "url": b["url"], "button": b["button"],
-               "digest": b["digest"], "expect_totals": b["totals"], "gen": b["gen"], "press": b["press"], "frames": b["frames"]}
+               "digest": b["digest"], "expect_totals": b["totals"], "gen": b["gen"], "press": b["press"], "frames": b["frames"],
+               "seen": b["seen"]}
 
 
 def test_submit_shows_the_form_and_presses_once(env):
@@ -745,7 +746,7 @@ def test_submit_shows_the_form_and_presses_once(env):
 
 
 @pytest.mark.parametrize("change", ["value", "label", "url", "totals", "box", "reload", "disabled", "new_field", "hidden", "dest", "frame",
-                                    "unreadable", "typed", "clicked", "chosen"])
+                                    "unreadable", "typed", "clicked", "chosen", "around", "title"])
 def test_submit_refuses_anything_changed(env, change):
     c, eng, _ = env
     sid, snap = opened(c)
@@ -773,6 +774,10 @@ def test_submit_refuses_anything_changed(env, change):
         main.els[4]["dest"] = "https://evil.example/"
     elif change == "frame":
         eng.frames.append(Frame("new", "https://pay.example/w", parent="main"))
+    elif change == "around":
+        main.text = main.text.replace("Pad thai", "Pad thai 20:30")
+    elif change == "title":
+        main.title = "Delete account"
     elif change == "unreadable":
         main.form_broken = True
     elif change == "typed":
@@ -784,6 +789,18 @@ def test_submit_refuses_anything_changed(env, change):
         eng.clicks.clear()
     r = c.handle(rq)
     assert not r["ok"] and r["phase"] == "verify" and eng.clicks == []
+
+
+def test_submit_ignores_a_running_countdown_but_not_a_changed_time(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    main = eng.frames[0]
+    main.text += "\nSlot 18:30. Held for you, time left 9:59"
+    _, rq = submit_request(c, sid, snap)
+    main.text = main.text.replace("18:30", "20:30")
+    assert not c.handle(rq)["ok"]
+    main.text = main.text.replace("20:30", "18:30").replace("9:59", "8:12")
+    assert c.handle(rq)["ok"] and eng.clicks == [("main", 4)]
 
 
 def test_submit_refuses_what_it_cannot_show(env):

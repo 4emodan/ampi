@@ -83,7 +83,7 @@ class FakeCtl:
             e = self.elements[req["ref"]]
             return {"ok": True, "origin": self.origin, "url": self.origin + "/book", "button": e,
                     "totals": self.totals, "risky_checked": self.risky, "captcha": getattr(self, "captcha", False),
-                    "title": "Booking", "form": self.form, "digest": "d1", "gen": 3, "around": "Fri 10:00 selected",
+                    "title": "Booking", "form": self.form, "digest": "d1", "gen": 3, "around": "Fri 10:00 selected", "seen": "s1",
                     "frames": getattr(self, "frames", [SHOP]),
                     "press": {"tag": "button", "texts": [e["label"]], "dest": getattr(self, "dest", SHOP + "/b"), "method": "post",
                               "submits": True}}
@@ -474,6 +474,17 @@ def test_plain_click_on_a_committing_button_is_refused(tmp_path, label):
 
 @pytest.mark.parametrize("label,posts,ok", [("Search", True, True), ("Next", True, True), ("Add to cart", True, True),
                                             ("18:30", False, True), ("OK", True, False), ("Go", False, True),
+                                            ("Checkout", True, True), ("Secure checkout →", True, True),
+                                            ("Add to cart - $12.00", True, True), ("Add 2 items to bag", True, True),
+                                            ("Standard shipping €4.90", False, True), ("12:30 (€15)", False, True),
+                                            ("Save and continue", True, True), ("Next: payment", True, True),
+                                            ("Use this address", True, True), ("Continue to payment", True, True),
+                                            ("Check out (2) · 24,00 €", True, True), ("Continue as guest", True, True),
+                                            ("Continue to order summary", True, True), ("€15", False, True),
+                                            ("Continue to buy", False, False), ("Continue to PayPal", False, False),
+                                            ("Express checkout", False, False), ("Pay €80", False, False),
+                                            ("Buy now - €12", False, False), ("Checkout with PayPal", False, False),
+                                            ("Add to cart and pay", False, False), ("Book for 25 €", False, False),
                                             ("Place order and continue", False, False), ("Next", False, True),
                                             ("Apply filters", True, True), ("Submit search", False, False)])
 def test_post_forms_count_as_committing(tmp_path, label, posts, ok):
@@ -547,14 +558,29 @@ def test_submit_is_for_the_owners_chat_only(tmp_path, origin):
         run(d.run(req("checkout.submit", **SUBMIT), None, origin=origin))
 
 
+TOTAL = [{"amount": "5.00", "currency": "EUR", "label": "Total"}]
+
+
+@pytest.mark.parametrize("label", ["Weiter zur Adresse", "Use my saved address", "Choose delivery", "Next: payment"])
+def test_steps_in_between_can_be_submitted_with_a_total_showing(tmp_path, label):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals, ctl.frames = label, TOTAL, [SHOP, STRIPE]
+    assert run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))["approval"]
+    assert "⚠ Total on the page: Total 5.00 EUR" in d.approvals.unnotified()[0]["card"]["details"]
+
+
 @pytest.mark.parametrize("change,err", [
     ({"captcha": True}, "captcha"), ({"risky": ["Subscribe me"]}, "untick"), ({"frames": [SHOP, STRIPE]}, "payment form"),
     ({"frames": [SHOP, "https://www.paypal.com"]}, "payment form"), ({"frames": ["https://shop.app"]}, "payment form"),
-    ({"totals": [{"amount": "5.00", "currency": "EUR", "label": "Total"}]}, "total to pay"),
-    ({"label": "Pay now"}, "pay or order"), ({"label": "Book for 25 €"}, "pay or order"), ({"label": "Оплатить"}, "pay or order")])
+    ({"totals": TOTAL}, "total to pay"), ({"totals": TOTAL, "label": "Finish"}, "total to pay"),
+    ({"totals": TOTAL, "label": "Confirm"}, "total to pay"), ({"totals": TOTAL, "label": ""}, "total to pay"),
+    ({"totals": TOTAL, "label": "Complete my order"}, "total to pay"), ({"frame_origin": STRIPE}, "payment provider"),
+    ({"frame_origin": "https://www.paypal.com"}, "payment provider"), ({"label": "Continue to buy"}, "pay or order"),
+    ({"label": "Pay now"}, "pay or order"), ({"label": "Book for 25 €"}, "shows a price"), ({"label": "Оплатить"}, "pay or order")])
 def test_submit_refusals(tmp_path, change, err):
     d, _, ctl = make(tmp_path)
     ctl.elements["f0:20"]["label"], ctl.totals = change.get("label", "Reserve"), []
+    ctl.elements["f0:20"]["frame_origin"] = change.get("frame_origin", SHOP)
     for k, v in change.items():
         setattr(ctl, k, v)
     with pytest.raises(ToolError, match=err):
