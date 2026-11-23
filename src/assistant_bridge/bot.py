@@ -856,6 +856,8 @@ class ProfileBot:
 
     async def _cmd_cancel(self, chat_id: int, thread_id: int, args: str) -> None:
         task = self._running.get((chat_id, thread_id))
+        waiting = self._drop_waiting((chat_id, thread_id))
+        dropped = f"⏹ Dropped {waiting} message(s) that were waiting." if waiting else ""
         if task is None and (chat_id, thread_id) == (self.profile.owner_chat_id, 0):
             # From the main chat, /cancel also stops a running watcher (their reports land here).
             watchers = [(k, t) for k, t in self._running.items() if k[0] == chat_id and k[1] < 0]
@@ -863,11 +865,10 @@ class ProfileBot:
                 self._stopped_by_owner.add(k)
                 t.cancel()
             if watchers:
-                await self._send_text(chat_id, thread_id, f"⏹ Stopped {len(watchers)} watcher run(s).", False)
+                await self._send_text(chat_id, thread_id, f"⏹ Stopped {len(watchers)} watcher run(s).\n{dropped}".strip(), False)
                 return
-        waiting = self._drop_waiting((chat_id, thread_id))
         if waiting:
-            await self._send_text(chat_id, thread_id, f"⏹ Dropped {waiting} message(s) that were waiting.", markdown=False)
+            await self._send_text(chat_id, thread_id, dropped, markdown=False)
         elif task is None:
             await self._send_text(chat_id, thread_id, "Nothing is running here.", markdown=False)
         if task is not None:
