@@ -489,7 +489,7 @@ def test_watcher_reports_new_uploads_but_not_backlogs(setup):
     run(watch.tick())
     (call,) = runner.calls
     assert "1 new YouTube upload(s)" in call["prompt"] and "[new1]" in call["prompt"]
-    assert "old2" not in call["prompt"] and "c1" not in call["prompt"]
+    assert "old2" not in call["prompt"] and "[c1]" not in call["prompt"]
     state = bot.store.get_watch_state(bot.profile.name, "yt")
     assert set(state["channels"]) == {"A", "B", "C"} and {"new1", "old2", "c1"} <= set(state["seen"])
 
