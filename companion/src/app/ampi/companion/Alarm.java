@@ -51,7 +51,8 @@ final class Alarm {
     /** The clock or zone changed, or the phone restarted: which moment is it now? */
     void recompute(Context c, long now) {
         if (wallClock()) {
-            LocalDate of = day.isEmpty() ? (date.isEmpty() ? LocalDate.now() : LocalDate.parse(date)) : LocalDate.parse(day);
+            LocalDate of = !day.isEmpty() ? LocalDate.parse(day) : !date.isEmpty() ? LocalDate.parse(date)
+                    : Instant.ofEpochMilli(at).atZone(ZoneId.systemDefault()).toLocalDate();
             moment(AlarmTimes.again(LocalTime.parse(time), onlyDate(), days, of, ZoneId.systemDefault(), now));
         } else if (boot == boots(c)) {
             at = now + (elapsed - SystemClock.elapsedRealtime());

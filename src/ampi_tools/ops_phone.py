@@ -36,7 +36,7 @@ REFUSALS = {
     "no_such_alarm": "there is no such alarm (see `phone alarms`)", "ringing": "it is ringing right now",
     "gone_again": "it was set before and is gone again (see `phone alarms`)", "notifications_off": "notifications are switched "
     "off for Ampi on the phone", "not_shown": "Android didn't show it", "unknown_kind": "the app on the phone is too old",
-    "failed": "it couldn't do it", "bad_request": "it didn't understand the request",
+    "bad_request": "it didn't understand the request",
 }
 WARNINGS = {
     "volume_0": "the alarm volume on the phone is 0", "total_silence": "Do Not Disturb is on total silence",
@@ -201,6 +201,8 @@ async def ask(s: Services, kind: str, body: dict) -> tuple[dict, dict]:
                         else "the phone gateway refused the request; nothing was done")
     a = r.get("answer") if isinstance(r.get("answer"), dict) else {}
     if a.get("ok") is not True:
+        if a.get("error") == "failed":  # something broke there, perhaps after it was done
+            raise ToolError("the phone had a problem: " + UNKNOWN.split(": ", 1)[1])
         raise ToolError(f"the phone refused: {REFUSALS.get(str(a.get('error')), 'no reason given')}; nothing was done")
     data, hello = a.get("data"), r.get("hello")
     return data if isinstance(data, dict) else {}, hello if isinstance(hello, dict) else {}
@@ -293,17 +295,17 @@ async def _resolve_alarm(s: Services, a: dict) -> dict:
         r["date"] = day.isoformat()
         r["text"] = f"{day:%a %d %b} at {clock}"
     elif a.get("deferred"):
-        r["next"] = True
+        r["next"] = time.time()  # the moment it was asked: the next 07:00 after that, whenever it is approved
         r["text"] = f"the next {clock}"
     else:
-        _fix_date(r, (await phone_zone(s))[0])
+        _fix_date(r, (await phone_zone(s))[0], time.time())
     return {"resolved": r}
 
 
-def _fix_date(r: dict, zone: Any) -> None:
-    """The next time the phone's clock shows this: today or tomorrow there."""
+def _fix_date(r: dict, zone: Any, asked: float) -> None:
+    """The next time the phone's clock shows this, from the moment it was asked: today or tomorrow there."""
     h, m = map(int, r["time"].split(":"))
-    now = datetime.now(zone)
+    now = datetime.fromtimestamp(asked, zone)
     today = now.replace(hour=h, minute=m, second=0, microsecond=0, fold=0)
     day = now.date() if today.timestamp() > now.timestamp() else now.date() + timedelta(days=1)
     r["date"] = day.isoformat()
@@ -312,8 +314,8 @@ def _fix_date(r: dict, zone: Any) -> None:
 
 async def ph_alarm(s: Services, a: dict) -> Result:
     r = dict(a["resolved"])
-    if r.get("next"):  # approved just now (at most 10 minutes after it was asked)
-        _fix_date(r, (await phone_zone(s))[0])
+    if r.get("next"):  # approved just now, at most 10 minutes after it was asked (if it has passed, the phone says so)
+        _fix_date(r, (await phone_zone(s))[0], r["next"])
     body = {k: r[k] for k in ("time", "date", "days", "label") if r.get(k)}
     data, hello = await ask(s, "alarm.set", body)
     zone = zone_of(data.get("zone") or hello.get("zone"))
@@ -350,7 +352,8 @@ def _alarm_rows(data: dict) -> list[dict]:
 
 
 def _alarm_text(x: dict, zone: Any) -> str:
-    days = [d for d in x.get("days") or [] if d in WEEKDAYS] if isinstance(x.get("days"), list) else []
+    given = x.get("days")[:7] if isinstance(x.get("days"), list) else []
+    days = [d for d in WEEKDAYS if d in given]
     kind = "timer" if x.get("kind") == "timer" else "alarm"
     return (f"{kind} {_when(x.get('at'), zone)}" + (f" (every {', '.join(days)})" if days else "")
             + (" (snoozed)" if x.get("snoozed") is True else "") + _label(x.get("label")))

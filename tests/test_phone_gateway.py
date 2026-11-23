@@ -337,8 +337,15 @@ def test_strangers_cannot_take_every_slot():
     taken = sum(g.enter(f"10.0.{i}.1") for i in range(200))
     assert taken == gateway.HANDSHAKES - gateway.RESERVED
     assert not g.enter("8.8.8.8") and sum(g.enter("7.7.7.7") for _ in range(20)) == gateway.KNOWN_PER_ADDR
+    for k in list(g.running):
+        while g.running.get(k):
+            g.leave(k)
+    g.recent = {str(i): gateway.Window(1, 60, g.clock) for i in range(6000)}
+    for w in g.recent.values():
+        w.add()
+    assert not g.enter("9.9.9.1") and g.enter("7.7.7.7")  # so many addresses lately: only a known one
     t[0] = gateway.KNOWN_S + 1
-    assert not g.enter("7.7.7.7")  # a day later it is a stranger again
+    assert not g._is_known("7.7.7.7")  # a day later it is a stranger again
     for i in range(500):
         g.authenticated(f"1.1.{i % 250}.{i}")
     assert len(g.known) == gateway.KNOWN_MAX
@@ -396,6 +403,18 @@ def test_pairing_that_does_not_start_is_undone(conf, monkeypatch):
     monkeypatch.setattr(admin, "run", fails)
     with pytest.raises(subprocess.CalledProcessError):
         admin.add(c, "phone", ders["a"], trust.pair_code(ders["server"], ders["a"]))
+    assert not trust.load_devices(c)
+
+
+def test_removing_also_when_systemd_will_not(conf, monkeypatch):
+    c, ders = conf
+    pair(c, "a", ders["a"])
+
+    def fails(*cmd, check=True):
+        raise subprocess.CalledProcessError(1, cmd, stderr="no")
+    monkeypatch.setattr(admin, "run", fails)
+    with pytest.raises(subprocess.CalledProcessError):
+        admin.remove(c, "a")
     assert not trust.load_devices(c)
 
 

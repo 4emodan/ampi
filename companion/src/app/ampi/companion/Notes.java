@@ -37,7 +37,10 @@ final class Notes {
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         synchronized (Notes.class) {
             List<Message> all = messages(c);
-            for (Message m : all) if (m.id.equals(id)) return;
+            for (Message m : all) {  // the same request again: shown before, or only written down
+                if (m.id.equals(id) && Arrays.stream(nm.getActiveNotifications()).anyMatch(n -> id.equals(n.getTag()))) return;
+            }
+            all.removeIf(m -> m.id.equals(id));
             if (!nm.areNotificationsEnabled() || off(c, App.AMPI)) throw new AlarmStore.Refused("notifications_off");
             long now = System.currentTimeMillis();
             if (all.stream().filter(m -> m.ts > now - 3600_000L && m.ts <= now).count() >= PER_HOUR) {

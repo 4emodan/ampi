@@ -21,7 +21,7 @@ root on the server: `ampi-phone offer|code|add|devices|remove|status`
 ### Gateway (`src/ampi_phone/`, Python standard library only, installed root-owned in /usr/local/lib/ampi-phone)
 
 - Socket-activated: systemd (root) owns the public port and the control socket and hands them over. The service has
-  no network of its own (`PrivateNetwork`, only AF_UNIX) and may not call connect() or shutdown() (the inherited
+  no network of its own (`PrivateNetwork`, only AF_UNIX) and may not call connect(), shutdown() or io_uring (the inherited
   listener belongs to the host's network and could otherwise be turned into an outgoing connection). Nobody else can take
   the port while it restarts: the socket stays. The sockets are enabled by the first pairing and disabled when the last
   phone is removed.
@@ -33,7 +33,9 @@ root on the server: `ampi-phone offer|code|add|devices|remove|status`
   must also equal a paired one byte for byte. An outsider reaches OpenSSL's handshake and no code of ours.
 - Limits before TLS: 2 handshakes at once per address (/64 for IPv6, all of this machine's own as one) and 48 in all, 5 s
   each, 30 a minute per address. Addresses a paired phone connected from in the last day have wider limits and 16 more
-  slots nobody else can take. A flood from many addresses can still delay a phone that comes from a new one.
+  slots nobody else can take. A flood from many addresses can still delay a phone that comes from a new one
+  (or after the gateway restarted: it remembers only while running), and someone behind the same router can use up that
+  address's slots. That only delays; it opens nothing.
 - Frames: 4-byte big-endian length + UTF-8 JSON object, at most 64 KB, at most 120 a minute from the phone. A malformed
   frame closes the connection; unknown types are ignored.
 - The server pings every 170 s; nothing from the phone for 6.5 min, unacknowledged data for 150 s (`TCP_USER_TIMEOUT`), or
@@ -74,11 +76,12 @@ alarms | cancel ID`
   unknown processes) is refused. Watchers report in Telegram; urgent alerts from watchers can come later.
 - Cancelling asks the owner too, unless the alarm was set less than an hour ago (a snooze never counts as newly set): a
   tricked Ampi must not be able to silently remove the morning alarm.
-- Times become absolute before anyone approves ("timer 10m" = a moment, "07:00" = a date; a group's "07:00" gets its date
-  when the owner approves), and the request expires after 10 minutes.
+- Times become absolute before anyone approves ("timer 10m" = a moment, "07:00" = a date; a group's "07:00" is
+  the next one after the request, dated in the phone's zone when the owner approves), and the request expires after 10 minutes.
 - One phone change per request; title 80, text 1000, label 60 characters, control and bidi characters removed.
 - The phone's warnings are passed on: alarm volume 0, total silence, notifications off, no full-screen permission. The
-  phone sends codes for warnings, refusals and events; only words from the server's own list reach Ampi.
+  phone sends codes for warnings, refusals and events; only words from the server's own list reach Ampi
+  (and the alarms' labels, 60 characters each).
 
 ### The app (`companion/`, plain Java, no libraries, built with the SDK tools only, no Gradle)
 
@@ -90,7 +93,7 @@ accessibility or notification-reading permission.
 - **LinkService**: foreground service (`specialUse`) holding the one connection, on a thread. Reconnects on network
   changes and with back-off (5 s to 15 min, reset only by `welcome`). A wake-up every 15 min
   (`setAndAllowWhileIdle`) closes a connection that has been silent for 4 min (`elapsedRealtime`) and sets every alarm
-  again from the file. Each message is handled under a short wake lock. Without the battery exemption this is unreliable: the app says so.
+  again from the file; a due one is handed to Android's alarm clock, which alone may always start the ringing. Each message is handled under a short wake lock. Without the battery exemption this is unreliable: the app says so.
 - **TLS**: the server certificate must equal the pinned one (no certificate authorities, no host names); the client key
   (P-256, random subject) is made in the phone's secure hardware and can't be exported. It isn't fingerprint-bound:
   the link must work while the phone is locked.

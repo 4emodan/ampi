@@ -68,7 +68,11 @@ public final class LinkService extends Service {
     };
 
     static void start(Context c, boolean check) {
-        if (Config.load(c) == null) return;
+        if (Config.load(c) == null) {
+            if (!AlarmStore.get(c).alarms.isEmpty()) watchdog(c);  // unpaired: the alarms are still looked after
+            return;
+        }
+        watchdog(c);
         try {
             c.startForegroundService(new Intent(c, LinkService.class).setAction(check ? CHECK : null));
         } catch (RuntimeException e) {
@@ -76,22 +80,20 @@ public final class LinkService extends Service {
             Log.w("Ampi", "can't start the connection now", e);
             problem = "Android didn't let the connection start in the background";
         }
-        watchdog(c);
     }
 
     /** Until the service has started its thread or reconnects (the phone may otherwise sleep first). */
-    static synchronized void stayAwake(Context c) {
+    static synchronized void stayAwake(Context c, long ms) {
         if (awake == null) {
             awake = c.getApplicationContext().getSystemService(PowerManager.class)
                     .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ampi:check");
             awake.setReferenceCounted(false);
         }
-        awake.acquire(45_000);
+        awake.acquire(ms);
     }
 
     static void stop(Context c) {
         c.stopService(new Intent(c, LinkService.class));
-        c.getSystemService(AlarmManager.class).cancel(watchdogIntent(c));
     }
 
     private static PendingIntent watchdogIntent(Context c) {
@@ -120,14 +122,14 @@ public final class LinkService extends Service {
         }
         // Reconnecting must not wait for the next time the phone wakes up.
         if (thread == null || !thread.isAlive()) {
-            stayAwake(this);
+            stayAwake(this, 45_000);
             thread = new Thread(this::run, "ampi-link");
             thread.start();
         } else if (socket != null && SystemClock.elapsedRealtime() - lastFrame > SILENT) {
-            stayAwake(this);
+            stayAwake(this, 45_000);
             reconnect();
         } else if (socket == null) {
-            stayAwake(this);
+            stayAwake(this, 45_000);
             nudge();
         }
         return START_STICKY;
@@ -257,7 +259,8 @@ public final class LinkService extends Service {
         s.setSoTimeout(400_000);
         welcomes++;
         problem = "";
-        connectedSince = lastContact = System.currentTimeMillis();
+        lastContact = System.currentTimeMillis();
+        if (running == this) connectedSince = lastContact;
         show();
         while (!stopping) {
             JSONObject m = read(in);
@@ -299,9 +302,10 @@ public final class LinkService extends Service {
             this(at, SystemClock.elapsedRealtime());
         }
 
-        /** A message held up on the way says an old time: whichever is further ahead is nearer the truth. */
+        /** A message held up on the way says an old time: whichever is further ahead is nearer the truth. Far behind, the
+         *  server's clock was set back. */
         Clock ahead(double at) {
-            return at > now() && at < now() + 3600 ? new Clock(at) : this;
+            return at > now() || now() - at > 200 ? new Clock(at) : this;
         }
 
         double now() {

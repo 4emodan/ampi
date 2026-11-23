@@ -46,12 +46,9 @@ final class Alarms {
             for (Alarm a : s.alarms) {
                 if (wanted.wallClock() && !a.snoozed && a.identity().equals(wanted.identity())) {
                     if (a.ringing && !a.repeats()) throw new AlarmStore.Refused("ringing");
+                    if (a.at <= now && !a.repeats()) throw new AlarmStore.Refused("past");
                     existed[0] = true;
-                    if (!a.ringing) {  // set again, in case Android lost it
-                        a.toNext(now);
-                        if (a.at <= now) throw new AlarmStore.Refused("past");
-                        arm(c, a);
-                    }
+                    if (!a.ringing && a.at > now) arm(c, a);  // set again, in case Android lost it (a due one is left alone)
                     return a;
                 }
             }
@@ -75,7 +72,7 @@ final class Alarms {
                     "Undo", action(c, UNDO_SET, done));
         }
         long at = done.at;
-        if (done.ringing && done.repeats()) at = AlarmTimes.next(LocalTime.parse(done.time), null, done.days, ZoneId.systemDefault(), now);
+        if (done.repeats() && at <= now) at = AlarmTimes.next(LocalTime.parse(done.time), null, done.days, ZoneId.systemDefault(), now);
         return new JSONObject().put("id", done.id).put("at", at).put("zone", ZoneId.systemDefault().getId())
                 .put("existed", existed[0]).put("warn", warnings(c));
     }
@@ -98,8 +95,8 @@ final class Alarms {
                 "Undo", action(c, UNDO_CANCEL, gone));
     }
 
-    static JSONObject list(Context c) throws JSONException {
-        AlarmStore s = AlarmStore.get(c);
+    static JSONObject list(Context c) throws JSONException, IOException {
+        AlarmStore s = AlarmStore.load(c);  // unreadable must not look like "no alarms"
         JSONArray rows = new JSONArray();
         for (Alarm a : sorted(s.alarms)) rows.put(a.shared());
         return new JSONObject().put("alarms", rows).put("events", new JSONArray(s.events))
@@ -182,7 +179,11 @@ final class Alarms {
         try {
             AlarmStore.change(c, s -> {
                 Alarm a = s.find(id);
-                if (a == null || !a.ringing) return null;
+                // (Not marked as ringing: the mark couldn't be written. Due is enough.)
+                if (a == null || (!a.ringing && a.at > System.currentTimeMillis() + EARLY)) {
+                    if (snooze) throw new IOException("not in the file");
+                    return null;
+                }
                 end(c, s, a, code);
                 if (snooze) {
                     Alarm z = new Alarm();
@@ -234,7 +235,8 @@ final class Alarms {
                 if (a == null) {
                     ring[0] = s.broken && fresh;
                 } else {
-                    if (fresh && at > a.at) a.at = at;  // the file missed the last change
+                    if (!a.wallClock() && !a.ringing) a.recompute(c, now);  // the clock may have jumped just now
+                    else if (fresh && at > a.at) a.at = at;  // the file missed the last change
                     ring[0] = due(c, s, a, now);
                 }
                 return null;
@@ -248,10 +250,10 @@ final class Alarms {
 
     /**
      * Everything is set again from the file: after a reboot, an update, a change of the time or zone, and every 15 minutes
-     * (an alarm whose ringing ended without a word, e.g. the app was stopped, is finished here).
+     * (so an alarm whose ringing ended without a word, e.g. the app was stopped, rings again or is finished). It never rings
+     * by itself: only Android's alarm clock may always start the ringing, so a due alarm is handed to it (it fires at once).
      */
     static void rearmAll(Context c) {
-        List<Alarm> ring = new ArrayList<>();
         try {
             AlarmStore.change(c, s -> {
                 long now = System.currentTimeMillis();
@@ -259,7 +261,8 @@ final class Alarms {
                     if (a.ringing && RingService.isRinging(a.id)) continue;
                     try {
                         if (!a.ringing) a.recompute(c, now);
-                        if (due(c, s, a, now)) ring.add(a);
+                        if (a.at <= now + EARLY && now - a.at <= LATE) arm(c, a);
+                        else due(c, s, a, now);
                     } catch (RuntimeException e) {  // one alarm's trouble must not keep the others from being set
                         Log.e("Ampi", "rearm " + a.id, e);
                         Notes.change(c, "failed-" + a.id, "An alarm could not be set", a.label, null, null);
@@ -270,7 +273,16 @@ final class Alarms {
         } catch (IOException | AlarmStore.Refused | RuntimeException e) {
             Log.e("Ampi", "rearm", e);
         }
-        for (Alarm a : ring) RingService.ring(c, a.id, a.text());
+    }
+
+    /** Was ringing when the app was killed, and isn't too late to go on. */
+    static List<Alarm> cutOff(Context c) {
+        long now = System.currentTimeMillis();
+        List<Alarm> out = new ArrayList<>();
+        for (Alarm a : AlarmStore.get(c).alarms) {
+            if (a.ringing && a.at <= now && now - a.at <= LATE && !RingService.isRinging(a.id)) out.add(a);
+        }
+        return out;
     }
 
     /** True: ring now. Otherwise the alarm is set again, or over (missed). */

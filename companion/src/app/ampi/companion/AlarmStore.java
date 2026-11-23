@@ -55,6 +55,12 @@ final class AlarmStore {
         }
     }
 
+    static AlarmStore load(Context c) throws IOException {
+        synchronized (LOCK) {
+            return read(c);
+        }
+    }
+
     /** For showing; empty when the file can't be read right now. */
     static AlarmStore get(Context c) {
         synchronized (LOCK) {

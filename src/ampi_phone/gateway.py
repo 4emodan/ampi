@@ -108,7 +108,7 @@ class Gate:
             return False
         w = self.recent.get(key)
         if w is None:
-            if len(self.recent) > 5000:
+            if len(self.recent) > 5000 and not known:
                 self.recent = {k: v for k, v in self.recent.items() if v.full() or v.times}
                 if len(self.recent) > 5000:
                     return False
@@ -243,7 +243,10 @@ class Gateway:
                 log.warning("a certificate that isn't a paired phone's got through the handshake")
                 return
             self.gate.authenticated(key)
-            await self.session(device.name, reader, writer)
+            try:
+                await self.session(device.name, reader, writer)
+            finally:
+                self.gate.authenticated(key)  # online for days: still known when it comes back
         except Exception:
             log.exception("connection failed")
         finally:

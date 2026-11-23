@@ -127,17 +127,14 @@ public final class RingService extends Service {
             }
             if (!show()) {
                 fallback(this, id, text);
-                if (texts().isEmpty()) finish();
+                if (!texts().isEmpty()) return START_STICKY;
+                finish();
                 return START_NOT_STICKY;
             }
-            ringAwake(this, true);
-            if (player == null && tone == null) start();
-            handler.removeCallbacks(end);
-            handler.postDelayed(end, MAX_MS);
-            changed();
+            sound();
             return START_STICKY;
         }
-        show();  // a service started as a foreground one must show itself, even to stop
+        boolean shown = show();  // a service started as a foreground one must show itself, even to stop
         if (STOP.equals(action)) {
             stopAll("stopped", false, false);
         } else if (SNOOZE.equals(action)) {
@@ -149,11 +146,31 @@ public final class RingService extends Service {
             if (texts().isEmpty()) finish();
             else changed();
         } else {
-            // Restarted by Android after a crash while ringing: the file says what is due (and starts this again).
+            // Restarted by Android after a crash while ringing: what was ringing rings on, if it may.
+            if (shown) {
+                for (Alarm a : Alarms.cutOff(this)) {
+                    synchronized (ringing) {
+                        ringing.put(a.id, a.text());
+                    }
+                }
+            }
             Alarms.rearmAll(this);
-            if (texts().isEmpty()) finish();
+            if (texts().isEmpty()) {
+                finish();
+            } else {
+                show();
+                sound();
+            }
         }
         return START_STICKY;
+    }
+
+    private void sound() {
+        ringAwake(this, true);
+        if (player == null && tone == null) start();
+        handler.removeCallbacks(end);
+        handler.postDelayed(end, MAX_MS);
+        changed();
     }
 
     private boolean show() {

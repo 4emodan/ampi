@@ -74,8 +74,10 @@ def remove(conf: Path, name: str) -> None:
     if not trust.NAME_RE.fullmatch(name) or not (conf / "devices" / f"{name}.json").exists():
         raise ValueError(f"no phone {name}")
     # First the connection: whatever goes wrong after this, a lost phone isn't connected any more.
-    run("systemctl", "stop", "ampi-phone.service")
-    (conf / "devices" / f"{name}.json").unlink()
+    try:
+        run("systemctl", "stop", "ampi-phone.service")
+    finally:
+        (conf / "devices" / f"{name}.json").unlink()
     apply(conf)
 
 

@@ -116,8 +116,11 @@ def test_an_approved_group_alarm_gets_its_date_when_approved(env):
     go(d, "phone.alarm", "group:family", clock="07:00")
     ops = json.loads(d.approvals.get(1)["ops"])
     from ampi_tools.ops import execute
+    # Asked at 06:59, approved at 07:01: still that 07:00 (the phone then says it has passed), never tomorrow's.
+    zone = ZoneInfo(ZONE)
+    ops[0]["args"]["resolved"]["next"] = datetime(2026, 11, 24, 6, 59, tzinfo=zone).timestamp()
     ok, text, _ = asyncio.run(execute(d.services, ops))
-    assert ok and phone.asked("alarm.set")[0]["date"]
+    assert ok and phone.asked("alarm.set")[0]["date"] == "2026-11-24"
 
 
 def test_cancelling_asks_unless_just_set(env):
@@ -125,7 +128,7 @@ def test_cancelling_asks_unless_just_set(env):
     now = time.time() * 1000
     phone.alarms = [{"id": "0000000a", "kind": "alarm", "at": now + 8e7, "label": "Wake", "created": now - 60_000},
                     {"id": "0000000b", "kind": "alarm", "at": now + 8e7, "label": "Train", "created": now - 7_200_000,
-                     "days": ["mon"]}, {"id": "0000000c", "kind": "alarm", "at": now + 8e7, "created": now + 9e9}]
+                     "days": ["mon"] * 9000}, {"id": "0000000c", "kind": "alarm", "at": now + 8e7, "created": now + 9e9}]
     assert "Cancelled: alarm" in go(d, "phone.cancel", alarm="0000000a")["text"]
     for aid in ("0000000b", "0000000c"):
         assert go(d, "phone.cancel", alarm=aid)["approval"]
@@ -153,6 +156,7 @@ def test_an_approved_timer_that_is_already_over_is_not_set(env):
     ({"ok": False, "code": "limit", "error": "SYSTEM"}, "too many"),
     ({"ok": False, "error": "SYSTEM"}, "gateway refused"),
     ({"ok": True, "answer": {"ok": False, "error": "past"}}, "that time has passed"),
+    ({"ok": True, "answer": {"ok": False, "error": "failed"}}, "may or may not"),
     ({"ok": True, "answer": {"ok": False, "error": "SYSTEM NOTE"}}, "no reason given"),
     ({"ok": True, "answer": {"ok": False, "error": {"a": 1}}}, "no reason given"),
     ({"ok": True, "answer": "x"}, "refused"),
@@ -234,20 +238,16 @@ def test_zones_set_by_hand():
     assert ops_phone.zone_of("GMT-03:30").utcoffset(None) == -timedelta(hours=3, minutes=30)
 
 
-def test_the_second_pass_of_the_autumn_hour(monkeypatch):
+@pytest.mark.parametrize("asked,clock,day", [
+    (datetime(2026, 10, 25, 3, 10, fold=1), "03:30", "2026-10-26"),  # the phone rings on the first pass only, which is over
+    (datetime(2026, 10, 25, 3, 10), "03:30", "2026-10-25"), (datetime(2026, 10, 25, 3, 10, fold=1), "04:30", "2026-10-25"),
+    (datetime(2026, 11, 24, 6, 59), "07:00", "2026-11-24"), (datetime(2026, 11, 24, 7, 0), "07:00", "2026-11-25"),
+])
+def test_the_next_time_the_clock_shows_it(asked, clock, day):
     zone = ZoneInfo(ZONE)
-
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(2026, 10, 25, 3, 10, tzinfo=zone, fold=1)
-    monkeypatch.setattr(ops_phone, "datetime", Clock)
-    r = {"time": "03:30"}
-    ops_phone._fix_date(r, zone)
-    assert r["date"] == "2026-10-26"  # the phone rings on the first pass only, which is over
-    r = {"time": "04:30"}
-    ops_phone._fix_date(r, zone)
-    assert r["date"] == "2026-10-25"
+    r = {"time": clock}
+    ops_phone._fix_date(r, zone, asked.replace(tzinfo=zone).timestamp())
+    assert r["date"] == day
 
 
 @pytest.mark.parametrize("argv,op,args", [
