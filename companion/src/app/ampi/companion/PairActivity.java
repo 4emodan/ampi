@@ -53,17 +53,17 @@ public final class PairActivity extends Activity {
             String raw = String.valueOf(intent.getStringExtra("offer"));
             if (raw.length() > 8000) throw new JSONException("too long");
             JSONObject o = new JSONObject(new String(Base64.decode(raw, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP), StandardCharsets.UTF_8));
-            if (o.getInt("v") != 1) throw new JSONException("another version");
+            if (o.getInt("v") != 2) throw new JSONException("another version");
             String host = Texts.line(o.getString("host"), 100);
             int port = o.getInt("port");
-            byte[] server = Base64.decode(o.getString("cert"), Base64.DEFAULT);
-            X509Certificate parsed = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(new ByteArrayInputStream(server));
+            byte[] server = certificate(o.getString("cert"));
+            byte[] signin = o.getString("signin").isEmpty() ? new byte[0] : certificate(o.getString("signin"));
             if (port < 1 || port > 65535 || !host.matches("[A-Za-z0-9.:-]{3,100}")) throw new JSONException("bad address");
-            byte[] exact = parsed.getEncoded();
             Ui.body(card, host + ":" + port);
             Ui.small(card, "Only go on if you just started this on your own PC. Ampi's server will be able to show notifications "
-                    + "and set alarms on this phone.");
-            Ui.button(card, "Pair", true, v -> begin(host, port, exact));
+                    + "and set alarms on this phone" + (signin.length == 0 ? "." : ", and to ask for saved logins (each time you "
+                    + "decide with your fingerprint)."));
+            Ui.button(card, "Pair", true, v -> begin(host, port, server, signin));
             Ui.button(card, "Cancel", false, v -> finish());
         } catch (JSONException | GeneralSecurityException | IllegalArgumentException e) {
             Ui.body(card, "That isn't a pairing offer.");
@@ -71,14 +71,19 @@ public final class PairActivity extends Activity {
         }
     }
 
-    private void begin(String host, int port, byte[] server) {
+    private static byte[] certificate(String b64) throws GeneralSecurityException {
+        return ((X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(
+                new ByteArrayInputStream(Base64.decode(b64, Base64.DEFAULT)))).getEncoded();
+    }
+
+    private void begin(String host, int port, byte[] server, byte[] signin) {
         String alias = null;
         try {
             drop();
             alias = Keys.create();
             byte[] mine = Keys.certificate(alias).getEncoded();
-            String code = Texts.pairCode(server, mine, null);
-            pending = new Pending(new Config(host, port, server, alias, code), mine);
+            String code = Texts.pairCode(server, mine, signin);
+            pending = new Pending(new Config(host, port, server, signin, alias, code), mine);
             LinearLayout page = Ui.page(this);
             Ui.title(page, "Compare the code");
             LinearLayout card = Ui.card(page);

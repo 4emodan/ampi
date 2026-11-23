@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="app.ampi.companion"
-    android:versionCode="1"
-    android:versionName="0.1">
+    android:versionCode="2"
+    android:versionName="0.2">
 
     <uses-sdk android:minSdkVersion="36" android:targetSdkVersion="36" />
 
@@ -44,6 +44,10 @@
             android:excludeFromRecents="true" android:launchMode="singleTask" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|fontScale" />
         <receiver android:name=".PairReceiver" android:exported="true" android:permission="android.permission.DUMP" />
 
+        <activity android:name=".LoginsActivity" android:exported="false" android:launchMode="singleTop"
+            android:excludeFromRecents="true" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|fontScale" />
+        <activity android:name=".UnlockActivity" android:exported="false" android:launchMode="singleTask" android:taskAffinity=""
+            android:excludeFromRecents="true" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|fontScale" />
         <service android:name=".LinkService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps the connection to the owner's own assistant server, which sends notifications and alarms." />

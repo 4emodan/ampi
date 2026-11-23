@@ -1,0 +1,12 @@
+[Unit]
+Description=Ampi sign-in: control socket (ampi-tools only)
+
+[Socket]
+ListenStream=/run/ampi-signin.sock
+SocketUser=root
+SocketGroup=ampisignin-use
+SocketMode=0660
+Accept=no
+
+[Install]
+WantedBy=sockets.target

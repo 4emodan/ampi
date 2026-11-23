@@ -37,6 +37,7 @@ REFUSALS = {
     "gone_again": "it was set before and is gone again (see `phone alarms`)", "notifications_off": "notifications are switched "
     "off for Ampi on the phone", "not_shown": "Android didn't show it", "unknown_kind": "the app on the phone is too old",
     "bad_request": "it didn't understand the request",
+    "signin_open": "the owner is looking at a sign-in request right now; try again in two minutes",
 }
 WARNINGS = {
     "volume_0": "the alarm volume on the phone is 0", "total_silence": "Do Not Disturb is on total silence",

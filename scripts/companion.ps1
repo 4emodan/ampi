@@ -41,6 +41,15 @@ if ($Pair) {
     $there = "$(Invoke-Adb shell -n pm path $pkg)".Trim() -replace '^package:', ''
     $sum = ("$(Invoke-Adb shell -n sha256sum $there)".Trim() -split '\s+')[0]
     if ($sum -ne (Get-FileHash -Algorithm SHA256 $Apk).Hash) { throw "the app on the phone isn't $Apk" }
+    # Both sides must have forgotten an earlier pairing, before any codes are compared.
+    $state = (Invoke-Adb shell -n am broadcast -n "$pkg/.PairReceiver" -a "$pkg.CERT") -join " "
+    if ($state -match 'result=2') { throw "the phone is already paired: unpair it in the app first (Ampi, at the bottom)" }
+    $known = @(Invoke-Server "ampi-phone devices") | Where-Object { "$_" -match "^$([regex]::Escape($Name))\s" }
+    if ($known) {
+        Write-Host "The server still has this phone: $known"
+        if ((Read-Host "Remove it there and pair again? (yes/no)") -ne "yes") { throw "stopped: nothing was changed" }
+        Invoke-Server "ampi-phone remove $Name" | Out-Host
+    }
     $offer = (Invoke-Server "ampi-phone offer") -join ""
     $p = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($offer)).Replace("+", "-").Replace("/", "_").TrimEnd("=")
     # Only adb may start this screen (it needs android.permission.DUMP).

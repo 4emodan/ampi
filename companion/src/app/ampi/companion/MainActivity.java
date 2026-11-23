@@ -49,7 +49,7 @@ public final class MainActivity extends Activity {
         List<Notes.Message> messages = Notes.messages(this);
         List<Checks.Problem> problems = Checks.problems(this);
         var key = new StringBuilder().append(LinkService.connectedSince).append(LinkService.problem).append(cfg == null)
-                .append(messages.size()).append(messages.isEmpty() ? "" : messages.get(messages.size() - 1).id());
+                .append(Unlock.current() != null).append(messages.size()).append(messages.isEmpty() ? "" : messages.get(messages.size() - 1).id());
         for (Checks.Problem p : problems) key.append(p.text());
         for (Alarm a : store.alarms) key.append(a.id).append(a.at).append(a.ringing);
         if (key.toString().equals(shown)) return;  // keeps the scroll position while nothing changed
@@ -73,6 +73,11 @@ public final class MainActivity extends Activity {
             Ui.small(status, last + (LinkService.problem.isEmpty() ? "" : "\n" + LinkService.problem));
             Ui.small(status, "Alarms already set ring anyway.");
         }
+        if (Unlock.current() != null) {
+            LinearLayout card = Ui.card(page);
+            Ui.body(card, "Ampi wants to use a saved login");
+            Ui.button(card, "Show", true, v -> startActivity(new Intent(this, UnlockActivity.class)));
+        }
         for (Checks.Problem p : problems) {
             LinearLayout card = Ui.card(page);
             Ui.body(card, p.text());
@@ -94,6 +99,11 @@ public final class MainActivity extends Activity {
             Alarms.test(this);
             refresh();
         });
+
+        Ui.heading(page, "Saved logins");
+        LinearLayout logins = Ui.card(page);
+        Ui.small(logins, "Only on this phone, opened by your fingerprint.");
+        Ui.button(logins, "Open", false, v -> startActivity(new Intent(this, LoginsActivity.class)));
 
         Ui.heading(page, "Messages");
         if (messages.isEmpty()) Ui.small(Ui.card(page), "None yet.");
@@ -122,7 +132,8 @@ public final class MainActivity extends Activity {
 
     private void confirmUnpair() {
         new AlertDialog.Builder(this).setTitle("Unpair this phone?")
-                .setMessage("The connection ends and its key is deleted. Alarms stay. On the server, also run: ampi-phone remove.")
+                .setMessage("The connection ends and its key is deleted. Alarms and saved logins stay (the logins only work with the "
+                        + "same server). On the server, also run: ampi-phone remove.")
                 .setNegativeButton("Keep", null).setPositiveButton("Unpair", (d, w) -> withScreenLock(this::unpair)).show();
     }
 

@@ -62,7 +62,7 @@ final class Notes {
     }
 
     /** Android shows it a moment later, or (too many, switched off meanwhile) not at all. Not on the main thread. */
-    private static boolean appeared(NotificationManager nm, String tag) {
+    static boolean appeared(NotificationManager nm, String tag) {
         for (int i = 0; i < 30; i++) {
             if (Arrays.stream(nm.getActiveNotifications()).anyMatch(n -> tag.equals(n.getTag()))) return true;
             SystemClock.sleep(100);

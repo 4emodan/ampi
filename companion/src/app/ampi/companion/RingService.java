@@ -122,6 +122,7 @@ public final class RingService extends Service {
         String id = intent == null ? null : intent.getStringExtra(ID);
         if (RING.equals(action) && id != null) {
             String text = intent.getStringExtra(TEXT);
+            Unlock.interrupt();  // never two things at once that want the owner's finger
             synchronized (ringing) {
                 ringing.put(id, text == null ? "Alarm" : text);
             }

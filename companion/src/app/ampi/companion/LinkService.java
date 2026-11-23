@@ -24,7 +24,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ConnectException;
-import java.net.InetSocketAddress;
 import java.net.NoRouteToHostException;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -227,15 +226,9 @@ public final class LinkService extends Service {
         Socket raw = new Socket();
         socket = raw;
         try {
-            raw.connect(new InetSocketAddress(cfg.host(), cfg.port()), 15_000);
-            raw.setTcpNoDelay(true);
-            SSLSocket s = (SSLSocket) Keys.context(cfg.alias(), cfg.server()).getSocketFactory()
-                    .createSocket(raw, cfg.host(), cfg.port(), true);
+            SSLSocket s = Link.connect(cfg, raw);
             socket = s;
-            s.setEnabledProtocols(new String[] {"TLSv1.3"});
-            s.setSoTimeout(20_000);
-            s.startHandshake();
-            talk(s);
+            talk(s, cfg);
         } finally {
             Socket s = socket;
             try {
@@ -247,15 +240,12 @@ public final class LinkService extends Service {
         }
     }
 
-    private void talk(SSLSocket s) throws IOException, JSONException {
+    private void talk(SSLSocket s, Config cfg) throws IOException, JSONException {
         InputStream in = s.getInputStream();
         OutputStream out = s.getOutputStream();
-        // TLS 1.3: the server's refusal of this phone only shows at the first read, so nothing counts before "welcome".
-        JSONObject w = read(in);
-        if (w == null || !"welcome".equals(w.optString("t"))) throw new IOException("the server doesn't accept this phone");
-        if (w.optInt("proto") != 1) throw new IOException("the server speaks another version: update the app");
-        Clock clock = new Clock(w.optDouble("now", 0));
-        Frames.write(out, hello().toString());
+        Clock clock = new Clock(Link.welcome(s).optDouble("now", 0));
+        lastFrame = SystemClock.elapsedRealtime();
+        Frames.write(out, hello(cfg).toString());
         s.setSoTimeout(400_000);
         welcomes++;
         problem = "";
@@ -277,7 +267,9 @@ public final class LinkService extends Service {
                         clock = clock.ahead(m.optDouble("now", 0));
                         Frames.write(out, Requests.handle(this, m, clock.now()).toString());
                     }
-                    default -> { }  // later versions' messages (logins) are never handled here
+                    // Only that a channel is wanted; what for is asked inside it, where the gateway can't (VaultSession).
+                    case "vault.open" -> VaultSession.open(this, cfg, m.optString("ch"));
+                    default -> { }
                 }
             } finally {
                 lock.release();
@@ -314,14 +306,14 @@ public final class LinkService extends Service {
         }
     }
 
-    private JSONObject hello() throws JSONException {
+    private JSONObject hello(Config cfg) throws JSONException {
         JSONArray warn = Alarms.warnings(this);
         if (!Checks.batteryFree(this)) warn.put("battery");
         if (!Checks.keepsPermissions(this)) warn.put("hibernation");
         return new JSONObject().put("t", "hello").put("proto", 1).put("app", Checks.version(this))
                 .put("sdk", Build.VERSION.SDK_INT + "." + Build.getMinorSdkVersion(Build.VERSION.SDK_INT_FULL))
                 .put("model", Build.MANUFACTURER + " " + Build.MODEL).put("zone", java.time.ZoneId.systemDefault().getId())
-                .put("warn", warn);
+                .put("warn", warn).put("vault", cfg.signin().length > 0);
     }
 
     private boolean show() {

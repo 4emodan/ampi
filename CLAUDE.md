@@ -67,6 +67,7 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
   wolt.py, ops_wolt.py  Wolt via wolt.com's own (unofficial) web API, owner's choice: venues, menus, orders,
                         filling the basket; never places/pays an order; polite limiter, pause on any block
   ops_phone.py          the owner's phone: notifications, alarms, timers (private chat; groups and forwarded messages ask)
+  ops_signin.py         logins saved on the phone (private chat only): asks ampi-signin, gets only the outcome
   vault.py              the owner's profile + card (vault.json 0600, entered with `ampi-tools vault-set`), masking,
                         per-site grants and the purchase log (vault.sqlite3)
   ops_checkout.py       info.* / checkout.* / payment.*: fill by reference after approval, card only into payment
@@ -75,12 +76,14 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
                         `ampicheckout`) over CDP; elements tracked in isolated worlds; never returns input values
   checkout_net.py       root: nft table for the engine's egress and the loopback control port
   client.py             `todoist` / `gmail` / `youtube` / `threads` / `instagram` / `maps` / `wolt` / `browse` /
-                        `info` / `checkout` / `payment` / `phone` commands the assistant runs (skills: templates/skills/)
+                        `info` / `checkout` / `payment` / `phone` / `signin` commands the assistant runs (skills: templates/skills/)
   browser.py            stdlib-only; one sandboxed `ampi-browser@` instance per page (socket-activated, user
                         `ampibrowser`) running the Obscura engine read-only; not part of the ampi-tools daemon
   browser_net.py        root: nft egress table for the browser user + generated resolv.conf/hosts/passwd
 src/ampi_phone/         the phone gateway (user `ampiphone`, stdlib, socket-activated, no network of its own): mutual TLS
-                        with the paired phone; `ampi-phone` (root) pairs and removes phones
+                        with the paired phone; `ampi-phone` (root) pairs and removes phones;
+                        signin.py = ampi-signin (user `ampisignin`): has the phone unlock a saved login, over TLS of
+                        its own inside a connection the gateway only passes on
 companion/              the Android app: plain Java, no libraries, built by companion/build.ps1 with the SDK tools only;
                         scripts/companion.ps1 installs and pairs it over USB (docs/COMPANION.md)
 tests/                  pytest; fake claude CLI + fake Telegram API, no network
@@ -88,7 +91,8 @@ deploy/                 install.sh, systemd unit (runs as user `assistant`, isol
                         install-tg-reader.sh, tg-reader.service (user `tgreader`);
                         install-tools.sh, ampi-tools.service (user `ampitools`);
                         install-browser.sh, ampi-browser.socket + ampi-browser@.service + ampi-browser-net.service;
-                        install-phone.sh, ampi-phone.socket + ampi-phone.service (user `ampiphone`)
+                        install-phone.sh, ampi-phone.socket + ampi-phone.service (user `ampiphone`),
+                        ampi-phone-vault.socket, ampi-signin.socket + ampi-signin.service (user `ampisignin`)
 templates/               starter CLAUDE.md, group/watcher instructions, skills
 docs/SETUP.md           server setup steps
 ```

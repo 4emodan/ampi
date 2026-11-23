@@ -517,6 +517,25 @@ def phone_main(argv: list[str] | None = None) -> int:
     return _main("phone", phone_parser(), phone_ops, argv)
 
 
+# --- sign-in with the logins saved on the owner's phone --------------------------------------------
+
+
+def signin_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="signin", description="Logins saved on the owner's phone (unlocked there by fingerprint).")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("test", help="ask the owner to unlock the login for a site (nothing is sent or filled in)")
+    s.add_argument("site", help="e.g. example.com")
+    return p
+
+
+def signin_ops(a: argparse.Namespace) -> list[dict]:
+    return _op("signin.test", site_host=a.site)
+
+
+def signin_main(argv: list[str] | None = None) -> int:
+    return _main("signin", signin_parser(), signin_ops, argv)
+
+
 # --- personal info, checkout, payment -----------------------------------------------------------
 
 WAIT_DEFAULT = 540  # seconds; the skill runs these with the Bash tool's 600000 ms timeout

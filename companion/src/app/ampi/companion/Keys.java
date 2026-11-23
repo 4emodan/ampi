@@ -64,7 +64,7 @@ final class Keys {
         throw new GeneralSecurityException("the app's key is gone: pair again");
     }
 
-    private static KeyStore store() throws GeneralSecurityException {
+    static KeyStore store() throws GeneralSecurityException {
         try {
             KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
             ks.load(null);

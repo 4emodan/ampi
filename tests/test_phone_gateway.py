@@ -368,7 +368,7 @@ def test_a_paired_phones_address_is_remembered(conf, certs):
 
 def test_hello_is_cut_to_a_known_shape():
     h = gateway.clean_hello({"app": 5, "model": "x" * 500 + "\x00", "warn": "no", "evil": 1})
-    assert h == {"app": "", "sdk": "", "model": "x" * 60, "zone": "", "warn": []}
+    assert h == {"app": "", "sdk": "", "model": "x" * 60, "zone": "", "warn": [], "vault": False}
 
 
 # --- pairing ------------------------------------------------------------------------------------
@@ -446,9 +446,9 @@ def test_only_single_certificates_are_accepted(conf):
 
 def test_offer_has_only_public_data(conf, capsys, monkeypatch):
     monkeypatch.setattr(admin.os, "geteuid", lambda: 0, raising=False)
-    assert admin.main(["offer"], conf[0]) == 0
+    assert admin.main(["offer"], conf[0], conf[0] / "no-signin") == 0
     offer = json.loads(capsys.readouterr().out)
-    assert set(offer) == {"v", "host", "port", "cert"} and base64.b64decode(offer["cert"]) == conf[1]["server"]
+    assert set(offer) == {"v", "host", "port", "cert", "signin"} and offer["signin"] == "" and base64.b64decode(offer["cert"]) == conf[1]["server"]
 
 
 def test_a_broken_device_file_stops_the_gateway(conf):

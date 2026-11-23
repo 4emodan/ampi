@@ -5,6 +5,9 @@
 It holds no other secret than its TLS key, stores nothing, starts nothing and opens no connection. What a phone may be
 asked is decided in ampi-tools; this only knows which kinds exist and how many per minute. Journal: kinds and outcomes,
 never texts.
+
+For sign-ins it passes bytes between ampi-signin and a second connection the phone opens for that: TLS inside, which it
+can neither read nor make (docs/COMPANION.md).
 """
 
 from __future__ import annotations
@@ -44,6 +47,9 @@ HANDSHAKE_S, HANDSHAKES, HANDSHAKES_PER_ADDR, ADDR_PER_MINUTE = 5.0, 64, 2, 30
 RESERVED, KNOWN_PER_ADDR, KNOWN_PER_MINUTE, KNOWN_S, KNOWN_MAX = 16, 8, 120, 24 * 3600, 200
 CONTROLS = 16  # connections to the control socket at once
 MAX_CONTROL = 64 * 1024
+VAULT_SOCKET = "ampi-phone-vault.socket"
+# Sign-in channels: how many, how long the phone has to open its connection, how long and how much one may carry.
+VAULT_PER_MINUTE, VAULT_PER_HOUR, VAULT_DIAL, VAULT_LIFE, VAULT_BYTES = 6, 40, 12.0, 130.0, 64 * 1024
 
 
 class Closed(Exception):
@@ -160,7 +166,8 @@ def clean_hello(h: dict) -> dict:
 
     warn = h.get("warn")
     return {"app": text("app", 20), "sdk": text("sdk", 20), "model": text("model", 60), "zone": text("zone", 60),
-            "warn": [w[:40] for w in warn if isinstance(w, str)][:10] if isinstance(warn, list) else []}
+            "warn": [w[:40] for w in warn if isinstance(w, str)][:10] if isinstance(warn, list) else [],
+            "vault": h.get("vault") is True}
 
 
 @dataclass
@@ -185,6 +192,15 @@ class Link:
         self.writer.transport.abort()
 
 
+@dataclass
+class Tunnel:
+    """One sign-in channel: waiting for the phone's connection, or carrying bytes."""
+    device: str
+    ch: str
+    phone: asyncio.Future  # (reader, writer) of the connection the phone opens for it
+    over: asyncio.Event = field(default_factory=asyncio.Event)
+
+
 class Gateway:
     def __init__(self, conf: Path = trust.CONF):
         self.devices = trust.load_devices(conf)
@@ -196,6 +212,8 @@ class Gateway:
         self.gate = Gate()
         self._tasks: set[asyncio.Task] = set()
         self._controls = 0
+        self.tunnel: Tunnel | None = None
+        self.vault_minute, self.vault_hour = Window(VAULT_PER_MINUTE, 60), Window(VAULT_PER_HOUR, 3600)
 
     # --- phones ------------------------------------------------------------------------------------
 
@@ -260,6 +278,9 @@ class Gateway:
         try:
             link.send({"t": "welcome", "proto": PROTO, "now": time.time()})
             hello = await asyncio.wait_for(read_frame(reader), HELLO_WAIT)
+            if hello.get("t") == "vault":
+                await self._vault_joined(device, hello, reader, writer)
+                return
             if hello.get("t") != "hello":
                 raise Closed("no hello")
             link.hello = clean_hello(hello)
@@ -307,6 +328,84 @@ class Gateway:
         ok, data, error = msg.get("ok") is True, msg.get("data"), msg.get("error")
         waiting[0].set_result({"ok": ok, "data": data if isinstance(data, dict) else {},
                                "error": str(error)[:60] if error is not None else None})
+
+    # --- sign-in channels ----------------------------------------------------------------------------
+
+    async def _vault_joined(self, device: str, first: dict, reader: asyncio.StreamReader,
+                            writer: asyncio.StreamWriter) -> None:
+        """The phone's second connection, made because it was asked for one."""
+        t = self.tunnel
+        if t is None or t.device != device or first.get("ch") != t.ch or t.phone.done():
+            raise Closed("no such sign-in channel")
+        t.phone.set_result((reader, writer))
+        await t.over.wait()
+        writer.close()  # not abort(): the last bytes still go out
+        with contextlib.suppress(OSError, asyncio.TimeoutError):
+            await asyncio.wait_for(writer.wait_closed(), 3)
+
+    async def vault_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                               allowed: frozenset[int]) -> None:
+        """ampi-signin: one line, then (when that was answered with ok) the bytes to and from the phone."""
+        self._controls += 1
+        try:
+            if peer_uid(writer) not in allowed or self._controls > CONTROLS:
+                return
+            line = await asyncio.wait_for(reader.readline(), 10)
+            code = await self.relay(reader, writer) if line == b'{"cmd": "open"}\n' else "failed"
+            if code:
+                writer.write(json.dumps({"ok": False, "code": code}).encode() + b"\n")
+                await writer.drain()
+        except (OSError, asyncio.TimeoutError, ValueError):
+            pass
+        finally:
+            self._controls -= 1
+            writer.close()
+
+    async def relay(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
+        """Why there is no channel; "" after one was there."""
+        link = max((x for x in self.links.values() if x.hello and x.hello["vault"]), key=lambda x: x.since, default=None)
+        if link is None:
+            return "no_vault" if self.links else "offline"
+        if self.tunnel is not None:
+            return "busy"
+        if self.vault_minute.full() or self.vault_hour.full():
+            return "limit"
+        self.vault_minute.add()
+        self.vault_hour.add()
+        t = self.tunnel = Tunnel(link.device, secrets.token_hex(16), asyncio.get_running_loop().create_future())
+        try:
+            try:
+                link.send({"t": "vault.open", "ch": t.ch, "now": time.time()})
+                rd, wr = await asyncio.wait_for(t.phone, VAULT_DIAL)
+            except (Closed, asyncio.TimeoutError):
+                log.info("sign-in channel: no answer from %s", link.device)
+                return "no_answer"
+            writer.write(b'{"ok": true}\n')
+            log.info("sign-in channel to %s", link.device)
+            pumps = [asyncio.create_task(self._pump(reader, wr)), asyncio.create_task(self._pump(rd, writer))]
+            try:
+                await asyncio.wait(pumps, timeout=VAULT_LIFE, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for p in pumps:
+                    p.cancel()
+                await asyncio.gather(*pumps, return_exceptions=True)
+            log.info("sign-in channel closed")
+            return ""
+        finally:
+            t.over.set()
+            self.tunnel = None
+
+    @staticmethod
+    async def _pump(rd: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
+        total = 0
+        with contextlib.suppress(OSError):
+            while data := await rd.read(8192):
+                total += len(data)
+                if total > VAULT_BYTES:
+                    log.warning("sign-in channel: too much data")
+                    return
+                wr.write(data)
+                await wr.drain()
 
     # --- ampi-tools --------------------------------------------------------------------------------
 
@@ -395,30 +494,42 @@ def peer_uid(writer: asyncio.StreamWriter) -> int:
         return -1
 
 
-def systemd_sockets() -> tuple[list[socket.socket], socket.socket]:
-    """(public listeners, control socket) handed over by systemd."""
+def systemd_sockets() -> tuple[list[socket.socket], socket.socket, socket.socket | None]:
+    """(public listeners, control socket, the sign-in service's socket) handed over by systemd, told apart by the names of
+    their units."""
     if os.environ.get("LISTEN_PID") != str(os.getpid()):
         raise SystemExit("run me through ampi-phone.socket")
-    public, control = [], None
-    for fd in range(3, 3 + int(os.environ.get("LISTEN_FDS") or 0)):
-        s = socket.socket(fileno=fd)
+    public, control, vault = [], None, None
+    names = (os.environ.get("LISTEN_FDNAMES") or "").split(":")
+    for i in range(int(os.environ.get("LISTEN_FDS") or 0)):
+        s = socket.socket(fileno=3 + i)
         s.setblocking(False)
-        if s.family == socket.AF_UNIX:
+        name, unix = names[i] if i < len(names) else "", s.family == socket.AF_UNIX
+        if name == VAULT_SOCKET and unix:
+            vault = s
+        elif name != "ampi-phone.socket":
+            raise SystemExit(f"unknown socket {name}")
+        elif unix:
             control = s
         else:
             public.append(s)
     if control is None or not public:
         raise SystemExit("ampi-phone.socket must pass one public and one control socket")
-    return public, control
+    return public, control, vault
 
 
 async def serve(conf: Path = trust.CONF) -> None:
-    allowed = frozenset({0, *(int(u) for u in os.environ.get("AMPI_PHONE_CLIENT_UIDS", "").split(",") if u)})
-    public, control = systemd_sockets()
+    def uids(name: str) -> frozenset[int]:
+        return frozenset(int(u) for u in os.environ.get(name, "").split(",") if u)
+
+    allowed, signin = uids("AMPI_PHONE_CLIENT_UIDS") | {0}, uids("AMPI_PHONE_VAULT_UIDS")
+    public, control, vault = systemd_sockets()
     gw = Gateway(conf)
     log.info("%d paired phone(s)", len(gw.devices))
     server = await asyncio.start_unix_server(lambda r, w: gw.control_connection(r, w, allowed), sock=control,
                                              limit=MAX_CONTROL)
+    if vault is not None:
+        await asyncio.start_unix_server(lambda r, w: gw.vault_connection(r, w, signin), sock=vault, limit=MAX_CONTROL)
     async with server:
         await asyncio.gather(*(gw.accept(s) for s in public))
 

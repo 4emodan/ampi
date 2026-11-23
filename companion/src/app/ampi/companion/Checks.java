@@ -35,7 +35,7 @@ final class Checks {
                     open(a, notifications);
                 }
             }));
-        } else if (Notes.off(a, App.ALARMS) || Notes.off(a, App.AMPI) || Notes.off(a, App.CHANGES)) {
+        } else if (Notes.off(a, App.ALARMS) || Notes.off(a, App.AMPI) || Notes.off(a, App.CHANGES) || Notes.off(a, App.SIGNIN)) {
             out.add(new Problem("Some of Ampi's notifications are switched off.", "Open settings", () -> open(a, notifications)));
         }
         if (!batteryFree(a)) {

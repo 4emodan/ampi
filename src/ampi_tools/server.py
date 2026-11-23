@@ -52,6 +52,7 @@ from .maps import LATLNG_RE, Maps, latlng, zone
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
 from . import ops_phone
+from . import ops_signin
 from .vault import Vault, mask_cards, mask_coords, mask_text
 from .wolt import Wolt, WoltAuth
 from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact, register_secret
@@ -287,6 +288,7 @@ class Daemon:
         # Instagram/Threads web-session reads: only social-mode conversations; direct messages: never through here.
         check_social_origin(ops, origin, "run")
         ops_phone.check_phone(ops, origin)
+        ops_signin.check(ops, origin)
         parsed = parse_origin(origin)
         if parsed is not None:
             # A Claude run of a watcher's agent step (watchers v2): changes go through the keeper.
@@ -1221,6 +1223,7 @@ async def _serve(home: Path) -> None:
             web.auth.notify = store.notice  # one fixed-text notice when a session pauses
         services.checkout_side = CheckoutSide(CheckoutClient(), Vault(home), load_payment_rules(home / "config.toml"))
         services.phone_client = ops_phone.PhoneClient()
+        services.signin_client = ops_signin.SigninClient()
         approvals = Approvals(home / "approvals.sqlite3")
         for approval_id in approvals.recover():
             store.notice(f"⚠️ Request #{approval_id} was approved, but the tools service stopped while running it; "

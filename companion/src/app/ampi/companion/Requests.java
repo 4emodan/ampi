@@ -23,8 +23,13 @@ final class Requests {
             if (!id.matches("[0-9a-f]{16}")) throw new AlarmStore.Refused("bad_request");
             double exp = msg.optDouble("exp", 0);
             if (!(exp > now)) throw new AlarmStore.Refused("too_late");
+            String kind = msg.optString("kind");
+            // Nothing Ampi writes may appear while the owner looks at a sign-in request.
+            if (!kind.equals("status") && !kind.equals("alarm.list") && Unlock.current() != null) {
+                throw new AlarmStore.Refused("signin_open");
+            }
             JSONObject body = msg.optJSONObject("body");
-            JSONObject data = run(c, id, msg.optString("kind"), body == null ? new JSONObject() : body, now);
+            JSONObject data = run(c, id, kind, body == null ? new JSONObject() : body, now);
             return res.put("ok", true).put("data", data);
         } catch (AlarmStore.Refused e) {
             return res.put("ok", false).put("error", e.getMessage());

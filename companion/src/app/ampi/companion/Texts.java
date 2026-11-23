@@ -35,9 +35,9 @@ final class Texts {
         return t.codePointCount(0, t.length()) <= max ? t : t.substring(0, t.offsetByCodePoints(0, max));
     }
 
-    /** The same code as `ampi-phone code` on the server: 130 bits over both certificates (and, later, the signer's key). */
-    static String pairCode(byte[] server, byte[] phone, byte[] signer) {
-        String text = "ampi-pair-v1\n" + part(server) + "\n" + part(phone) + "\n" + part(signer) + "\n";
+    /** The same code as `ampi-phone code` on the server: 130 bits over the three certificates. */
+    static String pairCode(byte[] server, byte[] phone, byte[] signin) {
+        String text = "ampi-pair-v2\n" + part(server) + "\n" + part(phone) + "\n" + part(signin) + "\n";
         String code = base32(sha256(text.getBytes(StandardCharsets.UTF_8))).substring(0, 26);
         return code.substring(0, 5) + " " + code.substring(5, 10) + " " + code.substring(10, 15) + " "
                 + code.substring(15, 20) + " " + code.substring(20);

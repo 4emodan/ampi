@@ -27,6 +27,7 @@ info = "ampi_tools.client:info_main"
 checkout = "ampi_tools.client:checkout_main"
 payment = "ampi_tools.client:payment_main"
 phone = "ampi_tools.client:phone_main"
+signin = "ampi_tools.client:signin_main"
 ampi-tools = "ampi_tools.server:main"
 watchers = "assistant_bridge.watch.cli:main"
 

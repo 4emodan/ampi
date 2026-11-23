@@ -1,7 +1,8 @@
-"""The paired phones and the gateway's TLS settings (used by the gateway and by root's `ampi-phone` command).
+"""The paired phones and the TLS settings (used by the gateway, the sign-in service and root's `ampi-phone` command).
 
 /etc/ampi-phone (root:ampiphone, 0750): config.json {"host", "port"}, server.key, server.crt and devices/NAME.json
-{"name", "cert" (base64 DER), "added"}. Only root writes there.
+{"name", "cert" (base64 DER), "added", "code", "signin"}. /etc/ampi-signin (root:ampisignin, 0750) has the same without
+config.json: its own key, and the phones that were paired with it. Only root writes there.
 """
 
 from __future__ import annotations
@@ -86,10 +87,10 @@ def make_context(devices: list[Device], conf: Path = CONF) -> ssl.SSLContext:
     return c
 
 
-def pair_code(server: bytes, phone: bytes, signer: bytes = b"") -> str:
-    """The code both sides show: 130 bits over everything pairing fixes. `signer` is the slot for the sign-in
-    service's public key (not used yet)."""
-    text = "ampi-pair-v1\n" + "\n".join(hashlib.sha256(x).hexdigest() if x else "-" for x in (server, phone, signer)) + "\n"
+def pair_code(server: bytes, phone: bytes, signin: bytes = b"", version: int = 2) -> str:
+    """The code both sides show: 130 bits over everything pairing fixes, the sign-in service's certificate included.
+    (Version 1: phones paired before there was one.)"""
+    text = f"ampi-pair-v{version}\n" + "\n".join(hashlib.sha256(x).hexdigest() if x else "-" for x in (server, phone, signin)) + "\n"
     code = base64.b32encode(hashlib.sha256(text.encode()).digest()).decode()[:26]
     return " ".join([code[:5], code[5:10], code[10:15], code[15:20], code[20:26]])
 

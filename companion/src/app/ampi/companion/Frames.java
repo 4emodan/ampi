@@ -18,13 +18,17 @@ final class Frames {
 
     /** Null when the other side closed the connection between two frames. */
     static String read(InputStream in) throws IOException {
+        return read(in, MAX);
+    }
+
+    static String read(InputStream in, int max) throws IOException {
         int first = in.read();
         if (first < 0) return null;
         var d = new DataInputStream(in);
         byte[] buf;
         try {
             int n = (first << 24) | (d.readUnsignedByte() << 16) | (d.readUnsignedByte() << 8) | d.readUnsignedByte();
-            if (n <= 0 || n > MAX) throw new IOException("bad frame length " + n);
+            if (n <= 0 || n > max) throw new IOException("bad frame length " + n);
             buf = new byte[n];
             d.readFully(buf);
         } catch (EOFException e) {
@@ -39,9 +43,13 @@ final class Frames {
     }
 
     static void write(OutputStream out, String text) throws IOException {
+        out.write(bytes(text));
+        out.flush();
+    }
+
+    static byte[] bytes(String text) throws IOException {
         byte[] body = text.getBytes(StandardCharsets.UTF_8);
         if (body.length == 0 || body.length > MAX) throw new IOException("frame too big");
-        out.write(ByteBuffer.allocate(4 + body.length).putInt(body.length).put(body).array());
-        out.flush();
+        return ByteBuffer.allocate(4 + body.length).putInt(body.length).put(body).array();
     }
 }

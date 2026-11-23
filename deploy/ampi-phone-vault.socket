@@ -1,0 +1,15 @@
+[Unit]
+Description=Ampi phone gateway: the sign-in service's way to the phone (ampi-signin only)
+# Comes and goes with the gateway (Sockets= in ampi-phone.service starts it) and stops when the last phone is removed:
+# otherwise a connection here would start the gateway, and with it the public port. Never enabled or started by itself.
+PartOf=ampi-phone.socket
+
+[Socket]
+ListenStream=/run/ampi-phone-vault/vault.sock
+DirectoryMode=0755
+# Group ampiphone-vault has only ampisignin in it (not ampitools); the gateway also checks the caller's uid (SO_PEERCRED).
+SocketUser=root
+SocketGroup=ampiphone-vault
+SocketMode=0660
+Accept=no
+Service=ampi-phone.service

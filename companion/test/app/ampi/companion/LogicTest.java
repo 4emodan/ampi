@@ -106,6 +106,29 @@ final class LogicTest {
         eq("null", "", Texts.line(null, 2));
     }
 
+    static String hosts(String typed) {
+        try {
+            return String.join(" ", Hosts.parse(typed));
+        } catch (IllegalArgumentException e) {
+            return "no";
+        }
+    }
+
+    static void sites() {
+        eq("plain", "example.com", hosts(" Example.com "));
+        eq("link", "shop.example.com", hosts("https://www.shop.example.com:443/login?x=1#y"));
+        eq("several", "example.com login.example.com", hosts("example.com,\nlogin.example.com example.com"));
+        for (String bad : new String[] {"", " ", "example", "http://example.com", "ftp://example.com", "example.com:8443", "a@example.com",
+                "https://a:b@example.com", "1.2.3.4", "https://[::1]/", "example.com.", "ex\\ample.com", "-a.com", "a-.com", "a..com",
+                "ex ample", "xn--e1afmkfd", "пример.рф", "faß.de", "example.com\u0000", "accounts.google.com", "google.com",
+                "https://www.facebook.com/", "a.com b.com c.com d.com e.com f.com", "a".repeat(64) + ".com", "a.".repeat(130) + "com"}) {
+            eq("site " + bad, "no", hosts(bad));
+        }
+        eq("not google", "notgoogle.com", hosts("notgoogle.com"));
+        eq("punycode", "xn--e1afmkfd.xn--p1ai", hosts("xn--e1afmkfd.xn--p1ai"));
+        eq("newline at the end", false, Hosts.valid("example.com\n"));
+    }
+
     public static void main(String[] a) throws Exception {
         if (a.length > 0) {
             System.out.println(Texts.pairCode("server".getBytes(), "phone".getBytes(), null));
@@ -116,6 +139,7 @@ final class LogicTest {
         clockChanges();
         frames();
         texts();
+        sites();
         System.out.println(failed == 0 ? "ok" : failed + " failed");
         System.exit(failed == 0 ? 0 : 1);
     }

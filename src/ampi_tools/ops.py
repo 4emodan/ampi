@@ -57,6 +57,7 @@ class Services:
     igweb_client: Any = None  # meta_session.WebClient (the owner's Instagram web session)
     thweb_client: Any = None  # meta_session.WebClient (the owner's Threads web session)
     phone_client: Any = None  # ops_phone.PhoneClient
+    signin_client: Any = None  # ops_signin.SigninClient
 
     @property
     def todoist(self) -> Todoist:
@@ -1469,3 +1470,4 @@ from . import ops_maps  # noqa: E402,F401
 from . import ops_wolt  # noqa: E402,F401
 from . import ops_checkout  # noqa: E402,F401
 from . import ops_phone  # noqa: E402,F401
+from . import ops_signin  # noqa: E402,F401

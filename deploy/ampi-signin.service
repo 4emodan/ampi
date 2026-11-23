@@ -1,0 +1,62 @@
+[Unit]
+Description=Ampi sign-in: has the owner's phone unlock a saved login (docs/COMPANION.md)
+# Started by ampi-signin.socket; exits when idle.
+Requires=ampi-signin.socket
+After=ampi-signin.socket
+
+[Service]
+Type=simple
+User=ampisignin
+Group=ampisignin
+SupplementaryGroups=ampiphone-vault
+EnvironmentFile=/etc/ampi-signin/signin.env
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-signin/run.py
+Restart=on-failure
+RestartSec=5
+StandardError=journal
+
+MemoryMax=96M
+MemorySwapMax=0
+TasksMax=16
+CPUQuota=30%
+LimitNOFILE=64
+LimitCORE=0
+
+# Everything it needs comes through Unix sockets.
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+KeyringMode=private
+RemoveIPC=true
+UMask=0077
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallFilter=~@aio
+SystemCallErrorNumber=EPERM
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=true
+PrivateDevices=true
+PrivateIPC=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+# Of the local services only the gateway's vault socket is there to connect to.
+TemporaryFileSystem=/run:ro
+BindReadOnlyPaths=-/run/ampi-phone-vault
+InaccessiblePaths=-/opt -/srv -/var/www

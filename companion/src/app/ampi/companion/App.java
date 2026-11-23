@@ -10,7 +10,8 @@ import android.provider.Settings;
 
 /** Runs before the first unlock too (alarms), so it must not touch the normal (credential-encrypted) storage. */
 public final class App extends Application {
-    static final String AMPI = "ampi", CHANGES = "changes", ALARMS = "alarms", BACKUP = "alarms_backup", LINK = "link";
+    static final String AMPI = "ampi", CHANGES = "changes", ALARMS = "alarms", BACKUP = "alarms_backup", LINK = "link",
+            SIGNIN = "signin";
 
     @Override
     public void onCreate() {
@@ -31,6 +32,7 @@ public final class App extends Application {
         backup.setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, new AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_ALARM).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build());
         nm.createNotificationChannel(backup);
+        make(nm, SIGNIN, "Sign-in requests", NotificationManager.IMPORTANCE_HIGH, "Ampi wants to use one of your saved logins");
         make(nm, LINK, "Connection", NotificationManager.IMPORTANCE_LOW, "Shows that the app keeps its connection open");
     }
 
