@@ -79,7 +79,7 @@ def inbox_threads(data: Any, owner_id: str) -> list[dict]:
             continue  # a group the owner never wrote in: someone added them
         users = _users(t)
         seen = _last_seen(t, owner_id)
-        new, oldest = [], None
+        new, oldest, own = [], None, False
         for i in t.get("items") or []:
             if not isinstance(i, dict):
                 continue
@@ -87,6 +87,7 @@ def inbox_threads(data: Any, owner_id: str) -> list[dict]:
                 ts = int(i.get("timestamp") or 0)
             except (TypeError, ValueError):
                 continue
+            own = own or str(i.get("user_id")) == owner_id
             oldest = ts if oldest is None else min(oldest, ts)
             if ts > seen and str(i.get("user_id")) != owner_id:
                 new.append({"id": str(i.get("item_id", "")), "from": users.get(str(i.get("user_id")), "?"),
@@ -95,7 +96,8 @@ def inbox_threads(data: Any, owner_id: str) -> list[dict]:
             new.sort(key=lambda x: (x["ts"], x["id"]))
             out.append({"thread": str(t.get("thread_id", "")), "title": one_line(t.get("thread_title"), 80),
                         "group": bool(t.get("is_group")), "with": sorted(v for k, v in users.items() if k != owner_id),
-                        "items": new, "seen": seen, "oldest": oldest, "has_older": t.get("has_older") is True})
+                        "items": new, "seen": seen, "oldest": oldest, "has_older": t.get("has_older") is True,
+                        "own": own})
     out.sort(key=lambda x: x["items"][-1]["ts"], reverse=True)
     return out
 
@@ -121,7 +123,7 @@ def inbox_text(threads: list[dict]) -> str:
 def redact_threads(threads: list[dict], clean=lambda t: t) -> list[dict]:
     """The structured form a watcher step gets (its own script keeps a per-conversation cursor)."""
     return [{"thread": t["thread"], "title": clean(t["title"]), "group": t["group"], "with": t["with"],
-             "seen": t["seen"], "oldest": t["oldest"], "has_older": t["has_older"],
+             "seen": t["seen"], "oldest": t["oldest"], "has_older": t["has_older"], "own": t["own"],
              "items": [{"id": i["id"], "from": i["from"], "time": i["time"], "ts": i["ts"], "text": clean(i["text"])}
                        for i in t["items"]]} for t in threads]
 

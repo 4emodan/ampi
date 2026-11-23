@@ -130,7 +130,10 @@ class WatchEngine:
         except Exception as e:  # noqa: BLE001
             if self._social(name):
                 log.warning("[%s] watcher message failed: %s", self.profile.name, type(e).__name__)
-                raise StepError(f"couldn't send the message ({type(e).__name__})") from None
+                code = getattr(e, "error_code", 0)  # None: the network, after several tries
+                later = code is None or (isinstance(code, int) and (code == 429 or code >= 500)) \
+                    or isinstance(e, (OSError, TimeoutError))
+                raise StepError(f"couldn't send the message ({'temporary problem' if later else 'refused'})") from None
             log.warning("[%s] watcher message failed: %s", self.profile.name, e)
             raise StepError(f"couldn't send the message: {e}") from None
 

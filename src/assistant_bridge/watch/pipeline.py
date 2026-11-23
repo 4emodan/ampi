@@ -13,6 +13,7 @@ import logging
 import re
 import secrets
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -297,7 +298,8 @@ class Pipeline:
                     tools="", system_prompt=system, json_schema=json.dumps(json_schema_for(s["schema"])),
                     origin=f"{w.origin}#{s['id']}", semaphore=False,
                     # Direct messages: no transcript of this call on disk (it is never resumed).
-                    extra_args=("--no-session-persistence",) if w.spec.social else ())
+                    extra_args=("--no-session-persistence",) if w.spec.social else (),
+                    **({"setting_sources": ""} if w.spec.social else {}))
                 if not result.ok:
                     raise StepError(f"the AI call failed: {result.error}")
                 try:
@@ -402,13 +404,14 @@ class Pipeline:
         return outcome
 
 
-_DOT = re.compile(r"(?<=\w)[.。．｡](?=[^\W\d_])|(?<=\d)[.。．｡](?=\d{1,3}[.。．｡]\d)|(?<=[.。．｡]\d)[.。．｡](?=\d)"
-                  r"|(?<=[.。．｡]\d\d)[.。．｡](?=\d)|(?<=[.。．｡]\d\d\d)[.。．｡](?=\d)")
+# Any dot (or what looks or is treated like one) with something on both sides.
+_DOT = re.compile(r"(?<=\S)[.\u2024\u3002\uff0e\uff61\ufe52\u06d4\u0701\u0702\ua60e\u2e31\u2e33\u00b7\u30fb\uff65](?=\S)")
 
 
 def _unlink(s: str) -> str:
     """Strangers' messages (Instagram/Threads watchers): nothing Telegram would make clickable. Addresses of any kind
     and TLD (https://, tg:, t.me, 1.2.3.4), @names (they'd link to unrelated Telegram users) and /commands."""
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Cf")  # nothing invisible to hide a dot behind
     s = re.sub(r"\bhttp(s?)://", r"hxxp\1(:)//", s, flags=re.I)
     s = re.sub(r"\b([a-z][a-z0-9+-]{1,20})://", r"\1(:)//", s, flags=re.I)
     s = re.sub(r"\b(tg|mailto|tel|javascript|data|ftp|sms):(?=\S)", r"\1(:)", s, flags=re.I)

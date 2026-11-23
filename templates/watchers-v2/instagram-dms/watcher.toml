@@ -37,6 +37,13 @@ model = "haiku"
 prompt = "prompts/dms.md"
 input = "{{steps.fresh.text}}"
 schema = { summary = "text:3000" }
+when = { path = "steps.fresh.plain", false = true }
+
+[[steps]]
+id = "answered"
+type = "script"
+run = "scripts/answered"
+when = { path = "steps.fresh.plain", false = true }
 
 # Markdown, so text from the messages can't form links, code or addresses in the message to you.
 [[steps]]
@@ -44,8 +51,19 @@ id = "send"
 type = "notify"
 format = "markdown"
 template = "templates/dms.txt"
+when = { path = "steps.fresh.plain", false = true }
+
+# A batch that failed twice at the AI step (or kept failing to send) is only counted, without its text.
+[[steps]]
+id = "send_count"
+type = "notify"
+format = "markdown"
+template = "templates/count.txt"
+when = { path = "steps.fresh.plain", true = true }
 
 # Only now are these messages counted as reported: if anything above fails they are reported again, never lost.
+# (Going back to an older version of this watcher: it can't read this file, so its runs fail without losing anything;
+# approve this version again.)
 [[steps]]
 id = "commit"
 type = "script"
