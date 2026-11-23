@@ -1,0 +1,17 @@
+[Unit]
+Description=Ampi phone gateway: the public port (companion app) and the control socket (ampi-tools)
+
+[Socket]
+# Both are root's: the gateway gets them from here, has no network of its own, and nobody else can take the port.
+# Enabled by `ampi-phone add` (the first paired phone), disabled when the last phone is removed.
+ListenStream=0.0.0.0:28471
+Backlog=64
+# Group ampiphone-use has only ampitools in it; the gateway also checks the caller's uid (SO_PEERCRED).
+ListenStream=/run/ampi-phone.sock
+SocketUser=root
+SocketGroup=ampiphone-use
+SocketMode=0660
+Accept=no
+
+[Install]
+WantedBy=sockets.target

@@ -32,6 +32,10 @@ NOTES = {
     "checkout.submit": "Sends or books something on a website in your name; may not be undoable",
     "info.reveal": "Shows personal info to the AI",
     "info.save_place": "Changes your personal info",
+    "phone.notify": "Shows a notification on your phone",
+    "phone.alarm": "Sets an alarm on your phone; can be undone there",
+    "phone.timer": "Sets a timer on your phone; can be undone there",
+    "phone.cancel": "Cancels an alarm on your phone: it won't ring",
     "wolt.basket": "Fills a Wolt basket; nothing is ordered",
     "wolt.basket_replace": "Replaces your Wolt basket; nothing is ordered",
 }

@@ -467,6 +467,56 @@ def wolt_main(argv: list[str] | None = None) -> int:
     return _main("wolt", wolt_parser(), wolt_ops, argv)
 
 
+# --- the owner's phone (companion app) ------------------------------------------------------------
+
+
+def _timer_seconds(text: str) -> int:
+    m = re.fullmatch(r"(?:(\d{1,2})h)?(?:(\d{1,4})m(?:in)?)?(?:(\d{1,5})s)?", text.strip().lower().replace(" ", ""))
+    if not m or not any(m.groups()):
+        raise SystemExit("phone: the duration is like 10m, 1h30m or 45s")
+    h, mins, sec = (int(g or 0) for g in m.groups())
+    return h * 3600 + mins * 60 + sec
+
+
+def phone_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="phone", description="The owner's phone: notifications, alarms, timers.")
+    p.add_argument("-m", "--reason", help="why (shown to the owner if a request needs approval)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status", help="is the phone connected, and what is missing there")
+    s = sub.add_parser("notify", help="show a notification")
+    s.add_argument("title")
+    s.add_argument("text", nargs="?", default="")
+    s = sub.add_parser("alarm", help="set an alarm (the next such time unless --date or --days)")
+    s.add_argument("time", help="HH:MM in the phone's time zone")
+    s.add_argument("--date", help="YYYY-MM-DD")
+    s.add_argument("--days", help="repeat: mon,tue,wed,thu,fri,sat,sun")
+    s.add_argument("--label", default="")
+    s = sub.add_parser("timer", help="set a timer")
+    s.add_argument("duration", help="e.g. 10m, 1h30m, 45s")
+    s.add_argument("--label", default="")
+    sub.add_parser("alarms", help="alarms and timers set through Ampi, and what happened lately")
+    sub.add_parser("cancel", help="cancel one (asks the owner unless it was just set)").add_argument("id")
+    sub.add_parser("approvals", help="recent approval requests and their outcome")
+    return p
+
+
+def phone_ops(a: argparse.Namespace) -> list[dict]:
+    if a.cmd == "notify":
+        return _op("phone.notify", heading=a.title, note=a.text or None)
+    if a.cmd == "alarm":
+        days = [d.strip().lower()[:3] for d in a.days.split(",") if d.strip()] if a.days else None
+        return _op("phone.alarm", clock=a.time, date=a.date, weekdays=days, tag=a.label or None)
+    if a.cmd == "timer":
+        return _op("phone.timer", seconds=_timer_seconds(a.duration), tag=a.label or None)
+    if a.cmd == "cancel":
+        return _op("phone.cancel", alarm=a.id)
+    return _op(f"phone.{a.cmd}")
+
+
+def phone_main(argv: list[str] | None = None) -> int:
+    return _main("phone", phone_parser(), phone_ops, argv)
+
+
 # --- personal info, checkout, payment -----------------------------------------------------------
 
 WAIT_DEFAULT = 540  # seconds; the skill runs these with the Bash tool's 600000 ms timeout

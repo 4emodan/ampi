@@ -51,6 +51,7 @@ from .ops_social_session import SOCIAL_ORIGIN, check_origin as check_social_orig
 from .maps import LATLNG_RE, Maps, latlng, zone
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
+from . import ops_phone
 from .vault import Vault, mask_cards, mask_coords, mask_text
 from .wolt import Wolt, WoltAuth
 from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact, register_secret
@@ -285,6 +286,7 @@ class Daemon:
         `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
         # Instagram/Threads web-session reads: only social-mode conversations; direct messages: never through here.
         check_social_origin(ops, origin, "run")
+        ops_phone.check_phone(ops, origin)
         parsed = parse_origin(origin)
         if parsed is not None:
             # A Claude run of a watcher's agent step (watchers v2): changes go through the keeper.
@@ -327,6 +329,8 @@ class Daemon:
                 ask = needs_approval(self.services, o, origin)  # also refuses "never" chats
                 if ask or o["op"] in self.policy.require_approval:
                     critical = True
+            elif o["op"] in ops_phone.WRITES:
+                critical = critical or ops_phone.asks_owner(o, origin) or o["op"] in self.policy.require_approval
             elif origin == SOCIAL_ORIGIN and OPS[o["op"]].critical:
                 critical = True  # no relaxations for a run that reads strangers' text
             elif self.policy.critical(o["op"]) or await shares_with_others(self.services, o):
@@ -372,7 +376,9 @@ class Daemon:
                 raise ToolError("a button press is already waiting for the owner's answer")
             card = cards.make_card(ops, actions, who or ("Ampi, in your chat" if origin == "private" else
                                                          "an unidentified process"), OUTSIDE if who else None)
-            approval_id = self.approvals.add(ops, summary, reason, grants, meta={"origin": origin}, card=card)
+            # A phone action approved much later would do something else than meant (an alarm for tomorrow, a timer).
+            ttl = ops_phone.APPROVAL_TTL if any(o["op"] in ops_phone.WRITES for o in ops) else None
+            approval_id = self.approvals.add(ops, summary, reason, grants, meta={"origin": origin}, card=card, ttl=ttl)
             for o in telegram:
                 if o["op"] == "telegram.send":  # the duplicate guard also sees requests that are waiting
                     note_requested(self.services, o)
@@ -1207,6 +1213,7 @@ async def _serve(home: Path) -> None:
         for web in (services.igweb_client, services.thweb_client):
             web.auth.notify = store.notice  # one fixed-text notice when a session pauses
         services.checkout_side = CheckoutSide(CheckoutClient(), Vault(home), load_payment_rules(home / "config.toml"))
+        services.phone_client = ops_phone.PhoneClient()
         approvals = Approvals(home / "approvals.sqlite3")
         for approval_id in approvals.recover():
             store.notice(f"⚠️ Request #{approval_id} was approved, but the tools service stopped while running it; "

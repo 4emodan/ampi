@@ -131,7 +131,10 @@ SOCIAL_SESSION_READS = frozenset({"igweb.feed", "igweb.profile", "igweb.posts", 
 SOCIAL_SESSION_WRITES = frozenset(op for op in WRITE_OPS if op.startswith(("igweb.", "thweb.")))
 NOT_FOR_WATCHERS = frozenset({"telegram.revoke", "telegram.permissions", "info.revoke", "approvals.list",
                               "info.fields", "info.reveal", "info.collect", "info.save_place", "payment.log",
-                              "checkout.submit"}) \
+                              "checkout.submit",
+                              # the owner's phone: their own chat only (ops_phone.check_phone)
+                              "phone.status", "phone.notify", "phone.alarm", "phone.timer", "phone.alarms",
+                              "phone.cancel"}) \
     | SOCIAL_SESSION_READS | SOCIAL_SESSION_WRITES
 # Reads a watcher test run never makes for real: it gets stub data (ampi_tools.social_dm) instead.
 TEST_STUB_OPS = frozenset({"igweb.inbox", "igweb.dm"})
