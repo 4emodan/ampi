@@ -46,7 +46,8 @@ if ($Pair) {
     $cert = $null
     for ($i = 0; $i -lt 60 -and -not $cert; $i++) {
         Start-Sleep -Seconds 2
-        $r = (Invoke-Adb shell am broadcast -n "$pkg/.PairReceiver" -a "$pkg.CERT") -join " "
+        try { $r = (Invoke-Adb shell am broadcast -n "$pkg/.PairReceiver" -a "$pkg.CERT") -join " " }
+        catch { continue }  # the phone was busy: ask again
         if ($r -match 'result=1, data="([A-Za-z0-9+/=]+)"') { $cert = $Matches[1] }
         elseif ($r -match 'result=2') { throw "the phone is already paired: unpair it in the app first" }
     }
