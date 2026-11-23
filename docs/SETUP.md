@@ -367,14 +367,28 @@ now (Run in `/watcher` also during quiet hours; `instagram dms` from chat or soc
 from social mode at most once per 10 minutes); the summary only ever goes to you.
 Messages count as reported only after the
 message to you was sent: if a run fails they are reported again (you may see some twice), not lost. A big backlog comes
-in several messages; when Instagram didn't send everything, the message says so and you look in the app.
+in several messages; messages that failed twice at the AI step are only counted ("see the app") so they don't hold up
+newer ones; when Instagram didn't send everything, the message says so and you look in the app.
 
 **What is kept.** Social conversations aren't written to `chats/`, long results are cut instead of saved, and their
 approval requests and results are visible only to social conversations (and you in Telegram). Runs of the DM watcher keep
 step names, times and statuses, no texts; its saved data is times and message ids; its AI call leaves no transcript. What
 does exist: the messages in your Telegram, the approval requests in `/home/ampitools/approvals.sqlite3`, and Claude Code's
 own session file of a social conversation under the assistant's `~/.claude` (needed to continue it, and not
-deleted by `/new`; Ampi's file rules block it, but a command you approve with a tap could read it). If you forward such a message to Ampi in another conversation, she reads it there.
+deleted by `/new`; Ampi's file rules block it, but a command you approve with a tap could read it). Forwarding or quoting such a message in another conversation
+gives Ampi a note instead of its text. What can't be detected: text you copy and paste, forward as a copy ("hide
+sender's name") after changing it, or put in a screenshot; and messages your bot posts in groups (group runs never see
+social text themselves).
+
+**Reading your Telegram (section 7).** `tg-read` can't read your chat with Ampi's own bots: not in lists, history, search,
+watchers or forwards. ampi-tools tells tg-reader which bots those are (from the bridge, with `[tools] approvals = true`),
+and tg-reader remembers them. With ampi-tools installed, tg-reader reads nothing until it was told once, so update both
+(`install-tools.sh`, `install-tg-reader.sh`) and restart claude-assistant; saving a session is refused until this works.
+Files that earlier `tg-read` calls saved aren't touched: look through `~/profiles/*/telegram/` (and `chats/`,
+`instagram/`, `threads/`) yourself and delete what you don't want later conversations to read.
+
+A change (like, comment, follow) that got no clear answer is reported as "may have happened" and never repeated: look
+before asking again.
 To stop it: `/watcher instagram-dms` → Pause or Delete.
 
 ### First session: what to check

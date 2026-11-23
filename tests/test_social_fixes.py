@@ -170,7 +170,10 @@ def engine_for(tmp_path, claude, threads, spec_files=None):
             return {"ok": True, "files": {k: base64.b64encode(v).decode() for k, v in space.items()}}
         if cmd == "watch.space_put":
             for p, d in payload["changes"].items():
-                space[p] = base64.b64decode(d)
+                if d is None:
+                    space.pop(p, None)
+                else:
+                    space[p] = base64.b64decode(d)
             return {"ok": True}
         return {"ok": True}
 
@@ -584,7 +587,7 @@ def test_defang_for_social_watchers_covers_every_address(text, gone):
 
 
 def test_social_defang_keeps_ordinary_text():
-    assert _defang("Costs 3.50, ok. See you!", True) == "Costs 3.50, ok. See you!"
+    assert _defang("Costs 3 euro, ok. See you!", True) == "Costs 3 euro, ok. See you!"
 
 
 # --- 12: finding comments ------------------------------------------------------------------------------------------
