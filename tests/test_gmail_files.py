@@ -178,6 +178,18 @@ def test_saving(tmp_path, monkeypatch):
         assert p.parent == tmp_path / "inbox/mail/2026-11-24" and len(p.name.encode()) < 220 and p.name.startswith("070509_1")
 
 
+@pytest.mark.parametrize("name", ["inbox/mail/x/note.txt", "./inbox/mail/note.txt"])
+def test_other_runs_cannot_pass_them_on(tmp_path, monkeypatch, name):
+    monkeypatch.chdir(tmp_path)
+    f = tmp_path / name
+    f.parent.mkdir(parents=True)
+    f.write_text("secret")
+    assert cli.workspace_file(name) == "secret"  # the owner's own chat
+    monkeypatch.setenv("AMPI_ORIGIN", "group:family")
+    with pytest.raises(SystemExit, match="own chat"):
+        cli.workspace_file(name)
+
+
 def test_never_through_a_link(tmp_path, monkeypatch):
     out = tmp_path / "out"
     out.mkdir()
@@ -195,6 +207,7 @@ def test_never_through_a_link(tmp_path, monkeypatch):
 
 def test_one_at_a_time_until_it_was_taken(tmp_path):
     d, log = daemon(tmp_path), []
+    d.runs = type("R", (), {"origin_of": lambda self, pid: "private"})()
 
     async def handle(req, pid):
         log.append("start")
@@ -233,6 +246,31 @@ def test_one_at_a_time_until_it_was_taken(tmp_path):
     finally:
         srv.peer_pid = real
     assert log == ["start", "write", "taken"] * 3
+    # One that doesn't take its answer is cut off, and the next has its turn.
+    log.clear()
+    real_wait, srv.peer_pid = srv.asyncio.wait_for, lambda wr: 1
+    aborted = []
+
+    class Stuck(Wr):
+        async def drain(self):
+            await asyncio.sleep(30)
+
+        def abort(self):
+            aborted.append(1)
+
+    async def stuck_then_fine():
+        async def short(aw, t):
+            return await real_wait(aw, 0.1 if t == 60 else t)
+        srv.asyncio.wait_for = short
+        for w in (Stuck(), Wr()):
+            rd = asyncio.StreamReader()
+            rd.feed_data(json.dumps({"cmd": "run", "ops": [DL]}).encode() + b"\n")
+            await d.connection(rd, w)
+    try:
+        run(stuck_then_fine())
+    finally:
+        srv.asyncio.wait_for, srv.peer_pid = real_wait, real
+    assert aborted == [1] and log == ["start", "write", "start", "write", "taken"]
 
 
 def test_a_plan_cannot_download(tmp_path, monkeypatch):

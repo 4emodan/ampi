@@ -234,7 +234,19 @@ class ProfileBot:
         task.add_done_callback(done)
         return task
 
+    def _drop_waiting(self, key: Key) -> int:
+        """Forgets the messages that wait to be handled; how many of them were for Ampi."""
+        timer = self._flush_timers.pop(key, None)
+        if timer is not None:
+            timer.cancel()
+        return len(self._for_ampi(self._pending.pop(key, [])))
+
     async def shutdown(self) -> None:
+        for key in list(self._pending):
+            if self._drop_waiting(key):
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self._send_text(*key, "⏹ I'm being restarted: your last message wasn't handled; please "
+                                                           "send it again.", markdown=False), 5)
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -254,7 +266,7 @@ class ProfileBot:
                     "[%s] group %s was upgraded to a supergroup with chat_id=%s; update chat_id in config.toml",
                     self.profile.name, chat.get("id"), msg["migrate_to_chat_id"],
                 )
-                self.store.copy_settings(self.profile.name, f"protected:{chat.get('id')}:", f"protected:{msg['migrate_to_chat_id']}:")
+                self.store.move_settings(self.profile.name, f"protected:{chat.get('id')}:", f"protected:{msg['migrate_to_chat_id']}:")
                 return
             group = self.profile.group(chat.get("id"))
             if group is None:
@@ -284,7 +296,7 @@ class ProfileBot:
 
         if text.startswith("/") and "forward_origin" not in msg:
             command, _, args = text[1:].partition(" ")
-            if command.lower().split("\n", 1)[0].split("@", 1)[0] == "persona":  # the one command that takes several lines
+            if (text[1:].split(None, 1) or [""])[0].lower().split("@", 1)[0] == "persona":  # the one command that takes several lines
                 command, *rest = text[1:].split(None, 1)
                 args = rest[0] if rest else ""
             command, _, target = command.partition("@")
@@ -297,7 +309,7 @@ class ProfileBot:
 
         if group is not None:
             self._queue_message(key, group, msg, chat.get("title") or group.name)
-        elif self._protected(*key):
+        elif self._protected(*key) or key in self._pending:  # (the second: after what waits there)
             self._queue_message(key, None, msg, "")
         else:
             await self._process(key, [msg], None, "")
@@ -314,7 +326,8 @@ class ProfileBot:
             return False
         reply = msg.get("reply_to_message") or {}
         # (In a topic every message "replies" to the one that created the topic.)
-        root = reply.get("forum_topic_created") or reply.get("message_id") == msg.get("message_thread_id", 0) != 0
+        root = reply.get("forum_topic_created") or (
+            msg.get("is_topic_message") and reply.get("message_id") == msg.get("message_thread_id"))
         if self.bot_id is not None and (reply.get("from") or {}).get("id") == self.bot_id and not root:
             return True
         for field, entities in (("text", "entities"), ("caption", "caption_entities")):
@@ -342,7 +355,12 @@ class ProfileBot:
     def _queue_message(self, key: Key, group: Group | None, msg: dict, title: str) -> None:
         """Collect messages (of groups, and of protected chats); handle them together once none has arrived for a while."""
         protected = self._protected(*key)  # now: what is changed before they are handled doesn't count
-        self._pending.setdefault(key, []).append((msg, protected, protected and self._tagged(msg)))
+        tagged = protected and self._tagged(msg)
+        if protected and not tagged and "forward_origin" not in msg and not msg.get("media_group_id"):
+            return  # not for Ampi, and it makes nothing wait longer
+        if protected:
+            msg = {**msg, "_protected": True}
+        self._pending.setdefault(key, []).append((msg, protected, tagged))
         timer = self._flush_timers.pop(key, None)
         if timer is not None:
             timer.cancel()
@@ -435,7 +453,7 @@ class ProfileBot:
                         label = (f'group "{group.name}"' if group is not None
                                  else "private chat (social mode)" if social else "private chat")
                         token = stack.enter_context(self.permissions.run(
-                            label, outside_content=group is not None or social))
+                            label, outside_content=group is not None or social or outside))
                         mcp_args, extra_env = self.permissions.mcp_setup(token, sys.executable)
                         extra_args = (*extra_args, *mcp_args)
                         allowed = (*allowed, "mcp__ampi__install_system_packages")
@@ -687,9 +705,8 @@ class ProfileBot:
             parts.append(f"[Shared contact: {name}, {contact.get('phone_number')}]")
 
         notes = await self._save_attachments(msg)
-        thread = msg.get("message_thread_id", 0) if msg.get("is_topic_message") else 0
-        if not social and reply and self._protected((msg.get("chat") or {}).get("id") or 0, thread) \
-                and not self._withheld_forward(reply):
+        if not social and reply and msg.get("_protected") and not self._withheld_forward(reply) \
+                and (reply.get("from") or {}).get("id") not in self.own_bot_ids:  # (its own files are in the workspace already)
             notes += await self._save_attachments(reply)  # not fetched when it came: it wasn't for Ampi then
         if notes:
             parts.append("[Attachments saved in your working directory:]\n" + "\n".join(notes))
@@ -831,7 +848,7 @@ class ProfileBot:
         await self._send_text(chat_id, new_thread, f"New conversation: {title}", markdown=False)
 
     async def _cmd_reset(self, chat_id: int, thread_id: int, args: str) -> None:
-        if (chat_id, thread_id) in self._running:
+        if (chat_id, thread_id) in self._running or (chat_id > 0 and (chat_id, thread_id) in self._pending):
             await self._send_text(chat_id, thread_id, "A task is still running here. Use /cancel first.", False)
             return
         self.store.reset_session(self.profile.name, chat_id, thread_id)
@@ -848,10 +865,13 @@ class ProfileBot:
             if watchers:
                 await self._send_text(chat_id, thread_id, f"⏹ Stopped {len(watchers)} watcher run(s).", False)
                 return
-        if task is None:
+        waiting = self._drop_waiting((chat_id, thread_id))
+        if waiting:
+            await self._send_text(chat_id, thread_id, f"⏹ Dropped {waiting} message(s) that were waiting.", markdown=False)
+        elif task is None:
             await self._send_text(chat_id, thread_id, "Nothing is running here.", markdown=False)
-            return
-        task.cancel()
+        if task is not None:
+            task.cancel()
 
     async def _cmd_model(self, chat_id: int, thread_id: int, args: str) -> None:
         name = self.profile.name
@@ -943,7 +963,7 @@ class ProfileBot:
         if chat_id != self.profile.owner_chat_id:
             await self._send_text(chat_id, thread_id, "Social mode is only for your private chat with me.", False)
             return
-        if (chat_id, thread_id) in self._running:
+        if (chat_id, thread_id) in self._running or (chat_id, thread_id) in self._pending:
             await self._send_text(chat_id, thread_id, "A task is still running here. Use /cancel first.", False)
             return
         conv = self.store.get_or_create(self.profile.name, chat_id, thread_id)

@@ -24,6 +24,7 @@ from pathlib import Path
 from tg_reader.client import deliver
 
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
+MAIL_FILES = Path("inbox/mail")  # files from emails: the owner's private chat only
 
 
 def request(payload: dict, path: str | None = None, timeout: float = 300) -> dict:
@@ -55,6 +56,8 @@ def workspace_file(name: str, max_bytes: int = 200_000) -> str:
     no absolute paths, no `..`, no symlinks, no hidden files, so these commands can't be used to read secrets."""
     root = Path.cwd().resolve()
     p = Path(name)
+    if os.environ.get("AMPI_ORIGIN") and p.parts[:2] == MAIL_FILES.parts:
+        raise SystemExit("files from emails are only for the owner's own chat")
     if p.is_absolute() or ".." in p.parts or any(part.startswith(".") for part in p.parts):
         raise SystemExit(f"{name!r}: use a file in your working directory (relative path, no '..' or hidden files)")
     full = root / p
@@ -923,9 +926,6 @@ def todoist_main(argv: list[str] | None = None) -> int:
     return _main("todoist", todoist_parser(), todoist_ops, argv)
 
 
-MAIL_FILES = Path("inbox/mail")
-
-
 def save_mail_file(number: int, f: dict, now: datetime | None = None) -> Path:
     """Saves one downloaded file under inbox/mail/: always a new file, always in there, never one that is run or loaded
     (the name is the sender's)."""
@@ -950,8 +950,12 @@ def save_mail_file(number: int, f: dict, now: datetime | None = None) -> Path:
                          | getattr(os, "O_BINARY", 0), 0o640)
         except FileExistsError:
             continue
-        with os.fdopen(fd, "wb") as out:
-            out.write(data)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+        except OSError:  # no half files
+            target.unlink(missing_ok=True)
+            raise
         return target
     raise SystemExit(f"too many files called {name} already")
 

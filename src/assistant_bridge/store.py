@@ -266,9 +266,10 @@ class Store:
                                 (profile, len(prefix), prefix))
         return {r["key"]: r["value"] for r in rows}
 
-    def copy_settings(self, profile: str, prefix: str, to: str) -> None:
+    def move_settings(self, profile: str, prefix: str, to: str) -> None:
         for key, value in self.settings(profile, prefix).items():
             self.set_setting(profile, to + key[len(prefix):], value)
+            self.set_setting(profile, key, None)
 
     def get_offset(self, profile: str) -> int | None:
         row = self._db.execute("SELECT next_update_id FROM offsets WHERE profile=?", (profile,)).fetchone()

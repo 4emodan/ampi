@@ -204,7 +204,7 @@ def test_a_group_that_becomes_a_supergroup_stays_protected(gsetup):  # noqa: F81
     bot, _, runner, store = gsetup()
     feed(bot, gmsg("/protect chat"))
     feed(bot, gmsg(migrate_to_chat_id=-100777))
-    assert bot._protected(-100777, 5)
+    assert bot._protected(-100777, 5) and not bot._protected(GROUP, 5)
 
 
 def test_files_from_emails_stay_in_the_private_chat(gsetup):  # noqa: F811
@@ -233,3 +233,77 @@ def test_the_private_chat_is_not_the_group(gsetup):  # noqa: F811
     feed(bot, gmsg("/protect"))
     feed(bot, msg("hello"))
     assert len(runner.calls) == 1 and GROUP != CHAT
+
+
+def test_a_reply_in_a_group_without_topics_is_a_tag(gsetup):  # noqa: F811
+    bot, _, runner, _ = gsetup()
+    bot.bot_id = BOT_ID
+    feed(bot, gmsg("/protect"))
+    # There a reply carries the id of the message its thread began with, which is Ampi's own.
+    feed(bot, gmsg("thanks, and?", message_thread_id=50, reply_to_message={"message_id": 50, "from": {"id": BOT_ID}, "text": "Saved."}))
+    assert len(runner.calls) == 1
+
+
+def test_cancel_drops_what_waits(bot4, monkeypatch):
+    monkeypatch.setattr(bot_mod, "PROTECT_SECONDS", 0.3)
+    bot, api, runner, _ = bot4
+    send(bot, msg("/protect"))
+    send(bot, tag("@test_bot delete everything"), msg("/reset"), msg("/cancel"))
+    assert not runner.calls and "Dropped 1 message" in api.sent[-1]["text"] and "/cancel first" in api.sent[-2]["text"]
+    send(bot, msg("/cancel"))
+    assert "Nothing is running" in api.sent[-1]["text"]
+
+
+def test_other_words_make_nothing_wait(bot4, monkeypatch):
+    monkeypatch.setattr(bot_mod, "PROTECT_SECONDS", 0.3)
+    bot, api, runner, _ = bot4
+    send(bot, msg("/protect"))
+
+    async def go():
+        await bot.handle_message(tag("@test_bot hi"))
+        for _ in range(4):
+            await asyncio.sleep(0.1)
+            await bot.handle_message(msg("a note"))
+        assert runner.calls  # 0.3 s after the tag, not after the last note
+        assert all("a note" not in c["prompt"] for c in runner.calls)
+        await settle(bot)
+    asyncio.run(go())
+
+
+def test_messages_stay_in_order(bot4, monkeypatch):
+    monkeypatch.setattr(bot_mod, "PROTECT_SECONDS", 0.2)
+    bot, api, runner, _ = bot4
+    send(bot, msg("/protect"))
+    send(bot, tag("@test_bot first"), msg("/protect off"), msg("second"))
+    (call,) = runner.calls
+    assert call["prompt"].index("first") < call["prompt"].index("second")
+
+
+def test_a_file_ampi_sent_is_not_fetched_again(bot4):
+    bot, api, runner, _ = bot4
+    bot.own_bot_ids = {BOT_ID}
+    send(bot, msg("/protect"))
+    send(bot, tag("@test_bot and this?", reply_to_message={"message_id": 9, "from": {"id": BOT_ID},
+                                                          "document": {"file_id": "d", "file_name": "passport.pdf"}}))
+    assert "passport" not in runner.calls[-1]["prompt"] and not (bot.profile.workspace / "inbox").exists()
+
+
+def test_the_file_counts_as_when_the_message_came(bot4, monkeypatch):
+    monkeypatch.setattr(bot_mod, "PROTECT_SECONDS", 0.2)
+    bot, api, runner, _ = bot4
+    send(bot, msg("/protect"))
+    old = {"message_id": 5, "from": {"id": OWNER}, "document": {"file_id": "d", "file_name": "plan.pdf"}}
+    send(bot, tag("@test_bot read this", reply_to_message=old), msg("/protect off"))
+    assert "plan.pdf" in runner.calls[-1]["prompt"]
+
+
+def test_a_restart_says_what_was_not_handled(bot4, monkeypatch):
+    monkeypatch.setattr(bot_mod, "PROTECT_SECONDS", 5)
+    bot, api, runner, _ = bot4
+    send(bot, msg("/protect"))
+
+    async def go():
+        await bot.handle_message(tag("@test_bot hi"))
+        await bot.shutdown()
+    asyncio.run(go())
+    assert "restarted" in api.sent[-1]["text"] and not runner.calls

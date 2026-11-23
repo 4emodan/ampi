@@ -1101,10 +1101,11 @@ class Daemon:
             except (ValueError, asyncio.TimeoutError):
                 response = {"ok": False, "error": "bad request"}
             else:
-                if self._brings_file(request):
+                pid = peer_pid(wr)
+                if self._brings_file(request) and self.runs.origin_of(pid) == "private":  # (anyone else is refused at once)
                     # One at a time from fetching it until it has been taken: each needs several times its size in memory.
                     async with self._files:
-                        response = await self.handle(request, peer_pid(wr))
+                        response = await self.handle(request, pid)
                         wr.write(json.dumps(response).encode() + b"\n")
                         response = None
                         try:
@@ -1112,7 +1113,7 @@ class Daemon:
                         except asyncio.TimeoutError:
                             wr.transport.abort()
                     return
-                response = await self.handle(request, peer_pid(wr))
+                response = await self.handle(request, pid)
             wr.write(json.dumps(response).encode() + b"\n")
             await wr.drain()
         except Exception:

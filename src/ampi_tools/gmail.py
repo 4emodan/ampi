@@ -286,7 +286,6 @@ class Gmail:
             if not re.fullmatch(r"[A-Za-z0-9_-]*", data) or len(data) % 4 == 1:
                 raise ToolError("Gmail sent that file in a form I can't read")
             return data.translate(_STD_B64) + "=" * (-len(data) % 4)
-        # (10 MB take a moment: not on the event loop.)
         return {"name": f["name"], "mime": f["mime"], "size": len(data) * 3 // 4, "data": await asyncio.to_thread(standard)}
 
     async def thread(self, tid: str) -> str:
