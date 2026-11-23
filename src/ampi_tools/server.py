@@ -305,6 +305,8 @@ class Daemon:
                 raise ToolError("one checkout or personal-info action per request")
             if ops[0]["op"] == "checkout.pay" and self._pending_pay():
                 raise ToolError("a payment is already waiting for the owner's answer")
+            if ops[0]["op"] == "checkout.submit" and self._pending_pay("checkout.submit"):
+                raise ToolError("a button press is already waiting for the owner's answer")
         self._add_places(ops, origin)
         ops = await pre_resolve(self.services, ops)
         for o in ops:
@@ -357,7 +359,7 @@ class Daemon:
             if ops[0]["op"] == "checkout.fill":  # "✅ + always here": these fields on this exact site, 30 days
                 r = ops[0]["args"]["resolved"]
                 grants = [{"kind": "site", "origin": r["origin"], "fields": r["fields"]}]
-            if ops[0]["op"] in ("checkout.fill", "checkout.pay"):
+            if ops[0]["op"] in ("checkout.fill", "checkout.pay", "checkout.submit"):
                 # Keep the session open while the owner decides (the controller caps it at 30 minutes).
                 with contextlib.suppress(ToolError):
                     await self.services.checkout_side.client.call(
@@ -366,6 +368,8 @@ class Daemon:
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
             if ops[0]["op"] == "checkout.pay" and self._pending_pay():  # again: another may have arrived meanwhile
                 raise ToolError("a payment is already waiting for the owner's answer")
+            if ops[0]["op"] == "checkout.submit" and self._pending_pay("checkout.submit"):
+                raise ToolError("a button press is already waiting for the owner's answer")
             card = cards.make_card(ops, actions, who or ("Ampi, in your chat" if origin == "private" else
                                                          "an unidentified process"), OUTSIDE if who else None)
             approval_id = self.approvals.add(ops, summary, reason, grants, meta={"origin": origin}, card=card)
@@ -379,7 +383,9 @@ class Daemon:
                 "text": (
                     f"⏳ Not done yet: this needs the owner's approval (request #{approval_id}). They get "
                     "Approve/Reject buttons in Telegram and the result is reported to them there. Tell the "
-                    "owner briefly what you asked for; don't ask again or try another way.\n" + summary
+                    "owner briefly what you asked for; don't ask again or try another way.\n"
+                    # What is filled in on the page is for the owner's eyes (the page may have put things there).
+                    + (summary.split("\n", 1)[0] if ops[0]["op"] == "checkout.submit" else summary)
                 ),
             }
         if telegram:
@@ -1019,16 +1025,17 @@ class Daemon:
         now = side.clock() if side is not None else time.time()
         for row_id, ops in self.approvals.db.execute("SELECT id, ops FROM approvals WHERE status='pending'").fetchall():
             for o in json.loads(ops):
-                r = o.get("args", {}).get("resolved") if o.get("op") in ("checkout.fill", "checkout.pay") else None
+                r = o.get("args", {}).get("resolved") if o.get("op") in (
+                    "checkout.fill", "checkout.pay", "checkout.submit") else None
                 if isinstance(r, dict) and r.get("expires", now + 1) < now:
                     self.approvals.db.execute("UPDATE approvals SET status='expired' WHERE id=? AND status='pending'",
                                               (row_id,))
         self.approvals.db.commit()
 
-    def _pending_pay(self) -> bool:
+    def _pending_pay(self, op: str = "checkout.pay") -> bool:
         self._expire_checkout()
         rows = self.approvals.db.execute("SELECT ops FROM approvals WHERE status='pending'").fetchall()
-        return any(o["op"] == "checkout.pay" for (ops,) in rows for o in json.loads(ops))
+        return any(o["op"] == op for (ops,) in rows for o in json.loads(ops))
 
     def status_of(self, approval_id: int) -> dict:
         """For a CLI waiting on its own request: pending / approved / done / failed / rejected / expired, and the

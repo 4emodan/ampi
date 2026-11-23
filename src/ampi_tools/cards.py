@@ -29,6 +29,7 @@ NOTES = {
     "telegram.delete": "Deletes messages; can't be undone",
     "checkout.fill": "Gives personal details to a website",
     "checkout.pay": "Spends money; can't be undone here",
+    "checkout.submit": "Sends or books something on a website in your name; may not be undoable",
     "info.reveal": "Shows personal info to the AI",
     "info.save_place": "Changes your personal info",
     "wolt.basket": "Fills a Wolt basket; nothing is ordered",

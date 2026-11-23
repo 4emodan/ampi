@@ -51,6 +51,16 @@ def test_relay_sends_the_card_and_keeps_formatting_after_the_answer(setup):
     assert bot.api.entities == ents[:1]
 
 
+def test_form_contents_stay_out_of_the_chat_log(setup):
+    bot, _, _, _ = setup(api=StyledAPI())
+    tools = FakeTools()
+    relay = ApprovalRelay(bot, "sock", tools)
+    text = "Approval needed · #28\nWants: Press a button on a website\nEmail: private@value.example"
+    run(relay.handle_callback(callback(data="ap:28:abcdef0123456789:y", text=text)))
+    logs = "".join(p.read_text(encoding="utf-8") for p in bot.profile.workspace.rglob("*.md"))
+    assert "Request #28" in logs and "private@value.example" not in logs
+
+
 def test_relay_falls_back_to_plain_text(setup):
     api = StyledAPI()
     api.reject = True

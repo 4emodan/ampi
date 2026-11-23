@@ -37,6 +37,9 @@ class FakeCtl:
         self.risky: list[str] = []
         self.text = "Checkout. Deliver to Anna Virtanen, anna.virtanen@example.fi"
         self.fail_pay = None
+        self.form = [{"label": "Email", "kind": "input", "value": "anna.virtanen@example.fi", "shown": True},
+                     {"label": "10:00", "kind": "button", "value": True, "shown": True},
+                     {"label": "promo", "kind": "input", "value": "x", "shown": False}]
         self.elements = {
             "f0:4": {"ref": "f0:4", "frame": "f0", "frame_origin": SHOP, "tag": "input", "type": "email",
                      "autocomplete": "email", "name": "email", "id": "email", "label": "Email"},
@@ -71,6 +74,23 @@ class FakeCtl:
         if cmd == "bind":
             return {"ok": True, "origin": self.origin, "totals": self.totals, "risky_checked": self.risky,
                     "bindings": [self.elements[r] for r in req["refs"] if r in self.elements]}
+        if cmd == "gate":
+            e = self.elements[req["ref"]]
+            return {"ok": True, "kind": "link" if e["tag"] == "a" else "button", "frame_origin": e["frame_origin"], "tag": e["tag"],
+                    "filled": getattr(self, "filled", False), "texts": e.get("texts", [e["label"]] if e["label"] else []),
+                    "ident": e["id"], "submits": e.get("posts", False), "search": e.get("search", False), "dest": e.get("dest", "")}
+        if cmd == "bind_submit":
+            e = self.elements[req["ref"]]
+            return {"ok": True, "origin": self.origin, "url": self.origin + "/book", "button": e,
+                    "totals": self.totals, "risky_checked": self.risky, "captcha": getattr(self, "captcha", False),
+                    "title": "Booking", "form": self.form, "digest": "d1", "gen": 3, "around": "Fri 10:00 selected",
+                    "frames": getattr(self, "frames", [SHOP]),
+                    "press": {"tag": "button", "texts": [e["label"]], "dest": getattr(self, "dest", SHOP + "/b"), "method": "post",
+                              "submits": True}}
+        if cmd == "submit":
+            if self.fail_pay:
+                raise self.fail_pay
+            return {"ok": True, "session": self.session, "snapshot": {**self.snapshot(), "text": "Booking confirmed"}}
         if cmd == "pay":
             if self.fail_pay:
                 raise ToolError(self.fail_pay)
@@ -442,6 +462,117 @@ def test_plain_click_on_an_order_button_is_refused(tmp_path, label):
     out = run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))
     assert not out["ok"] and "places the order" in out["error"]
     assert not [c for c in ctl.calls if c["cmd"] == "click"]
+
+
+@pytest.mark.parametrize("label", ["Submit", "Request to Book", "Reserve", "Записаться", "Κράτηση", "Cancel my booking"])
+def test_plain_click_on_a_committing_button_is_refused(tmp_path, label):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"] = label
+    out = run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))
+    assert not out["ok"] and "checkout submit" in out["error"] and not [c for c in ctl.calls if c["cmd"] == "click"]
+
+
+@pytest.mark.parametrize("label,posts,ok", [("Search", True, True), ("Next", True, True), ("Add to cart", True, True),
+                                            ("18:30", False, True), ("OK", True, False), ("Go", False, True),
+                                            ("Place order and continue", False, False), ("Next", False, True),
+                                            ("Apply filters", True, True), ("Submit search", False, False)])
+def test_post_forms_count_as_committing(tmp_path, label, posts, ok):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"].update(label=label, posts=posts, id="b")
+    assert run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"] is ok
+
+
+def test_gate_looks_at_every_caption_and_ignores_ids(tmp_path):
+    d, _, ctl = make(tmp_path)
+    b = ctl.elements["f0:20"]
+    click = lambda: run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]  # noqa: E731
+    b.update(label="View slots", texts=["View slots", "Pay €80"])
+    assert not click()
+    b.update(texts=["Pay now"], id="next")
+    assert not click()
+    b.update(texts=["Submit"], id="search-submit")
+    assert not click()
+    b.update(texts=["26"], id="booking-day-26")       # a calendar cell
+    assert click()
+    b.update(texts=["Schedule"], tag="a", dest=SHOP + "/schedule")   # a plain link on the same site
+    assert click()
+    b.update(dest="https://other.example/x")
+    assert not click()
+    b.update(tag="button", texts=["OK"], id="x")
+    assert click()
+    ctl.filled = True                                   # the owner's details are in the page now
+    assert not click()
+    b.update(texts=[])
+    assert not click()
+
+
+SUBMIT = {"ref": "f0:20", "what": "Yoga class Fri 10:00"}
+
+
+def test_submit_asks_the_owner_and_presses_after_approval(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals = "Book Now", []
+    res = run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    assert res["approval"] and not [c for c in ctl.calls if c["cmd"] == "submit"]
+    (item,) = d.approvals.unnotified()
+    det = item["card"]["details"]
+    for x in ("“Book Now” on https://", "Yoga class Fri 10:00", "Email: [your me.email]", "10:00 (selected)",
+              "promo: x [not visible on the page]", "Fri 10:00 selected"):
+        assert x in det, x
+    assert item["card"]["level"] == "high" and "promo" not in res["text"] and "grant_label" not in item
+    assert "anna.virtanen" not in str(d.approvals.get(res["approval"]))  # not kept in the request either
+    with pytest.raises(ToolError, match="already waiting"):
+        run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    out = approve(d, res)
+    assert out["status"] == "done" and "Booking confirmed" in out["text"]
+    (call,) = [c for c in ctl.calls if c["cmd"] == "submit"]
+    assert call["digest"] == "d1" and call["url"].endswith("/book") and call["gen"] == 3
+
+
+def test_submit_says_when_it_goes_to_another_site(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals, ctl.dest = "Send", [], "https://forms.example/x"
+    run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    assert "another site: https://forms.example" in d.approvals.unnotified()[0]["card"]["details"]
+    d2, _, ctl2 = make(tmp_path / "b") if (tmp_path / "b").mkdir() is None else None
+    ctl2.elements["f0:20"]["label"], ctl2.totals, ctl2.dest = "Send", [], "http://forms.example/x"
+    with pytest.raises(ToolError, match="https"):
+        run(d2.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+
+
+@pytest.mark.parametrize("origin", ["group:x", "forwarded:private", "unknown"])
+def test_submit_is_for_the_owners_chat_only(tmp_path, origin):
+    d, _, _ = make(tmp_path)
+    with pytest.raises(ToolError):
+        run(d.run(req("checkout.submit", **SUBMIT), None, origin=origin))
+
+
+@pytest.mark.parametrize("change,err", [
+    ({"captcha": True}, "captcha"), ({"risky": ["Subscribe me"]}, "untick"), ({"frames": [SHOP, STRIPE]}, "payment form"),
+    ({"frames": [SHOP, "https://www.paypal.com"]}, "payment form"), ({"frames": ["https://shop.app"]}, "payment form"),
+    ({"totals": [{"amount": "5.00", "currency": "EUR", "label": "Total"}]}, "total to pay"),
+    ({"label": "Pay now"}, "pay or order"), ({"label": "Book for 25 €"}, "pay or order"), ({"label": "Оплатить"}, "pay or order")])
+def test_submit_refusals(tmp_path, change, err):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals = change.get("label", "Reserve"), []
+    for k, v in change.items():
+        setattr(ctl, k, v)
+    with pytest.raises(ToolError, match=err):
+        run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+
+
+def test_submit_is_not_for_watchers():
+    from ampi_tools import watch_spec as ws
+    assert "checkout.submit" in ws.NOT_FOR_WATCHERS
+
+
+def test_submit_unknown_outcome_is_said(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals = "Reserve", []
+    res = run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    ctl.fail_pay = ToolError("checkout: boom")
+    out = approve(d, res)
+    assert out["status"] == "failed" and "MAY have gone through" in out["text"]
 
 
 def test_plain_click_on_continue_is_fine(tmp_path):

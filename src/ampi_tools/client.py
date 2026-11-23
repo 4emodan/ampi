@@ -597,6 +597,9 @@ def checkout_parser() -> argparse.ArgumentParser:
     s.add_argument("--currency", required=True)
     s.add_argument("--what", required=True, help="what is bought, e.g. '2 × Pad thai, Thai Orchid'")
     s.add_argument("--card", help="which card entry (default: the owner's default card); `info fields` lists them")
+    s = sub.add_parser("submit", help="press a button that books, sends or requests something (asks the owner)")
+    s.add_argument("ref")
+    s.add_argument("--what", required=True, help="what it does, e.g. 'book yoga class, Fri 10:00, 1 person'")
     sub.add_parser("status", help="answer to a request").add_argument("approval", type=int)
     return p
 
@@ -612,6 +615,8 @@ def checkout_main(argv: list[str] | None = None) -> int:
         return _run_waiting("checkout", _op("checkout.pay", fills=_fill_pairs(a.pairs), button=a.button,
                                             amount=a.amount, currency=a.currency, what=a.what, card=a.card),
                             a.reason, a.wait)
+    if c == "submit":
+        return _run_waiting("checkout", _op("checkout.submit", ref=a.ref, what=a.what), a.reason, a.wait)
     args = {"open": {"url": getattr(a, "url", None)}, "click": {"ref": getattr(a, "ref", None)},
             "type": {"ref": getattr(a, "ref", None), "text": getattr(a, "text", None)},
             "choose": {"ref": getattr(a, "ref", None), "option": getattr(a, "option", None)}}.get(c, {})

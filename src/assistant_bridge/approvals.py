@@ -123,6 +123,7 @@ def buttons_for(item: dict) -> list[list[dict]]:
     return rows
 
 
+PRIVATE_REQUEST = "Press a button on a website"  # ops_checkout's label for checkout.submit
 PROTECT_EVERY = 300  # seconds; also right after (re)connecting
 
 
@@ -328,7 +329,10 @@ class ApprovalRelay:
         else:
             log_dir = chatlog.conversation_dir(self.bot.profile.workspace, self.bot.profile.owner_chat_id, 0, None,
                                                None)
-            chatlog.append(log_dir, "Approvals", text)
+            # What was filled in on a website is for the owner only; Ampi reads this log.
+            private = PRIVATE_REQUEST in original
+            chatlog.append(log_dir, "Approvals",
+                           f"Request #{approval_id} ({PRIVATE_REQUEST})\n\n{outcome}" if private else text)
         # Keep the request's formatting (its text is unchanged at the front, so the positions still fit).
         kept = [e for e in message.get("entities") or [] if isinstance(e, dict) and e.get("type") in ("bold", "blockquote")]
         extra = {"entities": kept} if kept and text.startswith(original) else {}
