@@ -74,6 +74,8 @@ The bot can act on every message you post or forward in a group, e.g. a "Clipboa
 
 Only your own messages are handled; anyone else in the group is ignored. Messages forwarded together are handled in one run (`batch_seconds`, default 5). If there's nothing worth saying, the bot stays silent.
 
+`/protect` in a chat or topic (private or group): Ampi answers there only when you tag it (`@your_bot`) or reply to one of its messages, and neither reads nor keeps anything else. `/protect chat` covers a chat with all its topics; `/protect off` / `/protect chat off` end it.
+
 ## 7. Reading all your Telegram chats (optional)
 
 A bot can't read history or chats it isn't in. The `tg-reader` service logs in to Telegram **as you** (with Telethon) and gives the assistant a read-only `tg-read` command plus a `telegram` skill, so you can ask "read the last 100 messages in Clipboard" or "what did Anna say about the flat".

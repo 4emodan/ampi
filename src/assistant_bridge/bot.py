@@ -48,6 +48,7 @@ COMMANDS = [
     {"command": "cancel", "description": "Stop the current task"},
     {"command": "model", "description": "Show or set the model for this conversation"},
     {"command": "persona", "description": "Tone and character of my replies"},
+    {"command": "protect", "description": "Answer here only when you tag me"},
     {"command": "status", "description": "Show this conversation's status"},
     {"command": "watchers", "description": "List watchers (automations)"},
     {"command": "info", "description": "Personal info (masked) and site permissions"},
@@ -63,6 +64,7 @@ HELP_TEXT = (
     "/cancel – stop the current task\n"
     "/model [name|default] – show or change the model here\n"
     "/persona – tone and character of my replies\n"
+    "/protect – in this chat or topic I answer only when you tag me (/protect chat: with all its topics; /protect off)\n"
     "/status – session info and usage\n"
     "/watchers – your watchers; /watcher NAME – details and buttons\n"
     "/info – your personal info (masked) and which sites may fill it\n"
@@ -176,6 +178,7 @@ class ProfileBot:
         self.runner = runner
         self.system_prompt = bridge_system_prompt(profile)
         prefix = profile.bot_token.split(":", 1)[0]
+        self.bot_id = int(prefix) if prefix.isdigit() else None
         self.own_bot_ids: set[int] = {int(prefix)} if prefix.isdigit() else set()  # main adds the other profiles' bots
         self._locks: dict[Key, asyncio.Lock] = {}
         self._running: dict[Key, asyncio.Task] = {}
@@ -289,7 +292,36 @@ class ProfileBot:
         if group is not None:
             self._queue_group_message(key, group, msg, chat.get("title") or group.name)
             return
+        if self._protected(*key) and not self._tagged(msg):
+            return
         await self._process(key, [msg], None, "")
+
+    # --- protected chats and topics (/protect): nothing there is for Ampi unless the owner tags it ---------------
+
+    def _protected(self, chat_id: int, thread_id: int) -> bool:
+        return any(self.store.get_setting(self.profile.name, f"protected:{chat_id}:{where}") for where in (thread_id, "*"))
+
+    def _tagged(self, msg: dict) -> bool:
+        """The owner's own message names this bot (@name) or answers one of its messages. Not a forwarded one: what
+        someone else wrote tags nobody."""
+        if "forward_origin" in msg:
+            return False
+        reply = msg.get("reply_to_message") or {}
+        # (In a topic every message "replies" to the one that created the topic.)
+        if self.bot_id is not None and (reply.get("from") or {}).get("id") == self.bot_id and not reply.get("forum_topic_created"):
+            return True
+        for field, entities in (("text", "entities"), ("caption", "caption_entities")):
+            raw = (msg.get(field) or "").encode("utf-16-le")  # offsets count UTF-16 units
+            for e in msg.get(entities) or []:
+                if e.get("type") == "text_mention" and self.bot_id is not None \
+                        and (e.get("user") or {}).get("id") == self.bot_id:
+                    return True
+                if e.get("type") == "mention" and self.username:
+                    at = 2 * int(e.get("offset") or 0)
+                    name = raw[at:at + 2 * int(e.get("length") or 0)].decode("utf-16-le", "replace")
+                    if name.lower() == f"@{self.username.lower()}":
+                        return True
+        return False
 
     def _queue_group_message(self, key: Key, group: Group, msg: dict, title: str) -> None:
         """Collect group messages; handle them together once none has arrived for batch_seconds."""
@@ -305,7 +337,8 @@ class ProfileBot:
         if self._flush_timers.get(key) is asyncio.current_task():
             del self._flush_timers[key]
         msgs = self._pending.pop(key, [])
-        if msgs:
+        # Forwarded posts and then "@ampi what about these?": a tag on one of them is for all that came together.
+        if msgs and (not self._protected(*key) or any(self._tagged(m) for m in msgs)):
             await self._process(key, msgs, group, title)
 
     async def _process(self, key: Key, msgs: list[dict], group: Group | None, title: str) -> None:
@@ -826,6 +859,29 @@ class ProfileBot:
         await self._send_text(chat_id, thread_id, f"From the next message on: {persona.label(text)}.\n“{text}”\n"
                               "/persona off – back to the default.", markdown=False)
 
+    async def _cmd_protect(self, chat_id: int, thread_id: int, args: str) -> None:
+        words = args.lower().split()
+        whole = "chat" in words
+        off = "off" in words
+        if set(words) - {"chat", "on", "off"} or {"on", "off"} <= set(words):
+            await self._send_text(chat_id, thread_id, "/protect – this chat or topic\n/protect chat – this chat with all its "
+                                  "topics\n/protect off, /protect chat off – end it", markdown=False)
+            return
+        where = "this whole chat" if whole else "this topic" if thread_id else "this chat"
+        self.store.set_setting(self.profile.name, f"protected:{chat_id}:{'*' if whole else thread_id}",
+                               None if off else "on")
+        if not off:
+            name = f"@{self.username}" if self.username else "me"
+            text = (f"Protected: in {where} I answer only when you tag {name} or reply to one of my messages. Everything else "
+                    "there I neither read nor keep. Commands still work. "
+                    f"/protect{' chat' if whole else ''} off ends it.")
+        elif self._protected(chat_id, thread_id):
+            text = "Still protected here: " + ("this topic itself is (/protect off)." if whole else
+                                               "the whole chat is (/protect chat off).")
+        else:
+            text = f"No longer protected: in {where} I answer everything you write again."
+        await self._send_text(chat_id, thread_id, text, markdown=False)
+
     async def _cmd_info(self, chat_id: int, thread_id: int, args: str) -> None:
         if self.info_ui is None or chat_id != self.profile.owner_chat_id:
             await self._send_text(chat_id, thread_id, "Personal info is shown only in the private chat.", markdown=False)
@@ -873,6 +929,7 @@ class ProfileBot:
             f"Session: {conv.session_id[:8]}… ({'active' if conv.started else 'not started'})",
             f"Model: {conv.model or self.profile.model or 'Claude Code default'}",
             f"Persona: {persona.label(self.store.get_setting(self.profile.name, persona.KEY))}",
+            f"Protected: {'yes, I answer only when tagged' if self._protected(chat_id, thread_id) else 'no'}",
             f"Social mode: {'on (Instagram/Threads, no web) until /new' if conv.social else 'off'}",
             f"Running now: {'yes' if (chat_id, thread_id) in self._running else 'no'}",
             f"Runs: {stats.runs} ({stats.failed} failed)",
