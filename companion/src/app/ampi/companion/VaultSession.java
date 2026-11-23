@@ -79,6 +79,7 @@ final class VaultSession implements Runnable {
 
     /** Unpaired: whatever is open ends. */
     static synchronized void closeCurrent() {
+        next = null;
         if (current != null) current.closeRaw();
     }
 
