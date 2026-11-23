@@ -104,10 +104,13 @@ def build_args(
     json_schema: str | None = None,
     watchers_edit: bool = False,
     extra_denied: Sequence[str] = (),
+    setting_sources: str | None = None,
 ) -> list[str]:
     args = [*command, "-p", "--output-format", "json", "--strict-mcp-config"]
     if tools is not None:  # the built-in tools that exist at all ("" = none: a pure text-in, text-out call)
         args += ["--tools", tools]
+    if setting_sources is not None:  # which of the user/project/local settings apply ("" = none)
+        args += ["--setting-sources", setting_sources]
     if system_prompt is not None:  # replaces Claude Code's own system prompt (watcher pipeline components)
         args += ["--system-prompt", system_prompt]
     if json_schema is not None:
@@ -231,6 +234,7 @@ class ClaudeRunner:
         semaphore: bool = True,
         watchers_edit: bool = False,
         extra_denied: Sequence[str] = (),
+        setting_sources: str | None = None,
     ) -> RunResult:
         """Send one message to the conversation's Claude session. `origin` (e.g. "watcher:gmail-inbox") marks
         runs that handle outside content rather than the owner's own messages.
@@ -257,6 +261,7 @@ class ClaudeRunner:
                     json_schema=json_schema,
                     watchers_edit=watchers_edit,
                     extra_denied=extra_denied,
+                    setting_sources=setting_sources,
                 )
                 result = await self._exec(args, prompt, cwd, origin, extra_env, tag)
                 if result.ok or attempt == 1 or not result.error:

@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS watch_state (
     state   TEXT NOT NULL,
     PRIMARY KEY (profile, name)
 );
+CREATE TABLE IF NOT EXISTS social_messages (
+    chat_id    INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, message_id)
+);
 CREATE TABLE IF NOT EXISTS offsets (
     profile TEXT PRIMARY KEY,
     next_update_id INTEGER NOT NULL
@@ -160,6 +165,16 @@ class Store:
             (now_iso(), profile, chat_id, thread_id),
         )
         self._db.commit()
+
+    def add_social_message(self, chat_id: int, message_id: int | None) -> None:
+        """A message Ampi sent that carries Instagram/Threads text: quoting it later must not bring the text along."""
+        if isinstance(message_id, int):
+            self._db.execute("INSERT OR IGNORE INTO social_messages VALUES (?, ?)", (chat_id, message_id))
+            self._db.commit()
+
+    def is_social_message(self, chat_id: int, message_id: int | None) -> bool:
+        return self._db.execute("SELECT 1 FROM social_messages WHERE chat_id=? AND message_id=?",
+                                (chat_id, message_id)).fetchone() is not None
 
     def record_run(
         self,

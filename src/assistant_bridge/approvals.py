@@ -164,6 +164,8 @@ class ApprovalRelay:
                                           "it was not carried out.")
                 continue  # 429 / network: try again on the next tick
             self._sent.add(approval_id)
+            if item.get("social"):
+                self.bot.store.add_social_message(self.bot.profile.owner_chat_id, sent.get("message_id"))
             if isinstance(item.get("confirm_keys"), list):
                 self._confirm_keys[approval_id] = {k for k in item["confirm_keys"] if isinstance(k, str)}
             notified = await self.ask(
@@ -258,12 +260,17 @@ class ApprovalRelay:
         outcome = fit(outcome, 1500)
         original = message.get("text") or ""
         text = fit(original, MAX_MESSAGE - utf16_len(outcome) - 4) + "\n\n" + outcome
-        log_dir = chatlog.conversation_dir(self.bot.profile.workspace, self.bot.profile.owner_chat_id, 0, None, None)
-        chatlog.append(log_dir, "Approvals", text)
+        # A request from social mode quotes strangers (captions, names, comments): not in the logs later runs read.
+        social = bool(resp.get("social")) or "Asked for by a social-mode conversation" in original \
+            or self.bot.store.is_social_message(chat["id"], message.get("message_id"))
+        if not social:
+            log_dir = chatlog.conversation_dir(self.bot.profile.workspace, self.bot.profile.owner_chat_id, 0, None,
+                                               None)
+            chatlog.append(log_dir, "Approvals", text)
         try:
             await self.bot.api.edit_message_text(chat["id"], message.get("message_id"), text)
         except TelegramError:
-            await self.bot._send_text(chat["id"], 0, outcome, markdown=False)
+            await self.bot._send_text(chat["id"], 0, outcome, markdown=False, **({"social": True} if social else {}))
 
 
 def callback_is_approval(cq: dict[str, Any]) -> bool:
