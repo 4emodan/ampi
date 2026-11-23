@@ -36,10 +36,10 @@ import httpx
 
 from .gmail import Gmail, GmailAuth, GoogleAuth
 from .ops import (
-    MAX_PENDING, MAX_SUMMARY, OPS, Approvals, Policy, Services, clean, clean_block, execute, pre_resolve, prepare,
-    shares_with_others, summarize, validate,
+    MAX_PENDING, MAX_SUMMARY, OPS, Approvals, Policy, Services, clean, clean_block, execute, id_list, pre_resolve,
+    prepare, shares_with_others, summarize, validate,
 )
-from . import watch_spec as ws
+from . import cards, watch_spec as ws
 from .keeper import (
     ACTIVATE_TTL, ALL_WATCHERS_PENDING_CAP, DEFAULT_ACTION_TTL, MAX_ACTION_TTL, ORIGIN_RE, WATCHER_PENDING_CAP, Keeper,
     actual_route, b64decode_files, b64encode_files, parse_origin, resolve_routes, route_fits,
@@ -79,6 +79,11 @@ ACTION_CHOICES = [{"key": "approve", "label": "✅ Approve"},
                   {"key": "reject", "label": "❌ Reject"}]
 # For an action with no destination to pin (nothing a lifetime grant could be limited to): approve once only.
 ONCE_CHOICES = [ACTION_CHOICES[0], ACTION_CHOICES[2]]
+# Changes a watcher's AI step may make without declaring or asking (the owner's decision, 2026-11-23), if the watcher
+# was turned on with "allow all". Reversible, reaches nobody else, can't trash or mark as spam (BLOCKED_LABELS).
+AGENT_ROUTINE = frozenset({"gmail.label"})
+AGENT_ROUTINE_MAX = 25  # emails per request; more asks
+OUTSIDE = "Not asked by you in chat: outside content (emails, messages, pages) may be behind it"
 PROPOSALS_PENDING_CAP = 5
 RISK_ICON = ws.RISK_ICON
 log = logging.getLogger("ampi-tools")
@@ -320,7 +325,7 @@ class Daemon:
                                     "their answer")
             ops = await prepare(self.services, ops)
             summary = await summarize(self.services, ops, self.policy)
-            who = None
+            actions, who = summary, None
             if origin.startswith(("group:", "watcher:", "forwarded:")):
                 who = ("a social-mode conversation (Instagram/Threads content)" if origin == SOCIAL_ORIGIN
                        else "a forwarded message in your chat" if origin.startswith("forwarded:") else origin)
@@ -346,7 +351,9 @@ class Daemon:
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
             if ops[0]["op"] == "checkout.pay" and self._pending_pay():  # again: another may have arrived meanwhile
                 raise ToolError("a payment is already waiting for the owner's answer")
-            approval_id = self.approvals.add(ops, summary, reason, grants)
+            card = cards.make_card(ops, actions, who or ("Ampi, in your chat" if origin == "private" else
+                                                         "an unidentified process"), OUTSIDE if who else None)
+            approval_id = self.approvals.add(ops, summary, reason, grants, card=card)
             for o in telegram:
                 if o["op"] == "telegram.send":  # the duplicate guard also sees requests that are waiting
                     note_requested(self.services, o)
@@ -922,6 +929,10 @@ class Daemon:
         granted = (bool(fits) or agent) and k.granted(profile, name, h, step, op, route) and not force_ask
         if granted and await shares_with_others(self.services, o):
             granted = False  # a shared Todoist project or a public playlist: other people see it, so ask (as in chat)
+        # `fits` / declared actions keep their own rules; "ask each time" watchers still ask.
+        routine = (agent and not granted and not declared and op in AGENT_ROUTINE and w["mode"] == "all"
+                   and op not in self.policy.require_approval and len(id_list(o["args"])) <= AGENT_ROUTINE_MAX)
+        granted = granted or routine
         summary = await summarize(self.services, ops, self.policy)
         if granted:
             audit_id = k.audit_add(profile, name, h, run_id, step, op, summary, idem_key, "auto", amount)
@@ -943,7 +954,7 @@ class Daemon:
                 st = await self.services.checkout_side.client.call({"cmd": "status"})
                 if st.get("session"):
                     k.checkout_sessions[st["session"]] = (profile, name, site)
-            if ok and w["risk"] == "high" and self.tg_store:
+            if ok and w["risk"] == "high" and self.tg_store and not routine:
                 self.tg_store.notice(f"🔴 Watcher “{name}” did: {summary.splitlines()[-1][:300]}")
             out = {"ok": ok, "text": text, "audit_id": audit_id, **extra} if ok else \
                 {"ok": False, "error": text, "audit_id": audit_id}
@@ -959,6 +970,10 @@ class Daemon:
             check_approval_size(o)
         risk = w["risk"] or "?"
         note = "" if fits else "\n(Not in the watcher's approved list: an AI step decided this.)"
+        card = cards.make_card(
+            ops, summary, f"watcher {name}, {'AI step' if agent else 'step'} {step}",
+            "An AI step chose this after reading outside content, which could have misled it" if agent else OUTSIDE,
+            ["" if fits else "Not on the list of actions you approved for this watcher"])
         summary = (f"⚠ Asked for by watcher “{name}” ({RISK_ICON.get(risk, '')} {risk} risk, step {step}) while "
                    f"handling outside content, not by you in chat.{note}\n{summary}")
         if op in ("checkout.fill", "checkout.pay"):
@@ -972,7 +987,7 @@ class Daemon:
         approval_id = self.approvals.add(
             ops, summary, reason, kind="watch.action", choices=choices, ttl=ttl, idem_key=idem_key,
             confirm_keys=["watcher"] if pinnable and info is not None and info.level == "high" else None,
-            meta={"watcher": who, "profile": profile, "name": name, "hash": h, "step": step, "op": op, "route": route})
+            meta={"watcher": who, "profile": profile, "name": name, "hash": h, "step": step, "op": op, "route": route}, card=card)
         if op == "telegram.send":
             note_requested(self.services, o)
         audit_id = k.audit_add(profile, name, h, run_id, step, op, summary, idem_key, "requested", amount)

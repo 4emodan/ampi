@@ -103,23 +103,27 @@ class TelegramAPI:
             },
         )
 
-    async def send_buttons(self, chat_id: int, text: str, buttons: list[list[dict]]) -> dict:
-        """Plain-text message with an inline keyboard (rows of {"text", "callback_data"})."""
+    async def send_buttons(self, chat_id: int, text: str, buttons: list[list[dict]],
+                           parse_mode: str | None = None) -> dict:
+        """Message (plain text by default) with an inline keyboard (rows of {"text", "callback_data"})."""
         return await self.call(
             "sendMessage",
             {
                 "chat_id": chat_id,
                 "text": text,
+                **({"parse_mode": parse_mode} if parse_mode else {}),
                 "reply_markup": {"inline_keyboard": buttons},
                 "link_preview_options": {"is_disabled": True},
             },
         )
 
-    async def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
+    async def edit_message_text(self, chat_id: int, message_id: int, text: str,
+                                entities: list[dict] | None = None) -> None:
         """Replaces a message's text and removes its buttons."""
         await self.call(
             "editMessageText",
             {"chat_id": chat_id, "message_id": message_id, "text": text,
+             **({"entities": entities} if entities else {}),
              "link_preview_options": {"is_disabled": True}},
         )
 

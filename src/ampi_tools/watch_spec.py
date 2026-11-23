@@ -927,6 +927,9 @@ def describe(spec: Spec, entries: list[dict]) -> str:
                     + (f", card {_c(lim['card'], 30)}" if lim.get("card") else "")
                     + (f", for {_c(lim['item'], 60)}" if lim.get("item") else "") + ")") if lim else ""
             lines.append(f"  · {g['op']}" + (f" → {_route_text(g['route'])}" if g["route"] else "") + caps)
+    elif any(e["kind"] == "llm" and e["mode"] == "agent" and any(AGENT_CHANGING_TOOLS.fullmatch(t) for t in e["tools"])
+             for e in entries):
+        lines.append("Its AI step can act: it asks you each time, except changing email labels with \"allow all\".")
     else:
         lines.append("It changes nothing: it only reads and messages you.")
     if spec.uses:

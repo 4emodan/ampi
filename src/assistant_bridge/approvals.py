@@ -10,6 +10,7 @@ approval message whose text was edited afterwards.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 import time
@@ -67,6 +68,45 @@ def request_text(item: dict) -> str:
     if item.get("grant_label"):
         text += f"\n\n“✅ + always here” also allows: {item['grant_label']}."
     return text
+
+
+RISK_ICON = {"low": "🟢", "medium": "🟡", "high": "🔴"}
+
+
+def card_of(item: dict) -> dict | None:
+    c = item.get("card")
+    if not isinstance(c, dict) or not all(isinstance(c.get(k), str) for k in ("who", "what", "details", "level")):
+        return None
+    if c["level"] not in RISK_ICON or not isinstance(c.get("risks"), list):
+        return None
+    return c
+
+
+def card_text(item: dict, c: dict, styled: bool = True) -> str:
+    """Who, what, risk: our own labels in bold; the action's details (may hold outside text) in a quote block, the
+    reason last. With styled=False the same as plain text. Nothing is cut."""
+    esc = (lambda s: html.escape(str(s), quote=False)) if styled else str
+    b = (lambda s: f"<b>{s}</b>") if styled else (lambda s: s)
+    quote = (lambda s: f"<blockquote>{esc(s)}</blockquote>") if styled else \
+        (lambda s: "\n".join("│ " + line for line in s.split("\n")))
+    lines = [f"🔐 {b('Approval needed')} · #{item['id']}", "",
+             f"{b('Who:')} {esc(c['who'])}",
+             f"{b('Wants:')} {esc(c['what'])}",
+             quote(c["details"]),
+             f"{b('Risk:')} {RISK_ICON[c['level']]} {c['level']}",
+             *(f"• {esc(r)}" for r in c["risks"])]
+    if item.get("reason"):
+        lines += ["", f"{b('Reason given by the AI:')} {esc(item['reason'])}"]
+    if item.get("grant_label"):
+        lines += ["", f"{b('“✅ + always here” also allows:')} {esc(item['grant_label'])}"]
+    return "\n".join(lines)
+
+
+_TAG = re.compile(r"</?(?:b|blockquote)>")
+
+
+def shown_len(styled: str) -> int:
+    return utf16_len(html.unescape(_TAG.sub("", styled)))
 
 
 def buttons_for(item: dict) -> list[list[dict]]:
@@ -154,7 +194,7 @@ class ApprovalRelay:
             text = request_text(item)
             buttons = buttons_for(item)
             try:
-                sent = await self.bot.api.send_buttons(self.bot.profile.owner_chat_id, text, buttons)
+                sent = await self._send_request(item, text, buttons)
             except TelegramError as e:
                 log.warning("could not send approval request #%s: %s", approval_id, e)
                 if e.error_code is not None and 400 <= e.error_code < 500 and e.error_code != 429:
@@ -171,6 +211,20 @@ class ApprovalRelay:
             )
             if not notified.get("ok"):
                 log.warning("ampi-tools didn't record request #%s as shown: %s", approval_id, notified.get("error"))
+
+    async def _send_request(self, item: dict, text: str, buttons: list[list[dict]]) -> dict:
+        owner = self.bot.profile.owner_chat_id
+        card = card_of(item)
+        if card is not None:
+            styled = card_text(item, card)
+            if shown_len(styled) <= MAX_MESSAGE:
+                try:
+                    return await self.bot.api.send_buttons(owner, styled, buttons, parse_mode="HTML")
+                except TelegramError as e:
+                    if e.error_code != 400:
+                        raise
+                    log.info("formatted request #%s rejected (%s), sending plain text", item["id"], e.description)
+        return await self.bot.api.send_buttons(owner, text, buttons)
 
     async def answer_quietly(self, cq: dict, text: str | None = None) -> None:
         try:
@@ -260,8 +314,11 @@ class ApprovalRelay:
         text = fit(original, MAX_MESSAGE - utf16_len(outcome) - 4) + "\n\n" + outcome
         log_dir = chatlog.conversation_dir(self.bot.profile.workspace, self.bot.profile.owner_chat_id, 0, None, None)
         chatlog.append(log_dir, "Approvals", text)
+        # Keep the request's formatting (its text is unchanged at the front, so the positions still fit).
+        kept = [e for e in message.get("entities") or [] if isinstance(e, dict) and e.get("type") in ("bold", "blockquote")]
+        extra = {"entities": kept} if kept and text.startswith(original) else {}
         try:
-            await self.bot.api.edit_message_text(chat["id"], message.get("message_id"), text)
+            await self.bot.api.edit_message_text(chat["id"], message.get("message_id"), text, **extra)
         except TelegramError:
             await self.bot._send_text(chat["id"], 0, outcome, markdown=False)
 

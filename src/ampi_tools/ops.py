@@ -538,6 +538,27 @@ def _gm_labels_op(add: list[str], remove: list[str], done: str) -> Callable[[Ser
     return run
 
 
+def _describe_gm(add: list[str] | None, remove: list[str] | None):
+    """Which emails (subject and sender) and what changes; None: the request's own add/remove."""
+    async def describe(s: Services, a: dict) -> str:
+        ids = id_list(a)
+        plus = list(a.get("add") or []) if add is None else add
+        minus = list(a.get("remove") or []) if remove is None else remove
+        change = "; ".join(x for x in ("add " + ", ".join(clean(n) for n in plus) if plus else "",
+                                       "remove " + ", ".join(clean(n) for n in minus) if minus else "") if x)
+        head = f"{len(ids)} email{'s' if len(ids) != 1 else ''}: {change or 'restore from the trash'}"
+        try:
+            rows = []
+            for m in await s.gmail.metadata(ids):
+                h = headers(m)
+                rows.append(f"“{clean(h.get('subject') or '(no subject)', 120)}” from {clean(h.get('from') or '?', 80)}")
+        except Exception:  # noqa: BLE001 (the request can still be shown: by id)
+            rows = [clean(i) for i in ids]
+        return "\n".join([head, *(f"  - {r}" for r in rows)])
+
+    return describe
+
+
 async def gm_untrash(s: Services, a: dict) -> Result:
     ids = id_list(a)
     await s.gmail.untrash(ids)
@@ -1166,13 +1187,13 @@ OPS: dict[str, Op] = {op.name: op for op in [
     Op("gmail.ids", False, gm_ids),
     Op("gmail.show", False, gm_show),
     Op("gmail.meta", False, gm_meta),
-    Op("gmail.label", False, gm_label),
-    Op("gmail.archive", False, _gm_labels_op([], ["INBOX"], "Archived")),
-    Op("gmail.mark_read", False, _gm_labels_op([], ["UNREAD"], "Marked as read:")),
-    Op("gmail.mark_unread", False, _gm_labels_op(["UNREAD"], [], "Marked as unread:")),
-    Op("gmail.star", False, _gm_labels_op(["STARRED"], [], "Starred")),
-    Op("gmail.unstar", False, _gm_labels_op([], ["STARRED"], "Unstarred")),
-    Op("gmail.untrash", False, gm_untrash),
+    Op("gmail.label", False, gm_label, _describe_gm(None, None)),
+    Op("gmail.archive", False, _gm_labels_op([], ["INBOX"], "Archived"), _describe_gm([], ["INBOX"])),
+    Op("gmail.mark_read", False, _gm_labels_op([], ["UNREAD"], "Marked as read:"), _describe_gm([], ["UNREAD"])),
+    Op("gmail.mark_unread", False, _gm_labels_op(["UNREAD"], [], "Marked as unread:"), _describe_gm(["UNREAD"], [])),
+    Op("gmail.star", False, _gm_labels_op(["STARRED"], [], "Starred"), _describe_gm(["STARRED"], [])),
+    Op("gmail.unstar", False, _gm_labels_op([], ["STARRED"], "Unstarred"), _describe_gm([], ["STARRED"])),
+    Op("gmail.untrash", False, gm_untrash, _describe_gm([], [])),
     Op("gmail.draft", False, gm_draft),
     Op("gmail.send", True, gm_send, describe_send, "SEND email"),
     Op("gmail.send_draft", True, gm_send_draft, describe_send_draft, "SEND draft"),
@@ -1246,7 +1267,7 @@ class Approvals:
         for column, kind in (("nonce", "TEXT"), ("message_id", "INTEGER"), ("grants", "TEXT"),
                              # watchers v2: what kind of request, its buttons, its own expiry, a dedupe key, extra data
                              ("kind", "TEXT"), ("choices", "TEXT"), ("confirm_keys", "TEXT"), ("expires", "REAL"),
-                             ("idem_key", "TEXT"), ("meta", "TEXT")):
+                             ("idem_key", "TEXT"), ("meta", "TEXT"), ("card", "TEXT")):
             if column not in have:  # databases created by older versions
                 self.db.execute(f"ALTER TABLE approvals ADD COLUMN {column} {kind}")
         # Requests from before nonces existed can never be answered safely.
@@ -1255,15 +1276,16 @@ class Approvals:
 
     def add(self, ops: list[dict], summary: str, reason: str | None, grants: list[dict] | None = None, *,
             kind: str | None = None, choices: list[dict] | None = None, confirm_keys: list[str] | None = None,
-            ttl: float | None = None, idem_key: str | None = None, meta: dict | None = None) -> int:
+            ttl: float | None = None, idem_key: str | None = None, meta: dict | None = None,
+            card: dict | None = None) -> int:
         now = time.time()
         cur = self.db.execute(
             "INSERT INTO approvals (created, ops, summary, reason, nonce, grants, kind, choices, confirm_keys, expires, "
-            "idem_key, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "idem_key, meta, card) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (now, json.dumps(ops), summary, reason, secrets.token_hex(8),
              json.dumps(grants) if grants else None, kind, json.dumps(choices) if choices else None,
              json.dumps(confirm_keys) if confirm_keys else None, now + ttl if ttl else None, idem_key,
-             json.dumps(meta) if meta else None),
+             json.dumps(meta) if meta else None, json.dumps(card) if card else None),
         )
         self.db.commit()
         return int(cur.lastrowid)
@@ -1302,13 +1324,13 @@ class Approvals:
     def unnotified(self) -> list[dict]:
         self.expire()
         rows = self.db.execute(
-            "SELECT id, summary, reason, nonce, created, grants, kind, choices, confirm_keys FROM approvals "
+            "SELECT id, summary, reason, nonce, created, grants, kind, choices, confirm_keys, card FROM approvals "
             "WHERE status='pending' AND notified=0 ORDER BY id"
         )
         out = []
         for r in rows:
             item = dict(r)
-            for key in ("choices", "confirm_keys"):  # the buttons of watcher requests (default: Approve / Reject)
+            for key in ("choices", "confirm_keys", "card"):  # watcher buttons (default: Approve / Reject); structured text
                 value = json.loads(item.pop(key) or "null")
                 if value:
                     item[key] = value
@@ -1422,7 +1444,9 @@ async def summarize(services: Services, ops: list[dict], policy: Policy) -> str:
         if op.describe:
             line = await op.describe(services, o["args"])
         else:  # shown in full; if that is too long, the size check below refuses the request
-            line = f"{o['op']} " + clean(json.dumps(o["args"], ensure_ascii=False))
+            line = "\n".join([o["op"], *(
+                f"  {clean(k)}: " + clean(v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+                for k, v in o["args"].items())])
         lines.append("• " + line)
     summary = "\n".join(lines)
     size = len(summary.encode("utf-16-le")) // 2  # how Telegram counts message length
