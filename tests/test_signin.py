@@ -230,7 +230,8 @@ def closed(server):
 
 def ask(confs, server, host="example.com", wait=True):
     with caller() as (mine, _theirs):
-        code = signin.ask(host, mine, confs[1], server.vault)
+        code, login = signin.ask(host, mine, confs[1], server.vault)
+    assert login is None  # a test never brings one
     assert not wait or closed(server)
     return code
 
@@ -280,9 +281,9 @@ def test_no_phone(confs, certs):
         assert ask(confs, s) == "offline"
         Phone(certs, s, vault=False)
         assert ask(confs, s) == "no_vault"
-    assert signin.ask("example.com", None, confs[1], lambda: (_ for _ in ()).throw(FileNotFoundError())) == "offline"
+    assert signin.ask("example.com", None, confs[1], lambda: (_ for _ in ()).throw(FileNotFoundError())) == ("offline", None)
     (confs[1] / "devices" / "phone.json").unlink()
-    assert signin.ask("example.com", None, confs[1], lambda: 1 / 0) == "not_paired"
+    assert signin.ask("example.com", None, confs[1], lambda: 1 / 0) == ("not_paired", None)
 
 
 def test_the_phone_does_not_come(confs, certs, monkeypatch):
@@ -324,7 +325,7 @@ def test_the_caller_goes_away(confs, certs):
         Phone(certs, s, inside)
         threading.Timer(0.5, theirs.close).start()
         t = time.monotonic()
-        assert signin.ask("example.com", mine, confs[1], s.vault) == "lost"
+        assert signin.ask("example.com", mine, confs[1], s.vault) == ("lost", None)
         assert time.monotonic() - t < 5 and gone.wait(5)
 
 
@@ -523,9 +524,9 @@ def service(monkeypatch, ask, uid=9):
 
 def test_requests(monkeypatch):
     asked = []
-    with service(monkeypatch, lambda host, conn: asked.append(host) or "ok") as (call, _):
+    with service(monkeypatch, lambda host, conn: (asked.append(host) or "ok", None)) as (call, _):
         assert json.loads(call({"cmd": "test", "host": "example.com"})) == {"ok": True, "code": "ok"}
-        for bad in ({"cmd": "test"}, {"cmd": "fill", "host": "example.com"}, [], 5, {"cmd": "test", "host": ["example.com"]},
+        for bad in ({"cmd": "test"}, {"cmd": "fill", "host": "example.com"}, {"cmd": "read", "host": "example.com"}, [], 5, {"cmd": "test", "host": ["example.com"]},
                     {"cmd": "test", "host": "Example.com"}, {"cmd": "test", "host": "example.com\n"},
                     {"cmd": "test", "host": "1.2.3.4"}, {"cmd": "test", "host": "localhost"}):
             assert json.loads(call(bad)) == {"ok": False, "code": "bad_request"}
@@ -534,7 +535,7 @@ def test_requests(monkeypatch):
 
 
 def test_others_get_nothing(monkeypatch):
-    with service(monkeypatch, lambda host, conn: "ok", uid=1000) as (call, _):
+    with service(monkeypatch, lambda host, conn: ("ok", None), uid=1000) as (call, _):
         assert call({"cmd": "test", "host": "example.com"}) == ""
 
 
@@ -543,7 +544,7 @@ def test_never_in_a_queue(monkeypatch):
 
     def slow(host, conn):
         go.wait(10)
-        return "denied"
+        return "denied", None
     with service(monkeypatch, slow) as (call, _):
         t = threading.Thread(target=lambda: got.append(json.loads(call({"cmd": "test", "host": "a.example.com"}))))
         t.start()
@@ -558,7 +559,7 @@ def test_never_in_a_queue(monkeypatch):
 def test_it_ends_when_idle_but_not_while_asking(monkeypatch):
     monkeypatch.setattr(signin, "IDLE", 0.2)
     go = threading.Event()
-    with service(monkeypatch, lambda host, conn: go.wait(10) and "ok") as (call, t):
+    with service(monkeypatch, lambda host, conn: (go.wait(10) and "ok", None)) as (call, t):
         got = threading.Thread(target=call, args=({"cmd": "test", "host": "example.com"},))
         got.start()
         time.sleep(0.7)
@@ -689,7 +690,7 @@ def test_only_known_words_reach_ampi(tmp_path, reply):
 
 
 def test_every_code_has_words():
-    assert (signin.PHONE_CODES | signin.GATEWAY_CODES | {"not_paired", "untrusted", "lost"}) - {"failed", "bad_request"} \
+    assert (signin.PHONE_CODES | signin.GATEWAY_CODES | {"not_paired", "untrusted", "lost", "no_browser", "unknown"}) - {"failed", "bad_request"} \
         == set(ops_signin.WORDS)
     assert signin.HOST_RE.pattern == ops_signin.HOST_RE.pattern
 
@@ -760,3 +761,5 @@ def test_the_whole_command(monkeypatch, capsys):
 def test_the_command():
     assert client.signin_ops(client.signin_parser().parse_args(["test", "example.com"])) == [
         {"op": "signin.test", "args": {"site_host": "example.com"}}]
+    assert client.signin_ops(client.signin_parser().parse_args(["fill", "--user", "f0:1", "--password", "f0:2", "--press", "f0:3"])) == [
+        {"op": "signin.fill", "args": {"user_ref": "f0:1", "password_ref": "f0:2", "press_ref": "f0:3"}}]

@@ -423,7 +423,7 @@ class Daemon:
         to carry values, after the owner approved; cards are never in it.)"""
         if any(o["op"] == "info.collect" for o in ops):
             return resp
-        if any(o["op"].startswith(("checkout.", "payment.")) for o in ops):
+        if any(o["op"].startswith(("checkout.", "payment.", "signin.")) for o in ops):
             level = "all"
         elif any(o["op"].startswith(("maps.", "wolt.")) for o in ops):
             level = "places"  # places in the owner's city stay readable: street, full address, email, phone, names

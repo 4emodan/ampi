@@ -526,10 +526,16 @@ def signin_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("test", help="ask the owner to unlock the login for a site (nothing is sent or filled in)")
     s.add_argument("site", help="e.g. example.com")
+    s = sub.add_parser("fill", help="sign in on the page open in the checkout browser: the owner unlocks the login for that site")
+    s.add_argument("--user", metavar="REF", help="the user name or email field (ref from the snapshot)")
+    s.add_argument("--password", metavar="REF", help="the password field")
+    s.add_argument("--press", metavar="REF", help="the form's sign-in button, pressed right after filling")
     return p
 
 
 def signin_ops(a: argparse.Namespace) -> list[dict]:
+    if a.cmd == "fill":
+        return _op("signin.fill", user_ref=a.user, password_ref=a.password, press_ref=a.press)
     return _op("signin.test", site_host=a.site)
 
 

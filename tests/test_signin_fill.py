@@ -1,14 +1,21 @@
 """Filling a login in: the checkout controller's part (bind_login, fill_login), against the fake engine."""
 
+import asyncio
 import json
-import subprocess
 import shutil
+import subprocess
+import threading
 import urllib.parse
 
 import pytest
 from test_checkout_controller import Clock, FakeEngine, Frame, el
+from test_signin import Phone, Server, caller, certs, confs, fast, service  # noqa: F401 (fixtures)
 
+from ampi_phone import signin
 from ampi_tools import checkout as co
+from ampi_tools.ops import Approvals, Policy, Services, validate
+from ampi_tools.server import Daemon
+from ampi_tools.todoist import ToolError
 
 SITE = "https://www.club.example"
 PW = "s3cret pa&ss"
@@ -282,3 +289,261 @@ console.log(JSON.stringify(r));
     assert r["alien"]["sameForm"] is False and r["gone"] == {"connected": False}
     assert r["value"] == "hunter22"
     assert [x["value"] for x in r["form"] if x["name"] == "p"] == ["(secret)"]
+
+
+# --- the sign-in service: page -> phone -> page ---------------------------------------------------------
+
+
+HOSTS = ["club.example", "auth.club.example"]
+LOGIN = {"ok": True, "user": "me@x.example", "secret": PW, "hosts": HOSTS}
+
+
+class Asked:
+    """Stands in for the phone."""
+
+    def __init__(self, reply=("ok", signin.Login("me@x.example", PW, frozenset(HOSTS)))):
+        self.reply, self.calls = reply, []
+
+    def __call__(self, host, conn, purpose="test"):
+        self.calls.append((host, purpose))
+        return self.reply
+
+
+def svc(c, phone=None):
+    phone = phone or Asked()
+    seen = []
+
+    def controller(req):
+        seen.append(req)
+        return json.loads(json.dumps(c.handle(req, signin=True)))
+    s = signin.Service(frozenset({9}), phone, controller)
+    s.seen = seen
+    return s, phone
+
+
+def go(s, sid, refs, **kw):
+    req = {"cmd": "fill", "session": sid, "user": refs["Email"], "password": refs["Password"], "press": refs["Log in"], **kw}
+    return s.handle({k: v for k, v in req.items() if v is not None}, None)
+
+
+def test_a_sign_in_from_end_to_end(env):
+    c, eng, sid, refs = env
+    s, phone = svc(c)
+    r = go(s, sid, refs)
+    assert r == {"ok": True, "code": "ok", "pressed": True, "password": True}
+    assert phone.calls == [("club.example", "fill")]  # the browser's site, with nothing from the caller in it
+    assert eng.sets == [("main", 1, "me@x.example"), ("main", 2, PW)] and eng.clicks == [("main", 3)]
+    assert s.held is None and s.over(0)  # the process ends at once
+
+
+def test_the_caller_cannot_choose_the_site(env):
+    c, eng, sid, refs = env
+    s, phone = svc(c)
+    assert s.handle({"cmd": "fill", "session": sid, "password": refs["Password"], "host": "bank.example"}, None)["ok"]
+    assert phone.calls == [("club.example", "fill")]
+
+
+@pytest.mark.parametrize("reply", [("denied", None), ("no_login", None), ("ok", None)])
+def test_refused_on_the_phone(env, reply):
+    c, eng, sid, refs = env
+    s, _ = svc(c, Asked(reply))
+    r = go(s, sid, refs)
+    assert r == {"ok": False, "code": reply[0] if reply[0] != "ok" else "failed"} and not eng.sets and s.held is None
+
+
+def test_a_bad_form_never_reaches_the_phone(env):
+    c, eng, sid, refs = env
+    eng.facts = {"action": "https://evil.example/"}
+    s, phone = svc(c)
+    r = go(s, sid, refs)
+    assert r["code"] == "page" and "another site" in r["error"] and not phone.calls
+
+
+def test_two_pages_one_fingerprint(env, monkeypatch):
+    c, eng, sid, refs = env
+    s, phone = svc(c)
+    assert go(s, sid, refs, password=None) == {"ok": True, "code": "ok", "pressed": True, "password": False}
+    assert s.held is not None and not s.over(1e9)
+    r = go(s, sid, refs, user=None)
+    assert r["ok"] and len(phone.calls) == 1 and s.held is None and s.over(0)
+    assert go(s, sid, refs)["ok"] and len(phone.calls) == 2  # used up: asked again
+
+
+@pytest.mark.parametrize("other", ["session", "host", "late"])
+def test_a_kept_login_is_for_that_session_and_site_and_not_long(env, other, monkeypatch):
+    c, eng, sid, refs = env
+    s, phone = svc(c)
+    go(s, sid, refs, password=None)
+    if other == "session":
+        s.held.session = "f" * 16
+    elif other == "host":
+        eng.frames[0].url, eng.frames[0].origin = "https://other.example/login", "https://other.example"
+        eng.facts = {"action": "https://other.example/login"}
+    else:
+        s.held.until = 0
+        assert s.over(0) and s.held is None and s.spent
+    phone.reply = ("denied", None)
+    assert go(s, sid, refs)["code"] == "denied" and len(phone.calls) == 2 and not any(v[2] == PW for v in eng.sets)
+
+
+def test_another_address_of_the_same_login_needs_no_second_fingerprint(env):
+    c, eng, sid, refs = env
+    s, phone = svc(c)
+    go(s, sid, refs, password=None)
+    eng.frames[0].url, eng.frames[0].origin = "https://auth.club.example/pw", "https://auth.club.example"
+    eng.facts = {"action": "https://auth.club.example/pw"}
+    assert go(s, sid, refs, user=None)["ok"] and len(phone.calls) == 1
+
+
+def test_a_page_that_changes_while_the_owner_decides(env):
+    c, eng, sid, refs = env
+
+    class Slow(Asked):
+        def __call__(self, host, conn, purpose="test"):
+            c.handle({"cmd": "click", "session": sid, "ref": refs["Other"]})
+            return super().__call__(host, conn, purpose)
+    s, phone = svc(c, Slow())
+    r = go(s, sid, refs)
+    assert r["code"] == "page" and "changed" in r["error"] and not eng.sets
+    phone.reply = ("denied", None)
+    assert go(s, sid, refs)["ok"] and len(phone.calls) == 1  # unlocked for this page a moment ago, and not used
+
+
+def test_a_half_filled_form_uses_the_login_up(env):
+    c, eng, sid, refs = env
+    s, _ = svc(c)
+    eng.frames[0].els[2]["vanish"] = True
+    r = go(s, sid, refs)
+    assert not r["ok"] and s.held is None and s.spent
+
+
+def test_the_browser_gone(env):
+    c, eng, sid, refs = env
+    s, phone = svc(c)
+    s.controller = lambda req: (_ for _ in ()).throw(FileNotFoundError())
+    assert go(s, sid, refs) == {"ok": False, "code": "no_browser"} and not phone.calls
+    real = svc(c)[0].controller
+
+    def dies(req):
+        if req["cmd"] == "fill_login":
+            raise ConnectionResetError
+        return real(req)
+    s.controller = dies
+    assert go(s, sid, refs) == {"ok": False, "code": "unknown"} and s.held is None
+
+
+@pytest.mark.parametrize("req", [{}, {"session": "x"}, {"session": "0" * 16}, {"session": "0" * 16, "user": "f0:x"},
+                                 {"session": "0" * 16, "press": "f0:1"}, {"session": "0" * 16, "user": 5},
+                                 {"session": ["0" * 16], "user": "f0:1"}])
+def test_bad_requests(env, req):
+    s, phone = svc(env[0])
+    assert s.handle({"cmd": "fill", **req}, None) == {"ok": False, "code": "bad_request"} and not s.seen
+
+
+@pytest.mark.parametrize("answer,ok", [
+    (LOGIN, True), ({**LOGIN, "user": ""}, False), ({**LOGIN, "secret": "a\nb"}, False), ({**LOGIN, "secret": "x" * 300}, False),
+    ({**LOGIN, "hosts": ["other.example"]}, False), ({**LOGIN, "hosts": "club.example"}, False), ({"ok": True}, False),
+    ({**LOGIN, "hosts": ["club.example", 5]}, False)])
+def test_what_the_phone_sends(confs, certs, answer, ok):  # noqa: F811
+    def inside(phone, inner):
+        phone.asked.append(inner.read())
+        inner.send({"asking": True})
+        inner.send(answer)
+        try:
+            inner.read()
+        except OSError:
+            pass
+    with Server(confs[0]) as s, caller() as (mine, _):
+        p = Phone(certs, s, inside)
+        code, login = signin.ask("club.example", mine, confs[1], s.vault, purpose="fill")
+        assert p.asked[0]["purpose"] == "fill" and p.asked[0]["host"] == "club.example"
+        if ok:
+            assert code == "ok" and login == signin.Login("me@x.example", PW, frozenset(HOSTS))
+        else:
+            assert (code, login) == ("failed", None)
+        assert PW not in repr(login)
+
+
+def test_the_process_keeps_running_while_it_keeps_a_login(monkeypatch):
+    monkeypatch.setattr(signin, "IDLE", 0.2)
+    with service(monkeypatch, lambda host, conn: ("ok", None)) as (call, t):
+        pass
+    s = signin.Service(frozenset())
+    s.held = signin.Held("0" * 16, signin.Login("u", "p", frozenset()), signin.time.monotonic() + 100)
+    assert not s.over(1e9)
+    s.calls = 1
+    s.held = None
+    s.spent = True
+    assert not s.over(1e9)  # someone is waiting for an answer
+    s.calls = 0
+    assert s.over(0)
+
+
+# --- ampi-tools -------------------------------------------------------------------------------------------
+
+
+class Checkout:
+    """ops_checkout's client, over the controller."""
+
+    def __init__(self, c):
+        self.c = c
+
+    async def call(self, req, timeout=60):
+        return self.c.handle(req)
+
+
+class SigninSide:
+    def __init__(self, s):
+        self.s, self.calls = s, []
+
+    async def call(self, req):
+        self.calls.append(req)
+        return self.s.handle(req, None)
+
+
+def run_op(env, tmp_path, origin="private", service=None, **args):
+    from ampi_tools.ops_checkout import CheckoutSide, PaymentRules
+    from ampi_tools.vault import Vault
+
+    side = CheckoutSide(Checkout(env[0]), Vault(tmp_path), PaymentRules())
+    fake = SigninSide(service or svc(env[0])[0])
+
+    async def trusted(pid):
+        return False
+    d = Daemon(Services(signin_client=fake, checkout_side=side), Approvals(tmp_path / "a.sqlite3"), Policy(), trusted)
+    try:
+        r = asyncio.run(d.run(validate([{"op": "signin.fill", "args": args}]), None, None, origin))
+        return fake, d._masked(r, [{"op": "signin.fill", "args": args}])
+    except ToolError as e:
+        return fake, str(e)
+
+
+def test_ampi_signs_in_and_sees_the_next_page_without_the_password(env, tmp_path):
+    c, eng, sid, refs = env
+    eng.on_click[("main", 3)] = f"{SITE}/"
+    fake, r = run_op(env, tmp_path, user_ref=refs["Email"], password_ref=refs["Password"], press_ref=refs["Log in"])
+    assert r["ok"] and r["text"].startswith("The login was filled in and sent.") and "Hello!" in r["text"]
+    assert PW not in r["text"] and "s3cret" not in r["text"]
+    assert fake.calls == [{"cmd": "fill", "session": sid, "user": refs["Email"], "password": refs["Password"], "press": refs["Log in"]}]
+
+
+@pytest.mark.parametrize("origin", ["group:family", "forwarded:private", "unknown", "watcher:mail"])
+def test_only_the_owners_chat(env, tmp_path, origin):
+    fake, r = run_op(env, tmp_path, origin, user_ref="f0:1")
+    assert isinstance(r, str) and not fake.calls
+
+
+def test_ampi_hears_only_known_words(env, tmp_path):
+    class Odd:
+        def handle(self, req, conn):
+            return {"ok": False, "code": "page", "error": "x\u202e" + "y" * 900}
+    _, r = run_op(env, tmp_path, service=Odd(), password_ref="f0:2")
+    text = r if isinstance(r, str) else r["error"]
+    assert "not signed in" in text and "\u202e" not in text and len(text) < 300
+    _, r = run_op(env, tmp_path, press_ref="f0:3")
+    assert "--user" in (r if isinstance(r, str) else r["error"])
+
+
+def test_odd_refs(env, tmp_path):
+    fake, r = run_op(env, tmp_path, password_ref="f0:2; rm")
+    assert isinstance(r, str) and not fake.calls

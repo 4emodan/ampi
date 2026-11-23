@@ -9,6 +9,8 @@ Type=simple
 User=ampisignin
 Group=ampisignin
 SupplementaryGroups=ampiphone-vault
+# (the checkout browser's socket; the controller lets this user ask for nothing but filling a login in)
+SupplementaryGroups=ampicheckoutctl-use
 EnvironmentFile=/etc/ampi-signin/signin.env
 ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-signin/run.py
 Restart=on-failure
@@ -56,7 +58,7 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
-# Of the local services only the gateway's vault socket is there to connect to.
+# Of the local services only the gateway's vault socket and the checkout controller's are there to connect to.
 TemporaryFileSystem=/run:ro
-BindReadOnlyPaths=-/run/ampi-phone-vault
+BindReadOnlyPaths=-/run/ampi-phone-vault -/run/ampi-checkout.sock
 InaccessiblePaths=-/opt -/srv -/var/www

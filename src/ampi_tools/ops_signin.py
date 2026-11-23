@@ -1,8 +1,8 @@
 """Sign-in with the logins saved on the owner's phone (docs/COMPANION.md; registered into ops.OPS).
 
 The logins are only on the phone; the owner unlocks one with a fingerprint there each time. ampi-signin (its own user) does
-the asking over a channel of its own: no password passes through here, and Ampi only learns the outcome. For now there is
-only a test; filling them into a page comes with the checkout browser's next engine.
+the asking over a channel of its own and fills the login into the checkout browser itself, for the site that browser is
+really on: no password passes through here, and Ampi only learns the outcome.
 
 Only the owner's private chat may ask: no group, watcher, forwarded message or unknown process.
 """
@@ -15,11 +15,12 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from .ops import FIELDS, OPS, Op, Result, Services, need
+from .ops import FIELDS, OPS, Op, Result, Services, clean, need
 from .todoist import ToolError
 
 SOCKET = "/run/ampi-signin.sock"
 TIMEOUT = 106  # the service ends by itself after 100 s; Claude Code's commands after 120 s
+REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 HOST_RE = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])")
 AGAIN = "try again later"
 # Only these words reach Ampi, whatever the phone or a service in between says.
@@ -43,6 +44,9 @@ WORDS = {
     "no_answer": "the phone didn't open the channel",
     "untrusted": "the phone and the sign-in service don't trust each other: the phone has to be paired again",
     "lost": "the connection to the phone broke",
+    "no_browser": "the checkout browser isn't running",
+    "unknown": "the browser stopped answering while the login was being filled in: it MAY have been sent. Look at the page (`checkout "
+               "snapshot`) before trying again",
 }
 
 
@@ -95,18 +99,59 @@ def _site(v: Any) -> str:
     return s
 
 
-FIELDS["site_host"] = _site
+def _ref(v: Any) -> str:
+    if not isinstance(v, str) or not REF_RE.fullmatch(v):
+        raise ToolError("give the element's ref as the snapshot shows it, like f0:3")
+    return v
+
+
+FIELDS.update({"site_host": _site, "user_ref": _ref, "password_ref": _ref, "press_ref": _ref})
 
 
 async def si_test(s: Services, a: dict) -> Result:
     host, = need(a, "site_host")
-    if s.signin_client is None:
-        raise ToolError("saved logins aren't set up on the server (docs/SETUP.md, companion app)")
-    r = await s.signin_client.call({"cmd": "test", "host": host})
+    r = await _client(s).call({"cmd": "test", "host": host})
     if r.get("ok") is True:
         return f"The owner unlocked the login saved for {host} with a fingerprint. It was a test: nothing was sent or filled in."
+    raise ToolError("not unlocked: " + _why(r))
+
+
+def _client(s: Services) -> Any:
+    if s.signin_client is None:
+        raise ToolError("saved logins aren't set up on the server (docs/SETUP.md, companion app)")
+    return s.signin_client
+
+
+def _why(r: dict) -> str:
     code = r.get("code")
-    raise ToolError(f"not unlocked: {WORDS.get(code) if isinstance(code, str) and code in WORDS else 'something went wrong'}")
+    if code == "page":  # the controller's own words about the form
+        return clean(r.get("error"), 200) or "the page isn't as expected"
+    return WORDS.get(code, "something went wrong") if isinstance(code, str) else "something went wrong"
+
+
+async def si_fill(s: Services, a: dict) -> Result:
+    from .ops_checkout import _show, cs
+
+    refs = {k: a.get(f"{k}_ref") for k in ("user", "password", "press")}
+    if not refs["user"] and not refs["password"]:
+        raise ToolError("give the user name field (--user), the password field (--password), or both")
+    client = _client(s)
+    side = cs(s)
+    st = await side.client.call({"cmd": "status"})
+    if not st.get("session"):
+        raise ToolError("no checkout session; open the site's sign-in page with `checkout open URL`")
+    r = await client.call({"cmd": "fill", "session": st["session"], **{k: v for k, v in refs.items() if v}})
+    if r.get("ok") is not True:
+        raise ToolError("not signed in: " + _why(r))
+    if not r.get("pressed"):
+        done = "The login was filled in; its button was not pressed."
+    elif r.get("password"):
+        done = "The login was filled in and sent. Check below whether the site accepted it."
+    else:
+        done = "The user name was filled in and sent. For the password page, run `signin fill` again within 3 minutes."
+    page = await side.client.call({"cmd": "snapshot", "session": st["session"]}, timeout=60)
+    return done + "\n\n" + await _show(s, page)
 
 
 OPS["signin.test"] = Op("signin.test", False, si_test)
+OPS["signin.fill"] = Op("signin.fill", False, si_fill)
