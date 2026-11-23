@@ -33,6 +33,7 @@ TRIGGER_FAILS_BEFORE_NOTICE = 3
 RETRY_DELAYS = (60, 300, 1800)
 TRANSIENT = re.compile(r"usage limit|rate limit|overloaded|not reachable|timed? ?out|temporar|try again|network|"
                        r"connection|\b(?:HTTP|status)\s*5\d\d\b", re.I)
+PASSING = re.compile(r"stopped after|\b(?:429|5\d\d)\b|unavailable|capacity", re.I)
 BUILDER_TOOLS = ("Read", "Glob", "Grep", "Bash(watchers:*)")
 BUILDER_GUIDE = Path(__file__).with_name("BUILDER.md")
 RUNS_KEEP_DAYS = 60
@@ -122,13 +123,24 @@ class WatchEngine:
         m = re.match(r"step ([a-z][a-z0-9_]*):", error)
         return f"step {m.group(1)} failed (details aren't kept for a watcher that reads Instagram/Threads)" if m else error
 
-    async def _notify_text(self, text: str, fmt: str, name: str | None = None) -> None:
+    @staticmethod
+    def _failure(error: str) -> dict:
+        m = re.match(r"step ([a-z][a-z0-9_]*): (.*)", error, re.S)
+        if not m:  # the whole run (took too long): not about a message
+            return {"step": "", "transient": True}
+        text = m.group(2)
+        # An answer that doesn't fit the form quotes the answer: never judged by its words.
+        transient = not text.startswith("the AI's answer") and bool(TRANSIENT.search(text) or PASSING.search(text))
+        return {"step": m.group(1), "transient": transient}
+
+    async def _notify_text(self, text: str, fmt: str, name: str | None = None, social: bool = False) -> None:
+        social = social or self._social(name)  # the running version's flag (the watcher may be replaced meanwhile)
         header = f"🔔 {name}\n\n" if name else ""
         try:
             await self.bot._send_text(self.profile.owner_chat_id, 0, header + text, markdown=(fmt == "markdown"),
-                                      **({"social": True} if self._social(name) else {}))
+                                      **({"social": True} if social else {}))
         except Exception as e:  # noqa: BLE001
-            if self._social(name):
+            if social:
                 log.warning("[%s] watcher message failed: %s", self.profile.name, type(e).__name__)
                 code = getattr(e, "error_code", 0)  # None: the network, after several tries
                 later = code is None or (isinstance(code, int) and (code == 429 or code >= 500)) \
@@ -427,6 +439,10 @@ class WatchEngine:
 
     async def _finish(self, w: Active, st: RunState, status: str, row: dict | None,
                       wt: WatcherTasks | None) -> str:
+        if status == "failed" and w.spec.social:
+            # Which step failed and whether it could pass (never its text): the watcher's script counts only failures
+            # that are about the messages themselves.
+            st.space_dirty["failure.json"] = json.dumps(self._failure(st.ctx.get("error") or "")).encode()
         if not await self._push_space(w, st) and not status.startswith("parked:"):
             # Its saved data (seen lists, last values) didn't stick: the next run would misbehave silently.
             status = "failed"

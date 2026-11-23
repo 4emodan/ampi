@@ -222,7 +222,7 @@ class Pipeline:
             if st.test:
                 st.previews.append(text)
                 return {"sent": False, "preview": text[:4000]}
-            await self.svc.notify(text[:8000], s["format"], w.name)
+            await self.svc.notify(text[:8000], s["format"], w.name, **({"social": True} if w.spec.social else {}))
             return {"sent": True}
         # web
         page = await self.svc.browse(s["url"])

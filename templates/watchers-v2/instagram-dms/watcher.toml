@@ -39,12 +39,6 @@ input = "{{steps.fresh.text}}"
 schema = { summary = "text:3000" }
 when = { path = "steps.fresh.plain", false = true }
 
-[[steps]]
-id = "answered"
-type = "script"
-run = "scripts/answered"
-when = { path = "steps.fresh.plain", false = true }
-
 # Markdown, so text from the messages can't form links, code or addresses in the message to you.
 [[steps]]
 id = "send"
@@ -53,7 +47,8 @@ format = "markdown"
 template = "templates/dms.txt"
 when = { path = "steps.fresh.plain", false = true }
 
-# A batch that failed twice at the AI step (or kept failing to send) is only counted, without its text.
+# A batch the AI couldn't handle twice (or Telegram refused three times) is only counted, without its text. Outages
+# and limits don't count: it waits.
 [[steps]]
 id = "send_count"
 type = "notify"
