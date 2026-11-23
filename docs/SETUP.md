@@ -542,8 +542,13 @@ what protects it: [COMPANION.md](COMPANION.md).
 
    Confirm on the phone, compare the code on both screens, answer yes on the PC, then press "The codes match". Switch USB
    debugging off again. The app shows what it still needs (notifications, background, full-screen alarms).
-4. Server: add `"Bash(phone:*)"` to `allowed_tools` in `/home/assistant/config.toml`, then
-   `systemctl restart claude-assistant`.
+4. Server: add `"Bash(phone:*)"` (and `"Bash(signin:*)"` for saved logins) to `allowed_tools` in
+   `/home/assistant/config.toml`, then `systemctl restart claude-assistant`.
+
+**Saved logins** (app 0.2 and later): Ampi app → Saved logins → Add a login. They stay on the phone, locked by your fingerprint;
+keep them in your password manager too. Try one with "test my login for example.com" in the chat. A phone paired before this
+existed has to be paired again: install the new app, unpair in the app, then `.\scripts\companion.ps1 -Pair` (it offers to
+remove the old pairing on the server). Going back to app 0.1 means uninstalling it and pairing again.
 
 `ampi-phone status` and `ampi-phone devices` (root) show the state; **lost phone:** `ampi-phone remove phone`. Updating the
 app: build again and `-Install`; the pairing stays. `sudo bash deploy/install-phone.sh --uninstall` removes everything.

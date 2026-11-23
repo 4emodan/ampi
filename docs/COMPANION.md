@@ -4,8 +4,8 @@ Two jobs, two separate levels of trust, one connection:
 
 1. **Phone actions** that Ampi asks for: notifications, alarms, timers; later geofences, sharing to Ampi, opening
    maps or the dialer. Ampi (the model) decides these, so they are limited to what can't hurt much.
-2. **The key to saved logins** (later phase): only the sign-in service asks, the owner confirms with a fingerprint.
-   Ampi can't ask the phone for this, imitate it or see it.
+2. **The owner's saved logins**: only the sign-in service asks, the owner confirms with a fingerprint. Ampi can't imitate
+   that or see a login.
 
 ## Parts
 
@@ -121,36 +121,74 @@ accessibility or notification-reading permission.
    (unpair first, with the screen lock).
 2. The owner confirms on the phone; it makes its key and shows a code. The script fetches the phone's *public*
    certificate (the result of a broadcast only adb may send) and hands it to `ampi-phone code`, which computes the code
-   on the server from both certificates: SHA-256 over a versioned transcript that also has a slot for the sign-in
-   service's public key; 26 base32 characters.
+   on the server from three certificates (gateway, phone, sign-in service): SHA-256 over a versioned transcript; 26 base32
+   characters. `add` accepts the phone for both services.
 3. The owner compares the codes and confirms on both; `ampi-phone add NAME --code …` accepts the phone.
 
 A lost phone: `ampi-phone remove NAME`.
 
-## Later: logins (not in this phase; what this phase already leaves room for)
+## Saved logins (phase B)
 
-- Each saved login is encrypted with its own random key; that key is wrapped to (a) a hardware RSA key on the phone
-  that needs a fingerprint for every decryption (a `Cipher` in the fingerprint prompt: works on API 36; saving needs
-  no prompt) and (b) a recovery key on paper. The server stores only this. A newly added fingerprint erases the phone
-  key, so the paper code is the normal way back.
-- The phone's login key must be authenticated like its connection key: a new pairing (transcript v2), never over the link
-  alone, or a compromised gateway could put in its own.
-- `vault` frames are a separate type with their own ids and no re-sending; today's app refuses them. Requests are signed
-  by `ampi-signin` (own user and key; the phone learns the public key only while pairing): purpose, phone, site,
-  reason, nonce, expiry and the one-time key the answer is encrypted to, so the gateway, ampi-tools and Ampi can
-  neither make nor read one. Nonces are remembered until they expire; prompts are rate-limited on the phone; Ampi's
-  notifications wait while a prompt is shown and can never open it.
+The owner's logins exist **only on the phone**: the server has neither a key to them nor an encrypted copy. Unlocking one needs
+the owner's fingerprint there, every time. For now there is only a test (`signin test example.com`): the phone unlocks the login
+and says so, nothing of it is sent. Filling it into a page is phase C.
+
+```
+Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-signin.sock -->
+  ampi-signin (user ampisignin, no network) -- /run/ampi-phone-vault/vault.sock -->
+    ampi-phone gateway: passes bytes  ==a second TLS connection the phone opens==  phone
+                  \_______________ TLS 1.3 inside, ampi-signin <-> phone, both pinned _______________/
+```
+
+- **On the phone** (`Logins`): one AES-256-GCM key in the secure hardware, a fingerprint (class 3) for every single use, saving
+  included; a newly added fingerprint, no fingerprint left or no screen lock destroys it (then the logins are entered again:
+  they belong in a password manager too). Bound into every login: its id, sites, label, and the sign-in service it was saved for,
+  so re-pairing the phone with another server makes them useless there. Nothing can be shown again. Sites are exact https
+  host names (ASCII; `www.` is the same site), up to 5 per login; big providers (Google, Apple, Facebook, Microsoft, Yahoo) are
+  refused: their password opens much more than one site.
+- **Asking** (`Unlock`, `UnlockActivity`): a notification without the site -> tap -> the screen with the site, which login, and
+  "Use fingerprint" / "Refuse". One at a time, 75 s at most (monotonic), 6 in 10 minutes, 30 a day; after a refusal none for a
+  minute. All words are the app's own. While it is open, Ampi's messages, alarms and cancellations are refused
+  (`signin_open`); if something rings, the request ends ("interrupted"); while something rings, none starts. When the server or
+  the channel goes away, so does the request. Only Refuse is a refusal: a closed or timed-out fingerprint prompt goes back to the
+  screen.
+- **The channel** (`VaultSession`, `Tls`): the gateway only tells the phone that a channel is wanted (`vault.open` with a
+  random number). The phone opens a second connection to the same port, says that number, and inside it starts TLS 1.3 with
+  ampi-signin: the phone's certificate is its connection key, the service's is the one fixed while pairing. Nothing is
+  looked at before both are proved, so the gateway can neither ask, nor read, nor change anything: it can only not pass it on.
+  One channel at a time, 6 a minute, 40 an hour, 64 KB each way, 130 s.
+- **ampi-signin** (`src/ampi_phone/signin.py`, standard library): socket-activated, only ampi-tools may call it (uid checked), one
+  request at a time (others are told "busy" at once, never queued), ends with the caller or after 100 s, exits when idle. Its own
+  key proves who is asking; it opens nothing. Sandbox as the gateway's, plus: of /run it sees only the vault socket.
+  Journal: outcomes, never sites.
+- **ampi-tools** (`ops_signin.py`): the private chat only. Outcomes become words from its own list.
+
+Inside the channel (4-byte length + JSON, 8 KB): `{"v":1,"op":"get","purpose":"test","host","wait"}` -> `{"asking":true}` then
+`{"ok":true}` or `{"ok":false,"error":CODE}`; anything else is answered `unsupported`.
+
+Who could do what: the gateway (reached from the internet): delay. ampi-tools, or a tricked Ampi: make the phone ask (limited,
+it shows the site) and learn whether a login exists and was unlocked. ampi-signin or root: later, with filling, get the one login
+the owner approves, at that moment. Someone with the unlocked phone but not the finger: see sites and labels, delete.
+
+### What phase C must keep
+
+- The site comes from the browser's controller (the real origin of the fields), never from Ampi; https, exact host.
+- The password only goes into a password field, the user name into the same form, the form's target and the top page are on the
+  same host, never a GET form; the value is kept out of every later answer ("show password" makes it a text field).
+- It goes ampi-signin -> controller only. For two-page logins ampi-signin holds it at most 3 minutes for that page, and exits
+  after it was used. (Strings can't be wiped in Python or Java; the process ends instead.)
+- One-time codes: an operation of their own where the owner types the code on the phone. Never a CAPTCHA.
 
 ## Order
 
-A. Gateway, `phone` command, app with notifications, alarms, timers, pairing. B. Saving and unlocking logins.
+A. Gateway, `phone` command, app with notifications, alarms, timers, pairing (live). B. Saving and unlocking logins.
 C. Lightpanda engine + sign-in filling + prepaid bookings. D. Card payments on Lightpanda, confirmed in the app.
 Each phase: skeptic review of the plan, build, security and correctness reviews, fixes, then the owner deploys.
 
 ## Release key
 
 `companion/build.ps1 -Release` signs with a key in `%USERPROFILE%\.ampi-companion` (made on first use, password typed by
-the owner). Lose it and the app can only be reinstalled (pair again). Someone with that key *and* the unlocked phone on
+the owner). Lose it and the app can only be reinstalled (pair again; saved logins are gone). Someone with that key *and* the unlocked phone on
 a cable could install a changed app: keep a copy offline, and switch USB debugging off when not installing.
 
 ## Known limits

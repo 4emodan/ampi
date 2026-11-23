@@ -9,6 +9,7 @@ import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.service.notification.StatusBarNotification;
 import android.util.Log;
 
 import org.json.JSONException;
@@ -111,6 +112,12 @@ final class Unlock {
 
     static synchronized Ask current() {
         return current;
+    }
+
+    /** At the start: a request that was open when the app was killed is gone, its notification too. */
+    static void clean(Context c) {
+        NotificationManager nm = c.getSystemService(NotificationManager.class);
+        for (StatusBarNotification n : nm.getActiveNotifications()) if (n.getId() == NOTE) nm.cancel(n.getTag(), NOTE);
     }
 
     /** The screen wants to know when the request is over (main thread). */

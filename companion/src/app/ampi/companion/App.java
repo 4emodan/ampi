@@ -17,6 +17,7 @@ public final class App extends Application {
     public void onCreate() {
         super.onCreate();
         channels(this);
+        Unlock.clean(this);
     }
 
     static void channels(Context c) {
