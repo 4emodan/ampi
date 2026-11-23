@@ -81,8 +81,6 @@ SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP", "kr": "KR", "zł": "PLN", "CA$
            "AU$": "AUD", "US$": "USD", "NZ$": "NZD"}
 _CUR = r"(?:CA|AU|US|NZ|A|C)\$|€|\$|£"
 CONFIRMATION = re.compile(r"order|confirm|thank|kiitos|tilaus|vahvist", re.I)
-COUNTDOWN = re.compile(r"\b(?:held|hold|left|remaining|expires?( in)?|reserved for|time)\b[^\d\n]{0,15}\d{1,2}:\d{2}(:\d{2})?|"
-                       r"\d{1,2}:\d{2}(:\d{2})?\s*(?:min(utes)?\s*)?(?:left|remaining)\b", re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 AMOUNT = re.compile(
     rf"(?P<pre>{_CUR}|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr)\b)?\s?"
@@ -491,7 +489,8 @@ PAGE_JS = r"""
         const c = el.closest('button,input,a[href],[role=button]') || (lab && lab.control) || el;
         const texts = [];
         for (const n of (c === el ? [el] : [el, c])) {
-          for (const s of [n.getAttribute('aria-label'), n.tagName === 'INPUT' ? (['submit', 'button', 'image', 'reset'].includes((n.type || '').toLowerCase()) ? n.value : '') : n.textContent, n.getAttribute('title'), n.getAttribute('alt')]) {
+          const by = (n.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).map(i => { const x = document.getElementById(i); return x ? x.textContent : ''; }).join(' ');
+          for (const s of [n.getAttribute('aria-label'), by, n.tagName === 'INPUT' ? (['submit', 'button', 'image', 'reset'].includes((n.type || '').toLowerCase()) ? n.value : '') : n.textContent, n.getAttribute('title'), n.getAttribute('alt')]) {
             const t = txt(s, 200); if (t && !texts.includes(t)) texts.push(t);
           }
           n.querySelectorAll && n.querySelectorAll('img[alt]').forEach(i => { const t = txt(i.getAttribute('alt'), 100); if (t && texts.length < 12 && !texts.includes(t)) texts.push(t); });
@@ -911,6 +910,8 @@ class Controller:
             raise Refused("that field is disabled right now")
         if any(SECRET_FIELD.search(str(d.get(k) or "")) for k in ("type", "autocomplete", "name", "id")):
             raise Refused("that field is for card, password or code details; those are only filled with approval")
+        if d.get("type") != "search":
+            s.filled = True  # something was entered: buttons may send it
         r = self._run(s, frame, {"op": "set", "n": n, "value": text}) or {}
         if not r.get("ok"):
             raise Refused("that element is gone (the page changed); take a new snapshot")
@@ -983,20 +984,23 @@ class Controller:
         return {"tag": str(g.get("tag") or "")[:20], "texts": [br.MARKERS.sub("", br.clean(str(t)))[:200] for t in (g.get("texts") or [])[:12]],
                 "ident": br.clean(str(g.get("ident") or ""))[:120], "submits": bool(g.get("submits")), "search": bool(g.get("search")),
                 "dest": br.clean(str(g.get("dest") or ""))[:1000], "method": str(g.get("method") or "")[:10],
+                "href": br.clean(str(g.get("href") or ""))[:1000],
                 "around": br.MARKERS.sub("", br.clean(str(g.get("around") or "")))[:600]}
 
     def gate(self, req: dict) -> dict:
         """What pressing an element would really press, so the daemon can decide whether it needs the owner."""
         s = self._session(req)
         frame, d, n = self._element(s, req.get("ref"))
+        g = self._gate(s, frame, n)
+        snap = self.snapshot(s)
         return {"ok": True, "session": s.id, "kind": d.get("kind"), "frame_origin": frame["origin"], "filled": s.filled,
-                **self._gate(s, frame, n)}
+                "totals": snap["totals"], "frames": sorted({f["origin"] for f in self._frames(s)}), **g}
 
     @staticmethod
     def _seen(g: dict, title: str) -> str:
-        """A fingerprint of the text the owner is shown next to the button (a running countdown doesn't count)."""
-        text = COUNTDOWN.sub(" ", f"{title}\n{g['around']}")
-        return hashlib.sha256(re.sub(r"\s+", " ", text).encode()).hexdigest()
+        """A fingerprint of the text the owner is shown next to the button. A running countdown there refuses the press:
+        telling it from a changed time isn't safe."""
+        return hashlib.sha256(re.sub(r"\s+", " ", f"{title}\n{g['around']}").encode()).hexdigest()
 
     @staticmethod
     def _press(g: dict) -> dict:

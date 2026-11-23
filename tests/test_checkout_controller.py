@@ -791,16 +791,27 @@ def test_submit_refuses_anything_changed(env, change):
     assert not r["ok"] and r["phase"] == "verify" and eng.clicks == []
 
 
-def test_submit_ignores_a_running_countdown_but_not_a_changed_time(env):
+@pytest.mark.parametrize("a,b", [("Time: 18:30", "Time: 20:00"), ("Reserved for 18:30", "Reserved for 21:00"),
+                                 ("Appointment time 10:00", "Appointment time 12:00"), ("Class 18:30 left 2", "Class 20:00 left 2"),
+                                 ("Time (free cancel) 10:00", "Time (no refunds!) 10:00"), ("time left 9:59", "time left 9:58")])
+def test_submit_refuses_any_change_of_the_text_around(env, a, b):
     c, eng, _ = env
     sid, snap = opened(c)
     main = eng.frames[0]
-    main.text += "\nSlot 18:30. Held for you, time left 9:59"
+    main.text += "\n" + a
     _, rq = submit_request(c, sid, snap)
-    main.text = main.text.replace("18:30", "20:30")
-    assert not c.handle(rq)["ok"]
-    main.text = main.text.replace("20:30", "18:30").replace("9:59", "8:12")
-    assert c.handle(rq)["ok"] and eng.clicks == [("main", 4)]
+    main.text = main.text.replace(a, b)
+    r = c.handle(rq)
+    assert not r["ok"] and r["phase"] == "verify" and eng.clicks == []
+
+
+def test_gate_reports_money_and_entered_text(env):
+    c, _, _ = env
+    sid, snap = opened(c)
+    g = c.handle({"cmd": "gate", "session": sid, "ref": ref(snap, "Pay 23,90 €")})
+    assert g["ok"] and not g["filled"] and g["totals"] and PSP in g["frames"]
+    c.handle({"cmd": "type", "session": sid, "ref": ref(snap, "Email"), "text": "a"})
+    assert c.handle({"cmd": "gate", "session": sid, "ref": ref(snap, "Pay 23,90 €")})["filled"]
 
 
 def test_submit_refuses_what_it_cannot_show(env):

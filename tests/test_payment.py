@@ -37,6 +37,7 @@ class FakeCtl:
         self.risky: list[str] = []
         self.text = "Checkout. Deliver to Anna Virtanen, anna.virtanen@example.fi"
         self.fail_pay = None
+        self.gate_totals = []
         self.form = [{"label": "Email", "kind": "input", "value": "anna.virtanen@example.fi", "shown": True},
                      {"label": "10:00", "kind": "button", "value": True, "shown": True},
                      {"label": "promo", "kind": "input", "value": "x", "shown": False}]
@@ -78,7 +79,8 @@ class FakeCtl:
             e = self.elements[req["ref"]]
             return {"ok": True, "kind": "link" if e["tag"] == "a" else "button", "frame_origin": e["frame_origin"], "tag": e["tag"],
                     "filled": getattr(self, "filled", False), "texts": e.get("texts", [e["label"]] if e["label"] else []),
-                    "ident": e["id"], "submits": e.get("posts", False), "search": e.get("search", False), "dest": e.get("dest", "")}
+                    "ident": e["id"], "submits": e.get("posts", False), "search": e.get("search", False), "dest": e.get("dest", ""),
+                    "href": SHOP + "/page", "totals": self.gate_totals, "frames": getattr(self, "frames", [SHOP])}
         if cmd == "bind_submit":
             e = self.elements[req["ref"]]
             return {"ok": True, "origin": self.origin, "url": self.origin + "/book", "button": e,
@@ -480,7 +482,13 @@ def test_plain_click_on_a_committing_button_is_refused(tmp_path, label):
                                             ("Save and continue", True, True), ("Next: payment", True, True),
                                             ("Use this address", True, True), ("Continue to payment", True, True),
                                             ("Check out (2) · 24,00 €", True, True), ("Continue as guest", True, True),
-                                            ("Continue to order summary", True, True), ("€15", False, True),
+                                            ("Continue to order summary", True, True), ("€15", False, False),
+                                            ("Tip $5", False, False), ("P€1ay", False, False), ("Quick checkout", True, False),
+                                            ("Instant checkout", False, False), ("Continue with email", True, False),
+                                            ("Accept", True, False), ("Accept offer", True, False), ("Accept all", True, True),
+                                            ("Add €12", False, False), ("Рay", False, False), ("Ｐay now", False, False),
+                                            ("Dodaj do koszyka 49,99 zł", True, True), ("Review order", True, True),
+                                            ("Fri 26 - €15", False, True), ("Choose €45", False, True),
                                             ("Continue to buy", False, False), ("Continue to PayPal", False, False),
                                             ("Express checkout", False, False), ("Pay €80", False, False),
                                             ("Buy now - €12", False, False), ("Checkout with PayPal", False, False),
@@ -517,6 +525,54 @@ def test_gate_looks_at_every_caption_and_ignores_ids(tmp_path):
     assert not click()
 
 
+def test_links_that_act_as_buttons_are_gated(tmp_path):
+    d, _, ctl = make(tmp_path)
+    b = ctl.elements["f0:20"]
+    click = lambda: run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]  # noqa: E731
+    b.update(tag="a", id="x")
+    for text in ("Book", "Send", "Submit", "Reserve", "Register", "Unsubscribe", "Delete", "Cancel my booking"):
+        for dest in ("", SHOP + "/page#", SHOP + "/page#book", "javascript:void(0)"):
+            b.update(texts=[text], dest=dest)
+            assert not click(), (text, dest)
+    b.update(texts=["Register"], dest=SHOP + "/register")
+    assert click()
+    b.update(texts=["Delete my account"])
+    assert not click()
+    b.update(texts=["Register"])
+    ctl.filled = True
+    assert not click()
+
+
+@pytest.mark.parametrize("label", ["Kup teraz", "Zapłać", "Commander avec obligation de paiement", "Bestelling plaatsen",
+                                   "Realizar pedido", "Acquista", "Завершить заказ", "הזמן עכשיו", "Get it now", "Rent now",
+                                   "Accept offer", "Start free trial", "One-click", "Weiter", "", "OK", "Checkout", "Next: payment"])
+def test_once_something_is_entered_and_a_price_shows_unknown_buttons_ask(tmp_path, label):
+    d, _, ctl = make(tmp_path)
+    b = ctl.elements["f0:20"]
+    b.update(label=label, id="x")
+    ctl.filled, ctl.gate_totals = True, TOTAL
+    assert not run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]
+    ctl.gate_totals, ctl.frames = [], [SHOP, STRIPE]
+    assert not run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]
+
+
+@pytest.mark.parametrize("label", ["Next", "Add to cart", "Remove", "+", "18:30", "Standard shipping €4.90"])
+def test_harmless_buttons_still_work_there(tmp_path, label):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"].update(label=label, id="x")
+    ctl.filled, ctl.gate_totals = True, TOTAL
+    assert run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"], label
+
+
+def test_a_form_that_sends_to_another_site_asks(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"].update(label="Next", id="x", posts=True, dest="https://other.example/x")
+    assert not run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]
+    ctl.elements["f0:20"].update(dest=SHOP + "/next")
+    assert run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]
+
+
+TOTAL = [{"amount": "5.00", "currency": "EUR", "label": "Total"}]
 SUBMIT = {"ref": "f0:20", "what": "Yoga class Fri 10:00"}
 
 
@@ -558,10 +614,8 @@ def test_submit_is_for_the_owners_chat_only(tmp_path, origin):
         run(d.run(req("checkout.submit", **SUBMIT), None, origin=origin))
 
 
-TOTAL = [{"amount": "5.00", "currency": "EUR", "label": "Total"}]
-
-
-@pytest.mark.parametrize("label", ["Weiter zur Adresse", "Use my saved address", "Choose delivery", "Next: payment"])
+@pytest.mark.parametrize("label", ["Use this address", "Checkout", "Standard shipping €4.90", "Next: payment", "Apply voucher",
+                                   "Save", "Review order", "12:30 (€15)", "Choose €45"])
 def test_steps_in_between_can_be_submitted_with_a_total_showing(tmp_path, label):
     d, _, ctl = make(tmp_path)
     ctl.elements["f0:20"]["label"], ctl.totals, ctl.frames = label, TOTAL, [SHOP, STRIPE]
@@ -572,6 +626,11 @@ def test_steps_in_between_can_be_submitted_with_a_total_showing(tmp_path, label)
 @pytest.mark.parametrize("change,err", [
     ({"captcha": True}, "captcha"), ({"risky": ["Subscribe me"]}, "untick"), ({"frames": [SHOP, STRIPE]}, "payment form"),
     ({"frames": [SHOP, "https://www.paypal.com"]}, "payment form"), ({"frames": ["https://shop.app"]}, "payment form"),
+    *[({"totals": TOTAL, "label": x}, "total to pay") for x in (
+        "Zapłać", "Commander avec obligation de paiement", "Bestelling plaatsen", "Realizar pedido", "Acquista",
+        "Завершить заказ", "הזמן עכשיו", "שלם", "Get it now", "Rent now", "Accept offer", "Start free trial", "Weiter")],
+    ({"label": "One-click"}, "pay or order"), ({"label": "Рay", "totals": TOTAL}, "alphabets"), ({"label": "€12"}, "price"),
+    ({"label": "Add €12"}, "price"), ({"label": "Choose P€1ay"}, "price"), ({"label": "Ｐay now"}, "pay or order"),
     ({"totals": TOTAL}, "total to pay"), ({"totals": TOTAL, "label": "Finish"}, "total to pay"),
     ({"totals": TOTAL, "label": "Confirm"}, "total to pay"), ({"totals": TOTAL, "label": ""}, "total to pay"),
     ({"totals": TOTAL, "label": "Complete my order"}, "total to pay"), ({"frame_origin": STRIPE}, "payment provider"),

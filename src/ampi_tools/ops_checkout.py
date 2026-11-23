@@ -16,6 +16,7 @@ import asyncio
 import json
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -49,55 +50,118 @@ SUBMIT_BUTTON = re.compile(
 # Words that mean money changes hands: never a plain click, never `submit` (card payments go through `pay`).
 PAY_WORDS = re.compile(
     r"\b(pay|buy|purchase|place (your |my )?order|order now|submit order|donate)\b|apple ?pay|google ?pay|shop ?pay|paypal|klarna|"
-    r"afterpay|clearpay|express checkout|"
+    r"afterpay|clearpay|\b(quick|instant|express|one|1|fast)[ -]?(click|check ?out|buy|order|purchase)\b|"
     r"tilaa|maksa|osta|köp|betala|bestill|kaufen|bezahlen|bestellen|zahlungspflichtig|acheter|payer|"
     r"купить|оплат|заказать|αγορά|παραγγελ|πληρωμ", re.I)
 # A price says what something costs (a slot, a delivery option, "Add to cart - €12"), not what a button does.
 AMOUNT_RE = re.compile(r"[-+–—]?\s*(?:(?:€|\$|£)\s?\d[\d .,]*|\d[\d.,]*\s?(?:€|\$|£|(?:eur|usd|gbp|kr|zł)\b))", re.I)
 PAY_FRAME = re.compile(r"(^|[./])(stripe|adyen|braintreegateway|paypal|paypalobjects|klarna|klarnaservices|shop|checkout|"
                        r"shopifycs|squareup|squarecdn|paytrail|mollie|worldpay|jccsmart|vivapayments|revolut)\.(com|net|app|io|fi|eu)$")
-# A whole caption (without prices, counts and arrows) that only looks around or moves through a shop, never commits.
+# Whole captions (without prices, counts and arrows) that only look around or move on, never commit. Where money is in
+# play only these, MINOR and OPTION may be pressed at all, so a word missing here costs a detour, not money.
 HARMLESS = re.compile(
-    r"(search|find|show results|filters?|apply (filters?|coupon|code|discount)|clear( all| filters?)?|reset|sort( by)?|go|back|"
+    r"(search|find|show results|filters?|apply filters?|clear( all| filters?)?|reset|sort( by)?|go|back|"
     r"previous|next|next (page|month|week|step|slide)|log ?in|sign ?in|menu|close|×|more|show more|load more|"
-    r"continue|continue shopping|continue (as|with) (a )?(guest|email)|"
+    r"continue|continue shopping|continue as (a )?guest|"
+    r"(confirm|save) (my )?(choices|preferences)|decline( all)?|reject( all)?|accept( all)? cookies|accept all|only necessary|"
+    r"add (\d+ )?(items? )?to (my |your |the )?(cart|bag|basket)|view (my |your )?(cart|bag|basket)|update( cart| basket)?|"
+    r"jatka|seuraava|hae|lisää (ostoskoriin|koriin)|in den warenkorb|ajouter au panier|añadir (al carrito|a la cesta)|"
+    r"aggiungi al carrello|in winkelwagen|lägg i varukorg(en)?|dodaj do koszyka|"
+    r"поиск|найти|далее|назад|в корзину|добавить в корзину|αναζήτηση|επόμενο|συνέχεια|προσθήκη στο καλάθι)", re.I)
+# Steps of a checkout: fine on the way in; once details are entered and a price shows they are asked about.
+STEP = re.compile(
     r"(save (and|&) continue|save address|use this address|(deliver|ship|send) (here|to this address)|select (this )?address|"
     r"(next|continue)( to|:)? (the |your )?(secure )?(checkout|cart|basket|bag|shipping|delivery|address|contact|details|information|"
-    r"payment|payment method|billing|review|summary|order summary|order review)( details| method| options| information)?)|"
-    r"add (\d+ )?(items? )?to (my |your |the )?(cart|bag|basket)|view (my |your )?(cart|bag|basket)|update( cart| basket)?|"
-    r"(go to |proceed to |secure |start )?(secure )?check ?out|(go|proceed) to (cart|basket|bag|payment)|"
-    r"decline( all)?|reject( all)?|accept( all)?( cookies)?|only necessary|"
-    r"jatka|seuraava|hae|kassalle|lisää (ostoskoriin|koriin)|siirry kassalle|jatka (toimitukseen|maksuun)|"
-    r"поиск|найти|далее|назад|в корзину|добавить в корзину|перейти к оформлению|αναζήτηση|επόμενο|συνέχεια|προσθήκη στο καλάθι)", re.I)
+    r"payment|payment method|billing|review|summary|order summary|order review)( details| method| options| information)?|"
+    r"review (my |your |the )?order|(go to |proceed to |secure |start )?(secure )?check ?out|(go|proceed) to (cart|basket|bag|payment)|"
+    r"kassalle|siirry kassalle|jatka (toimitukseen|maksuun)|перейти к оформлению)", re.I)
+MINOR = re.compile(r"(remove( item)?|delete item|apply( (voucher|code|coupon|gift card|promo( code)?|discount))?|edit|change|save|[+−–-]|"
+                   r"increase( quantity)?|decrease( quantity)?)", re.I)
+# One of several choices, possibly with its price: a time, a date, a delivery option.
+OPTION = re.compile(
+    r"(\d{1,2}([:.]\d{2})?( ?[ap]\.?m\.?)?( ?[-–] ?\d{1,2}([:.]\d{2})?( ?[ap]\.?m\.?)?)?|\d{1,2}|"
+    r"(mon|tue|wed|thu|fri|sat|sun)[a-z]*,? ?\d{0,2}( [a-z]{3,9})?|"
+    r"((free|standard|express|next[- ]day|same[- ]day|home|store|parcel|locker|economy|priority) )*(shipping|delivery|pick-?up|collection)|"
+    r"choose|select|select this|choose this)", re.I)
+DESTRUCTIVE = re.compile(r"delete|cancel|unsubscribe|remove|удалить|отменить|отписаться", re.I)
 GENERIC = re.compile(r"(yes|ok(ay)?|finish|done|save|confirm|agree|i agree|✓|✔|да|готово|ναι|kyllä|ja|oui)", re.I)
 
 
 def caption(text: str) -> str:
     """A caption without prices, counts in brackets and decoration."""
-    t = AMOUNT_RE.sub(" ", text)
+    t = unicodedata.normalize("NFKC", text)
+    t = AMOUNT_RE.sub(" ", t)
     t = re.sub(r"\(\s*\d*\s*\)", " ", t)
-    return re.sub(r"\s+", " ", t).strip(" -–—·•|→›»>:+.,\t")
+    return re.sub(r"\s+", " ", t).strip(" -–—·•|→›»>:+.,\t") or ("+" if t.strip() == "+" else "")
 
 
-def commits(g: dict) -> str | None:
+def mixed_scripts(text: str) -> bool:
+    """Letters of two alphabets in one word ("Рay" with a Cyrillic P): only ever a disguise."""
+    for word in re.findall(r"\w+", unicodedata.normalize("NFKC", text)):
+        scripts = {unicodedata.name(ch, "?").split(" ")[0] for ch in word if ch.isalpha()}
+        if len(scripts & {"LATIN", "CYRILLIC", "GREEK", "ARMENIAN", "CHEROKEE"}) > 1:
+            return True
+    return False
+
+
+def _all(rx: "tuple[re.Pattern, ...]", texts: list[str]) -> bool:
+    return bool(texts) and all(any(r.fullmatch(t) for r in rx) for t in texts)
+
+
+def priced_ok(raw: list[str], rules: "tuple[re.Pattern, ...]") -> bool:
+    """Captions that show a price are fine only when the rest is a known harmless one (never a bare price, never a
+    price in the middle of a word)."""
+    return all(not AMOUNT_RE.search(unicodedata.normalize("NFKC", t)) or
+               (any(r.fullmatch(caption(t)) for r in rules) and not re.search(r"[^\W\d_](€|\$|£)|(€|\$|£)\s?\d[\d.,]*[^\W\d_]", t))
+               for t in raw)
+
+
+def money_around(side: "CheckoutSide | None", totals: Any, frames: Any) -> str:
+    """Why money may be in play on this page ("" if not)."""
+    total = next((str(t.get("amount")) for t in totals or [] if _money(t)), None)
+    if total:
+        return f"shows a total to pay ({clean(total, 20)})"
+    psp = side.rules.psp_origins if side is not None else DEFAULT_PSP
+    if any(str(o) in psp or PAY_FRAME.search(str(o)) for o in frames or []):
+        return "has a payment form or wallet on it"
+    return ""
+
+
+def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
     """Why pressing this needs the owner ("order" / "commit"), from what it would really press; None if it doesn't."""
     raw = [t for t in g.get("texts") or [] if t]
     texts = [c for c in (caption(t) for t in raw) if c]
-    words = texts or ([] if raw else [caption(str(g.get("ident") or ""))])
-    harmless = bool(words) and all(HARMLESS.fullmatch(t) for t in words)
-    if not harmless:
-        # Harmless captions ("Continue to checkout") can contain such a word; every other one is checked.
-        rest = [t for t in words if not HARMLESS.fullmatch(t)]
-        if any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in rest):
-            return "order"
-        plain_link = g.get("tag") == "a" and g.get("kind") == "link" and str(g.get("dest") or "").startswith(
-            str(g.get("frame_origin") or "?") + "/")
+    words = texts or ([] if raw else [c for c in [caption(str(g.get("ident") or ""))] if c])
+    button = g.get("kind") in ("button", "link")
+    if any(mixed_scripts(t) for t in raw):
+        return "order"
+    known = (HARMLESS, STEP, MINOR, OPTION)
+    origin = str(g.get("frame_origin") or "?")
+    dest = str(g.get("dest") or "")
+    if g.get("submits") and dest and not dest.startswith((origin + "/", origin + "?")) and dest != origin:
+        return "commit"  # sends what is entered to another site
+    money = bool(money_around(side, g.get("totals"), g.get("frames")))
+    if g.get("filled") and money and button and not _all((HARMLESS,) if g.get("submits") else (HARMLESS, MINOR, OPTION), words):
+        # Something is entered and there is something to pay: any other button may be the one that orders.
+        bad = any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in words if not STEP.fullmatch(t))
+        return "order" if bad else "commit"
+    rest = [t for t in words if not any(r.fullmatch(t) for r in (HARMLESS, STEP))]
+    if any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in rest):
+        return "order"
+    if button and ((raw and not texts) or not priced_ok(raw, known)):
+        return "commit"  # only a price, or a price with something unknown
+    if rest:
+        here, there = str(g.get("href") or "").split("#")[0], dest.split("#")[0]
+        plain_link = (g.get("tag") == "a" and g.get("kind") == "link" and there.startswith(origin + "/") and there != here
+                      and not g.get("filled") and not DESTRUCTIVE.search(" ".join(rest)))
         if any(SUBMIT_BUTTON.search(t) for t in rest) and not plain_link and not g.get("search"):
             return "commit"
         if g.get("submits") and not g.get("search"):
             return "commit"
+    if not words and g.get("submits") and not g.get("search"):
+        return "commit"
     if g.get("filled") and g.get("kind") == "button" and (not raw or any(GENERIC.fullmatch(t) for t in texts)):
-        return "commit"  # the owner's details are in the page: an OK / Yes / unlabelled button may send them
+        return "commit"  # something is entered in the page: an OK / Yes / unlabelled button may send it
     return None
 
 
@@ -475,7 +539,7 @@ def _simple(cmd: str, *keys: str):
             # A plain click must not place an order (invoice, pay later, a saved card at the shop...): those buttons
             # go through `checkout pay`, or the owner presses them.
             g = await side.client.call({"cmd": "gate", "session": req["session"], "ref": a.get("ref")})
-            why = commits(g)
+            why = commits(g, side)
             shown = side.scrub(clean(next(iter(g.get("texts") or []), "") or "(no text)", 60))
             if why == "order":
                 raise ToolError(f"“{shown}” looks like it places the order. Card payments go through `checkout pay`; if "
@@ -748,29 +812,29 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
         raise ToolError("that button is in a frame without a real origin; refusing")
     if b.get("captcha"):
         raise ToolError("a captcha / bot check is showing: stop and tell the owner")
-    # Money never moves through here: no amounts, daily cap, totals check or purchase log as in `pay`. A step in between
-    # (an address, "Next") may show a total; the button that orders may not.
+    # Money never moves through here: no amounts, daily cap, totals check or purchase log as in `pay`. Where there is
+    # something to pay, only known harmless captions (a step, an option, a voucher) are pressed, whatever the language.
     press = b.get("press") or {}
-    pay = "this would pay or order for money: card payments go through `checkout pay`, anything else is the owner's to do"
+    pay = "card payments go through `checkout pay`, anything else that pays or orders is the owner's to do"
     captions = [str(t) for t in [*(press.get("texts") or []), str(button.get("label") or "")] if t]
     plain = [c for c in (caption(t) for t in captions) if c]
-    moves_on = bool(plain) and all(HARMLESS.fullmatch(t) for t in plain)
+    known = (HARMLESS, STEP, MINOR, OPTION)
+    moves_on = _all(known, plain) and priced_ok(captions, known)
+    if any(mixed_scripts(t) for t in captions):
+        raise ToolError("the button's text mixes alphabets (a disguise); refusing")
     if not moves_on and any(PAY_WORDS.search(t) for t in plain):
-        raise ToolError(pay)
-    if not moves_on and any(AMOUNT_RE.search(t) for t in captions):
-        raise ToolError("the button shows a price; " + pay)
+        raise ToolError("this would pay or order for money: " + pay)
+    if not moves_on and (any(AMOUNT_RE.search(t) for t in captions) or (captions and not plain)):
+        raise ToolError("the button shows a price: " + pay)
     in_frame = str(button.get("frame_origin") or "")
     if is_psp(in_frame, side.rules) or PAY_FRAME.search(in_frame):
-        raise ToolError("that button belongs to a payment provider; " + pay)
+        raise ToolError("that button belongs to a payment provider: " + pay)
     if b.get("risky_checked"):
         raise ToolError("untick the boxes that may add a subscription or cost first (or ask the owner): "
                         + "; ".join(side.scrub(clean(x, 60)) for x in b["risky_checked"][:3]))
-    total = next((str(t.get("amount")) for t in b.get("totals") or [] if _money(t)), None)
-    wallet = any(is_psp(str(o), side.rules) or PAY_FRAME.search(str(o)) for o in b.get("frames") or [])
-    vague = not plain or any(ORDER_BUTTON.search(t) or GENERIC.fullmatch(t) or SUBMIT_BUTTON.search(t) for t in plain)
-    if (total or wallet) and not moves_on and vague:
-        raise ToolError((f"the page shows a total to pay ({clean(total, 20)})" if total else
-                         "the page has a payment form or wallet on it") + " and this may be the order button; " + pay)
+    money = money_around(side, b.get("totals"), b.get("frames"))
+    if money and not moves_on:
+        raise ToolError(f"the page {money} and this may be the button that orders: {pay}")
     dest = str(press.get("dest") or "")
     m = re.match(r"https?://[^/?#]+", dest)
     if dest and not (m and m.group().startswith("https://")):
@@ -845,7 +909,7 @@ async def checkout_submit(s: Services, a: dict) -> Result:
     try:
         resp = await side.client.call({"cmd": "submit", "session": r["session"], "origin": r["origin"], "url": r["url"],
                                        "button": r["button"], "digest": r["digest"], "gen": r["gen"],
-                                       "press": r["press"], "frames": r["frames"], "seen": r["seen"],
+                                       "press": r["press"], "frames": r["frames"], "seen": r.get("seen"),
                                        "expect_totals": [{"amount": t.get("amount"), "currency": t.get("currency")}
                                                          for t in r["totals"]]}, timeout=90)
     except CheckoutRefused:
