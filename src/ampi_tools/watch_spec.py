@@ -635,9 +635,9 @@ def _step(s: Any, i: int, earlier: list[str], files: dict[str, bytes]) -> dict:
             out["template"] = t
         else:
             out["text"] = _str(s["text"], f"{where}.text", 4000, multiline=True)
-        out["format"] = s.get("format", "plain")
-        if out["format"] not in ("plain", "markdown"):
-            raise SpecError(f"{where}.format: plain or markdown")
+        out["format"] = s.get("format", "rich")
+        if out["format"] not in ("rich", "plain", "markdown"):
+            raise SpecError(f"{where}.format: rich, plain or markdown")
         out["timeout"] = 60.0
     else:  # web
         _only(s, common | {"url", "max_chars"}, where)

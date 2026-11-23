@@ -629,11 +629,12 @@ class ProfileBot:
         for name in files:
             await self._send_workspace_file(chat_id, thread_id, name)
 
-    async def _send_text(self, chat_id: int, thread_id: int, text: str, markdown: bool = True) -> None:
+    async def _send_text(self, chat_id: int, thread_id: int, text: str, markdown: bool = True,
+                         links: bool = True) -> None:
         for chunk in split_markdown(text):
             if markdown:
                 try:
-                    await self.api.send_message(chat_id, markdown_to_html(chunk), thread_id, parse_mode="HTML")
+                    await self.api.send_message(chat_id, markdown_to_html(chunk, links), thread_id, parse_mode="HTML")
                     continue
                 except TelegramError as e:
                     if e.error_code != 400:

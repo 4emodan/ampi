@@ -99,8 +99,9 @@ Common: `every_minutes`, `batch`, `ttl_minutes` (default a day), `latest_only` (
   Output: `text` (+ schema fields). Never `Bash(python…)`, shells or `env`. Agent steps aren't run in tests.
 - `adapter`: `op` (an ampi-tools operation, e.g. `gmail.show`, `todoist.add`, `telegram.send`), `args`. Output: the
   operation's reply (`text`, …). Reads run directly; changes are checked against what the owner approved.
-- `notify`: `template = "templates/x.txt"` or `text = "..."`, `format = "plain"` (default) or `"markdown"` (outside
-  text can't form links or code there). A message to the owner.
+- `notify`: `template = "templates/x.txt"` or `text = "..."`, `format = "rich"` (default: Markdown bold, lists,
+  headings, code; `[text](url)` stays as written, plain addresses work), `"markdown"` (your own `[text](url)` links
+  work; outside text is defanged, its addresses too) or `"plain"` (exactly as written). A message to the owner.
 - `web`: `url` (fixed https), `max_chars`. Output: `text`.
 Every step: `when = { path = "steps.x.field", equals | in | not_in | exists | true | false = ... }`,
 `on_error = "continue"`, `timeout`.
