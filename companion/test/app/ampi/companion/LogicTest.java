@@ -80,9 +80,25 @@ final class LogicTest {
         }
     }
 
+    static void texts() {
+        eq("line", "a b c", Texts.line(" a\nb\tc ", 20));
+        eq("bidi and zero width", "abc", Texts.line("a\u202eb\u200bc\u2066", 20));
+        eq("lines", "a\nb", Texts.lines("a\r\nb\n", 20));
+        eq("cut", "ab", Texts.line("abc", 2));
+        eq("emoji is one character", "\ud83d\ude00\ud83d\ude00", Texts.line("\ud83d\ude00\ud83d\ude00\ud83d\ude00", 2));
+        eq("lone surrogate", "ab", Texts.line("a\ud83db", 20));
+        eq("null", "", Texts.line(null, 2));
+    }
+
     public static void main(String[] a) throws Exception {
+        if (a.length > 0) {
+            System.out.println(Texts.pairCode("server".getBytes(), "phone".getBytes(), null));
+            System.out.println(Texts.pairCode("server".getBytes(), "phone".getBytes(), "key".getBytes()));
+            return;
+        }
         alarmTimes();
         frames();
+        texts();
         System.out.println(failed == 0 ? "ok" : failed + " failed");
         System.exit(failed == 0 ? 0 : 1);
     }
