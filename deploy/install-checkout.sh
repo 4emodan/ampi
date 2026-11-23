@@ -7,7 +7,7 @@
 #   ampicheckout     runs the engine (obscura serve on 127.0.0.1:19333), internet 80/443 only, no local addresses
 #   ampicheckoutctl  runs the controller, no internet, the only user allowed to reach the engine's port
 #   ampitools        (existing) the only member of group ampicheckoutctl-use, i.e. the only one who may use
-#                    /run/ampi-checkout.sock
+#                    /run/ampi-checkout.sock (and ampi-signin, whose unit gets the group: only to fill a login in)
 set -euo pipefail
 
 ENGINE_USER=ampicheckout
@@ -55,6 +55,8 @@ if [[ ! -f $CONF_DIR/resolvers ]]; then
 fi
 printf 'AMPI_CHECKOUT_CLIENT_UIDS=%s\nAMPI_CHECKOUT_ENGINE_UID=%s\n' "$(id -u "$TOOLS_USER")" "$(id -u "$ENGINE_USER")" \
   > "$CONF_DIR/ctl.env"
+# The sign-in service (deploy/install-phone.sh) may ask the controller to fill a login in, and for nothing else.
+if id ampisignin >/dev/null 2>&1; then printf 'AMPI_CHECKOUT_SIGNIN_UIDS=%s\n' "$(id -u ampisignin)" >> "$CONF_DIR/ctl.env"; fi
 chmod 644 "$CONF_DIR/resolvers" "$CONF_DIR/ctl.env"
 
 echo "==> systemd units"

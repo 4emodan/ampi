@@ -83,7 +83,8 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
 src/ampi_phone/         the phone gateway (user `ampiphone`, stdlib, socket-activated, no network of its own): mutual TLS
                         with the paired phone; `ampi-phone` (root) pairs and removes phones;
                         signin.py = ampi-signin (user `ampisignin`): has the phone unlock a saved login, over TLS of
-                        its own inside a connection the gateway only passes on
+                        its own inside a connection the gateway only passes on, and gives it to the checkout controller
+                        (bind_login / fill_login) for the site its page is really on
 companion/              the Android app: plain Java, no libraries, built by companion/build.ps1 with the SDK tools only;
                         scripts/companion.ps1 installs and pairs it over USB (docs/COMPANION.md)
 tests/                  pytest; fake claude CLI + fake Telegram API, no network

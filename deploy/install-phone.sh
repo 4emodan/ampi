@@ -33,6 +33,10 @@ if [[ ${1:-} == --uninstall ]]; then
   rm -rf "$LIB_DIR" "$CONF_DIR" "$SI_LIB" "$SI_CONF" /run/ampi-phone-vault /etc/tmpfiles.d/ampi-phone.conf
   userdel "$GW_USER" 2>/dev/null || true
   userdel "$SI_USER" 2>/dev/null || true
+  if [[ -f /etc/ampi-checkout/ctl.env ]]; then
+    sed -i '/^AMPI_CHECKOUT_SIGNIN_UIDS=/d' /etc/ampi-checkout/ctl.env
+    systemctl try-restart ampi-checkout.service || true
+  fi
   for g in "$USE_GROUP" ampisignin-use; do
     gpasswd -d "$TOOLS_USER" "$g" >/dev/null 2>&1 || true
     groupdel "$g" 2>/dev/null || true
@@ -52,8 +56,11 @@ for u in "$GW_USER" "$SI_USER"; do
   id "$u" >/dev/null 2>&1 || useradd --system --gid "$u" --no-create-home --home-dir /nonexistent \
     --shell /usr/sbin/nologin "$u"
 done
-# ampiphone-vault has no members: ampi-signin.service gets it as a supplementary group.
-getent group ampiphone-vault >/dev/null || groupadd --system ampiphone-vault
+# ampiphone-vault has no members: ampi-signin.service gets it as a supplementary group (and the checkout controller's, which
+# may not be installed yet).
+for g in ampiphone-vault ampicheckoutctl-use; do
+  getent group "$g" >/dev/null || groupadd --system "$g"
+done
 new_member=0
 for g in "$USE_GROUP" ampisignin-use; do
   getent group "$g" >/dev/null || groupadd --system "$g"
@@ -97,6 +104,14 @@ fi
 chmod 644 "$CONF_DIR/config.json"
 printf 'AMPI_PHONE_CLIENT_UIDS=%s\nAMPI_PHONE_VAULT_UIDS=%s\n' "$(id -u "$TOOLS_USER")" "$(id -u "$SI_USER")" > "$CONF_DIR/gateway.env"
 printf 'AMPI_SIGNIN_CLIENT_UIDS=%s\n' "$(id -u "$TOOLS_USER")" > "$SI_CONF/signin.env"
+# The checkout browser's controller fills logins in for the sign-in service (and does nothing else for it).
+ctl=/etc/ampi-checkout/ctl.env
+line="AMPI_CHECKOUT_SIGNIN_UIDS=$(id -u "$SI_USER")"
+if [[ -f $ctl ]] && ! grep -qx "$line" "$ctl"; then
+  sed -i '/^AMPI_CHECKOUT_SIGNIN_UIDS=/d' "$ctl"
+  printf '%s\n' "$line" >> "$ctl"
+  systemctl try-restart ampi-checkout.service || true
+fi
 
 echo "==> systemd units"
 # The socket is only restarted when its unit changed: while it listens, nobody else can take the port.
