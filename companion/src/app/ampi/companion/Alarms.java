@@ -311,6 +311,7 @@ final class Alarms {
             arm(c, a);
         } else {
             s.alarms.remove(a);
+            disarm(c, a);
         }
     }
 

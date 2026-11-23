@@ -135,10 +135,9 @@ public final class RingService extends Service {
             return START_STICKY;
         }
         boolean shown = show();  // a service started as a foreground one must show itself, even to stop
-        if (STOP.equals(action)) {
-            stopAll("stopped", false, false);
-        } else if (SNOOZE.equals(action)) {
-            stopAll("snoozed", true, false);
+        if (STOP.equals(action) || SNOOZE.equals(action)) {
+            if (texts().isEmpty()) takeOver();  // pressed after a kill, before Android started this again
+            stopAll(STOP.equals(action) ? "stopped" : "snoozed", SNOOZE.equals(action), false);
         } else if (SILENCE.equals(action)) {
             synchronized (ringing) {
                 ringing.remove(id);
@@ -147,13 +146,7 @@ public final class RingService extends Service {
             else changed();
         } else {
             // Restarted by Android after a crash while ringing: what was ringing rings on, if it may.
-            if (shown) {
-                for (Alarm a : Alarms.cutOff(this)) {
-                    synchronized (ringing) {
-                        ringing.put(a.id, a.text());
-                    }
-                }
-            }
+            if (shown) takeOver();
             Alarms.rearmAll(this);
             if (texts().isEmpty()) {
                 finish();
@@ -163,6 +156,15 @@ public final class RingService extends Service {
             }
         }
         return START_STICKY;
+    }
+
+    /** What was ringing when the app was killed. */
+    private void takeOver() {
+        for (Alarm a : Alarms.cutOff(this)) {
+            synchronized (ringing) {
+                ringing.put(a.id, a.text());
+            }
+        }
     }
 
     private void sound() {
