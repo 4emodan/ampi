@@ -975,10 +975,8 @@ def test_social_flag_survives_resumed_turns_until_new(sbot):
         assert call["tag"] == ("social", "personal")  # never a ("chat", …) tag: not the owner's words
         assert call["started"] is True and call["session_id"] == first["session_id"]  # --resume, a new process
         tools = call["allowed_tools"]
-        assert "Bash(instagram:*)" in tools and "Read" in tools
-        assert not any(t.startswith(("WebFetch", "WebSearch", "Edit", "Write")) or "browse" in t or "env" in t
-                       for t in tools)
-        assert {"WebFetch", "WebSearch", "Bash(browse:*)", "Edit", "Write", "NotebookEdit"} <= set(call["extra_denied"])
+        assert tools == ("mcp__social__instagram", "mcp__social__threads") and call["tools"] == ""
+        assert {"WebFetch", "WebSearch", "Bash", "Read", "Edit", "Write", "NotebookEdit"} <= set(call["extra_denied"])
         assert "social mode" in call["append_system_prompt"]
     run(bot.handle_message(msg("/status")))
     assert "Social mode: on" in api.sent[-1]["text"]
@@ -1066,12 +1064,12 @@ def test_refused_page_tokens_are_fetched_again_once_not_paused(web):
     assert [c.path for c in w.fake.calls].count("/") == 2 and w.th.auth.state() == "ok"
     w.fake.threads = lambda m, p, f: httpx.Response(200, text=stale.text) if p == "/graphql/query" else real(m, p, f)
     resp = ask(w, ("thweb.feed", {}))
-    assert not resp["ok"] and "refused the page tokens twice" in resp["error"] and w.th.auth.state() == "ok"
+    assert not resp["ok"] and w.th.auth.state() == "paused"  # fresh tokens refused as well
 
 
 @pytest.mark.parametrize("page,reason,text", [
     ('<html><a href="/accounts/login/">Log in</a></html>', "login_required", "confirm it's you"),
-    ("<html>Please use a supported browser</html>", "user_agent", "refuse non-browser clients"),
+    ("<html>Please use a supported browser</html>", "no_page_tokens", "the reason isn't known"),
 ])
 def test_a_page_without_tokens_pauses_once(web, page, reason, text):
     w = web()
@@ -1128,12 +1126,6 @@ def test_dm_watchers_may_only_summarize(extra, match):
         _spec(extra)
     assert _spec('[[steps]]\nid = "a"\ntype = "notify"\nformat = "markdown"\ntext = "{{steps.dms.text}}"\n')
 
-
-def test_defanged_text_has_no_clickable_addresses():
-    from assistant_bridge.watch.pipeline import defang_text
-    out = defang_text("go to https://evil.example/x or t.me/abc, www.site.com, [x](y) `code` tg:resolve")
-    assert "https://" not in out and "hxxps://" in out and "t(.)me" in out and "site(.)com" in out
-    assert "[" not in out and "`" not in out and "tg:" not in out
 
 
 def test_social_runs_get_no_permission_tool(sbot):
@@ -1208,12 +1200,4 @@ def test_refused_page_tokens_never_resend_a_change(web):
     out = approve(w)
     assert out["status"] == "failed" and "nothing was changed" in out["text"]
     assert sum(c.form.get("doc_id") == TH_DOCS["like"].doc_id for c in w.fake.calls) == 1
-    assert w.th.budget.hits["write"] == [] and w.th.auth.state() == "ok"
-
-
-def test_social_runs_keep_only_allow_listed_tools():
-    from assistant_bridge.bot import without_web
-    tools = ("Read", "Read(./**)", "Glob", "Grep", "Skill", "Bash(instagram:*)", "Bash(threads:*)", "Bash(curl:*)",
-             "Bash(todoist:*)", "mcp__web__fetch", "WebFetch", "Edit", "Bash", "Bash(info:*)", "Bash(instagram *)")
-    assert without_web(tools) == ("Read", "Read(./**)", "Glob", "Grep", "Skill", "Bash(instagram:*)",
-                                  "Bash(threads:*)")
+    assert len(w.th.budget.hits["write"]) == 1 and w.th.auth.state() == "ok"  # sent once, counted

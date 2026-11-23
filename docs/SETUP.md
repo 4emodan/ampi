@@ -308,8 +308,9 @@ never touches account settings. Only the requests listed in `src/ampi_tools/meta
    Paste each value when asked (nothing is shown as you paste). Ampi checks that the session is the account in
    `ds_user_id` (one request; never the endpoint that returns your email/phone), then saves it in
    `/home/ampitools/instagram-session.json` (mode 600). The running service picks it up without a restart.
-4. **Don't log out** in that browser (it would end this session too); just close the tab. Add
-   `"Bash(instagram:*)"` / `"Bash(threads:*)"` to `allowed_tools` if they aren't there yet.
+4. **Don't log out** in that browser (it would end this session too); just close the tab. Add exactly
+   `"Bash(instagram:*)"` / `"Bash(threads:*)"` to `allowed_tools` if they aren't there yet (other spellings don't
+   switch social mode on for that command).
 
 `ampi-tools check` shows each session (on / paused / cooling down). `ampi-tools instagram-session --forget`
 deletes the saved session; logging out of all sessions in the Instagram app ends it on Meta's side too.
@@ -328,12 +329,11 @@ Open the Instagram app (or website), do what it asks, then run
 
 Feeds, profiles, bios, captions, comments, replies and stories are written by strangers, so Ampi only reads them in
 a conversation that **can't use the web**: send `/social` in a topic of your private chat. From then on, until
-`/new` (or `/reset`), that conversation runs like a group, only stricter: no WebFetch, WebSearch or `browse`, no
-file edits (so nothing read there can plant instructions for later conversations); only reading tools
-(Read, Glob, Grep, Skill) and the `instagram`/`threads` commands are kept from your `allowed_tools`, no permission prompts (anything
-not allowed is simply denied, so a stranger's caption can't make you a target for "Approve?" buttons), and every
-action it asks for comes to you with a ⚠ ("asked for by a social-mode conversation"). Comments, likes and follows can
-only be asked for from a social conversation. In any other conversation Ampi answers
+`/new` (or `/reset`), that conversation has **only** the instagram and threads commands, as tools without a shell: no
+web, no files (it can't open your attachments, notes or other chats), no other services, no plans or `--text-file`, no
+permission prompts, and none of the profile's other rules or `extra_args`. Every action it asks for comes to you with a ⚠
+("asked for by a social-mode conversation"), and comments, likes and follows can only be asked for from there.
+In any other conversation Ampi answers
 that it can't read Instagram there and asks you to send `/social`. Only your own `/social` switches it on. Tip:
 keep one topic called "Social" for this.
 
@@ -352,9 +352,10 @@ DMs, search, saved posts, follower lists, posting media.
 ### Direct messages: only a watcher, never a chat
 
 Ampi never reads your DMs in a conversation. A watcher does: the daemon reads the inbox (no AI), a tool-less AI step
-summarizes the new messages as untrusted data, and the summary comes to your chat as a watcher message (links and
-code in it are defanged). Message requests and group chats you never wrote in are left out, nothing is marked as
-read, and it doesn't check at night (23:00-08:00 in your home timezone; change `quiet` in the file). To set it up:
+summarizes the new messages as untrusted data, and the summary comes to your chat as a watcher message (links, code,
+addresses, @names and /commands in it are broken up). Message requests and group chats you never wrote in are left out,
+nothing is marked as read, and it doesn't check at night (23:00-08:00 in your home timezone; change `quiet` in the file).
+To set it up:
 ```bash
 sudo -u assistant -H bash -c 'mkdir -p ~/profiles/personal/watchers && cp -r ~/app/templates/watchers-v2/instagram-dms ~/profiles/personal/watchers/'
 ```
@@ -364,8 +365,17 @@ and messages you); its test run uses made-up messages, not yours. It checks ever
 watcher reads an hour the session allows); `instagram dms` in chat, or **Run** in `/watcher instagram-dms`, checks
 now (Run in `/watcher` also during quiet hours; `instagram dms` from chat or social mode keeps quiet hours, and
 from social mode at most once per 10 minutes); the summary only ever goes to you.
-Each message is reported once: its small script (`scripts/new_only.py`, shown in the approval) remembers the last
-reported message per conversation. To stop it: `/watcher instagram-dms` → Pause or Delete.
+Messages count as reported only after the
+message to you was sent: if a run fails they are reported again (you may see some twice), not lost. A big backlog comes
+in several messages; when Instagram didn't send everything, the message says so and you look in the app.
+
+**What is kept.** Social conversations aren't written to `chats/`, long results are cut instead of saved, and their
+approval requests and results are visible only to social conversations (and you in Telegram). Runs of the DM watcher keep
+step names, times and statuses, no texts; its saved data is times and message ids; its AI call leaves no transcript. What
+does exist: the messages in your Telegram, the approval requests in `/home/ampitools/approvals.sqlite3`, and Claude Code's
+own session file of a social conversation under the assistant's `~/.claude` (needed to continue it, and not
+deleted by `/new`; Ampi's file rules block it, but a command you approve with a tap could read it). If you forward such a message to Ampi in another conversation, she reads it there.
+To stop it: `/watcher instagram-dms` → Pause or Delete.
 
 ### First session: what to check
 
@@ -377,8 +387,8 @@ its path, `doc_id` or name in `ENDPOINTS` / `TH_DOCS` / `IG_DOCS` in `meta_sessi
 "this … query isn't known yet: copy its doc_id from DevTools". That currently covers the Instagram home feed
 (`PolarisFeedRootPaginationCachedQuery_subscribe`) and, on Threads, the feed, looking up a username (so profiles,
 posts and follows), likes and follows. Entries marked `"stale"` are real but from 2023 and are sent; correct them if
-they fail. Don't change the user agent: if Meta's web endpoints refuse non-browser clients ("useragent mismatch",
-or a threads.com page without its tokens), the session stops by design.
+they fail. Don't change the user agent: if Meta's web endpoints refuse non-browser clients ("useragent mismatch"),
+the session stops by design. It also stops on a threads.com page without its tokens, whatever the reason.
 
 ## 8d. Web browser (optional)
 

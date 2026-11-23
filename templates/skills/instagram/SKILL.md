@@ -48,7 +48,7 @@ instagram stories                    who has stories now      instagram story US
 Changes, each approved by the owner in Telegram (exactly as shown, checked again before it runs):
 
 ```
-instagram comment LINK "TEXT" [--reply-to COMMENT_ID]   (or --text-file)
+instagram comment LINK "TEXT" [--reply-to COMMENT_ID]
 instagram like LINK [--comment ID]     instagram unlike LINK [--comment ID]
 instagram follow USER                  instagram unfollow USER
 instagram delete-comment COMMENT_ID --post LINK         the owner's own, or anyone's on the owner's posts
@@ -60,3 +60,5 @@ instagram delete-comment COMMENT_ID --post LINK         the owner's own, or anyo
 - Direct messages never come into a chat. `instagram dms` only starts the owner's DM watcher; its summary goes to
   the owner directly. You can't send DMs.
 - "Instagram wants you to confirm it's you…" means the session is paused: tell the owner, don't try another way.
+- In social mode there is no Bash: the `mcp__social__instagram` tool takes these arguments as a list. No `apply`, no
+  `--text-file`; long results are cut (use `-n`), nothing is saved or written to the chat logs.

@@ -43,8 +43,8 @@ model = "sonnet"
 # With the Telegram reader (docs/SETUP.md, section 7) also add "Skill" and "Bash(tg-read:*)";
 # with Todoist/Gmail (section 8) add "Bash(todoist:*)" and "Bash(gmail:*)"; with YouTube (8b) "Bash(youtube:*)";
 # with Threads/Instagram (8c) "Bash(threads:*)" / "Bash(instagram:*)" (with your own web session, 8c-2, they read
-# feeds, profiles and stories only in conversations you switch to /social mode: those run without WebFetch,
-# WebSearch and browse until /new); with the web browser (8d) "Bash(browse:*)"
+# feeds, profiles and stories only in conversations you switch to /social mode, which have those two commands and
+# nothing else until /new; write the rules exactly like this); with the web browser (8d) "Bash(browse:*)"
 # (watchers and groups never get browse, whatever is listed here); to write in Telegram as you (7b)
 # "Bash(telegram:*)" (what goes out without asking is set in /home/ampitools/config.toml).
 allowed_tools = ["Read", "Glob", "Grep", "Edit", "Write", "WebSearch", "WebFetch"]
