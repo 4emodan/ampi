@@ -496,7 +496,7 @@ class SigninSide:
     def __init__(self, s):
         self.s, self.calls = s, []
 
-    async def call(self, req):
+    async def call(self, req, timeout=None):
         self.calls.append(req)
         return self.s.handle(req, None)
 

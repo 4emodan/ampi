@@ -422,7 +422,7 @@ def test_holding_the_vault_socket_does_not_stop_phone_control(confs, certs):
 
 def test_a_broken_pairing_is_said(confs, certs):
     (confs[1] / "devices" / "phone.json").write_text("{")
-    assert signin.ask("example.com", None, confs[1], lambda: 1 / 0) == "failed"
+    assert signin.ask("example.com", None, confs[1], lambda: 1 / 0) == ("failed", None)
 
 
 @pytest.mark.parametrize("names,ok", [

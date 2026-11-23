@@ -147,13 +147,14 @@ final class VaultSession implements Runnable {
 
     private void handle(JSONObject m) {
         String host = m.optString("host");
-        if (m.optInt("v") != 1 || !"get".equals(m.optString("op")) || !"test".equals(m.optString("purpose"))) {
+        String purpose = m.optString("purpose");
+        if (m.optInt("v") != 1 || !"get".equals(m.optString("op")) || !(purpose.equals("test") || purpose.equals("fill"))) {
             send(Unlock.result("unsupported"));
         } else if (!Hosts.valid(host)) {
             send(Unlock.result("bad_request"));
         } else {
             int wait = Math.max(5, Math.min(MAX_WAIT, m.optInt("wait", MAX_WAIT)));
-            ask = Unlock.request(c, host, wait * 1000L, cfg.signin(), this::stillPaired, this::send);
+            ask = Unlock.request(c, host, purpose.equals("fill"), wait * 1000L, cfg.signin(), this::stillPaired, this::send);
         }
     }
 

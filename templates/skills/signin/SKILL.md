@@ -18,7 +18,7 @@ signin test example.com                                  only tests: the phone u
 
 1. `checkout open` the site's own sign-in page (web-actions skill) and take the refs of the user name field, the password
    field and the form's sign-in button from the snapshot. Press a "Log in" link or an "email" tab first if there is one.
-2. Tell the owner to look at their phone, then run `signin fill`. They have 75 seconds.
+2. Tell the owner to look at their phone, then run `signin fill` with the Bash tool's `timeout: 240000`. They have 75 seconds.
 3. Read the page that comes back. Signed in: go on with what they asked, as in web-actions (buttons that commit to something
    still ask the owner). Wrong password, a captcha, a code by email or phone, or "is this you?": stop, and tell them.
 

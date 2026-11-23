@@ -20,6 +20,7 @@ from .todoist import ToolError
 
 SOCKET = "/run/ampi-signin.sock"
 TIMEOUT = 106  # the service ends by itself after 100 s; Claude Code's commands after 120 s
+FILL_TIMEOUT = 200  # the phone, and the browser before and after it (the skill runs it with a longer timeout)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 HOST_RE = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])")
 AGAIN = "try again later"
@@ -31,7 +32,7 @@ WORDS = {
     "interrupted": "something on the phone came in between (such as an alarm); " + AGAIN,
     "ringing": "an alarm is ringing on the phone; " + AGAIN,
     "busy": "another sign-in request is open",
-    "paused": "the owner refused one less than a minute ago. Don't ask again unless they say so",
+    "paused": "the owner refused one a short while ago. Don't ask again unless they say so",
     "limit": "too many sign-in requests lately; " + AGAIN,
     "notifications_off": "sign-in notifications are switched off for Ampi on the phone",
     "no_fingerprint": "the phone can't check a fingerprint now",
@@ -56,7 +57,7 @@ class SigninClient:
     def __init__(self, path: str = SOCKET, timeout: float = TIMEOUT):
         self.path, self.timeout = path, timeout
 
-    async def call(self, req: dict) -> dict:
+    async def call(self, req: dict, timeout: float | None = None) -> dict:
         try:
             rd, wr = await asyncio.wait_for(asyncio.open_unix_connection(self.path), 5)
         except (FileNotFoundError, ConnectionRefusedError, AttributeError):
@@ -66,7 +67,7 @@ class SigninClient:
         try:
             wr.write(json.dumps(req).encode() + b"\n")
             await wr.drain()
-            resp = json.loads(await asyncio.wait_for(rd.readline(), self.timeout))
+            resp = json.loads(await asyncio.wait_for(rd.readline(), timeout or self.timeout))
         except (asyncio.TimeoutError, OSError, ValueError):
             raise ToolError("the sign-in service gave no answer") from None
         finally:
@@ -140,7 +141,7 @@ async def si_fill(s: Services, a: dict) -> Result:
     st = await side.client.call({"cmd": "status"})
     if not st.get("session"):
         raise ToolError("no checkout session; open the site's sign-in page with `checkout open URL`")
-    r = await client.call({"cmd": "fill", "session": st["session"], **{k: v for k, v in refs.items() if v}})
+    r = await client.call({"cmd": "fill", "session": st["session"], **{k: v for k, v in refs.items() if v}}, timeout=FILL_TIMEOUT)
     if r.get("ok") is not True:
         raise ToolError("not signed in: " + _why(r))
     if not r.get("pressed"):

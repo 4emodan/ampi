@@ -91,11 +91,13 @@ public final class UnlockActivity extends Activity {
     private void draw() {
         LinearLayout page = Ui.page(this);
         ((android.view.View) page.getParent()).setAccessibilityDataSensitive(android.view.View.ACCESSIBILITY_DATA_SENSITIVE_YES);
-        Ui.title(page, "Use a saved login?");
+        Ui.title(page, ask.fill ? "Sign in?" : "Use a saved login?");
         LinearLayout card = Ui.card(page);
         TextView host = Ui.add(card, ask.host, 26, Ui.accent(this));
         host.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
-        Ui.body(card, "Only a test: the login is unlocked here, and nothing of it is sent or filled in.");
+        Ui.body(card, ask.fill ? "Ampi's browser on your server has this site's sign-in page open. Your user name and password are "
+                + "filled in there. Ampi doesn't see them, and can then use your account there until the browser is closed."
+                : "Only a test: the login is unlocked here, and nothing of it is sent or filled in.");
         if (ask.choices.size() > 1) {
             Ui.small(card, "Which one?");
             for (Logins.Login l : ask.choices) {
@@ -145,7 +147,7 @@ public final class UnlockActivity extends Activity {
         stopPrompt();
         prompt = new CancellationSignal();
         new BiometricPrompt.Builder(this).setTitle(a.host).setSubtitle(l.label())
-                .setDescription("Test: nothing is sent or filled in").setConfirmationRequired(true)
+                .setDescription(a.fill ? "Sign in there" : "Test: nothing is sent or filled in").setConfirmationRequired(true)
                 .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 .setNegativeButton("Back", getMainExecutor(), (d, w) -> { })
                 .build().authenticate(new BiometricPrompt.CryptoObject(cipher), prompt, getMainExecutor(),
@@ -174,7 +176,7 @@ public final class UnlockActivity extends Activity {
         byte[] plain = null;
         try {
             plain = Logins.opened(cipher, l);
-            a.unlocked();
+            a.unlocked(l, plain);
         } catch (GeneralSecurityException | RuntimeException e) {
             Log.e("Ampi", "unlock", e);
             say("That login couldn't be opened. Try again; if it stays, delete it and add it again.");

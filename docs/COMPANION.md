@@ -127,11 +127,11 @@ accessibility or notification-reading permission.
 
 A lost phone: `ampi-phone remove NAME`.
 
-## Saved logins (phase B)
+## Saved logins and signing in (phases B and C1)
 
 The owner's logins exist **only on the phone**: the server has neither a key to them nor an encrypted copy. Unlocking one needs
-the owner's fingerprint there, every time. For now there is only a test (`signin test example.com`): the phone unlocks the login
-and says so, nothing of it is sent. Filling it into a page is phase C.
+the owner's fingerprint there, every time. `signin test example.com` only tests (nothing of the login is sent); `signin fill`
+signs in on the page open in the checkout browser.
 
 ```
 Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-signin.sock -->
@@ -165,28 +165,46 @@ Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-si
   exits when idle. Its own
   key proves who is asking; it opens nothing. Sandbox as the gateway's, plus: of /run it sees only the vault socket.
   Journal: outcomes, never sites.
-- **ampi-tools** (`ops_signin.py`): the private chat only. Outcomes become words from its own list.
+- **ampi-tools** (`ops_signin.py`): the private chat only. Outcomes become words from its own list (and the controller's own
+  sentences about a form).
 
-Inside the channel (4-byte length + JSON, 8 KB): `{"v":1,"op":"get","purpose":"test","host","wait"}` -> `{"asking":true}` then
-`{"ok":true}` or `{"ok":false,"error":CODE}`; anything else is answered `unsupported`.
+Inside the channel (4-byte length + JSON, 8 KB): `{"v":1,"op":"get","purpose":"test"|"fill","host","wait"}` -> `{"asking":true}`
+then `{"ok":true}` (fill: with `user`, `secret` and the login's `hosts`) or `{"ok":false,"error":CODE}`; anything else is answered
+`unsupported`.
+
+### Signing in on a page
+
+Ampi finds the fields and says which is which (`signin fill --user f0:3 --password f0:4 --press f0:5`); everything else happens
+without it:
+
+1. ampi-signin asks the checkout controller (`bind_login`; the controller lets this user ask for nothing else): which site is it?
+   The answer comes from the page itself: https, the main frame's real host, and the form must be one that signs in there: a real
+   password field (exactly one, not `new-password`), a user name field that looks like one, all in the same form, visible, the
+   form and its button send to the same host, and never with GET. No captcha on the page.
+2. ampi-signin asks the phone for exactly that host. The caller can't name one.
+3. The login goes ampi-signin -> controller (`fill_login`) only. The controller checks everything again (same document, same
+   elements, nothing done in between), fills, presses the button if one was given.
+4. From then on the password is cut out of everything the controller answers (as it is, URL- or HTML-written; a field it was put
+   into stays secret even when the page shows it as text), every button that sends something asks the owner as before, and the
+   engine is thrown away when the session closes.
+
+ampi-signin keeps a login only until it was filled in, or 3 minutes for the second page of the same browser session, on a host of
+the same login; then its process ends (Python can't wipe a string, the end of a process does). What the engine and the site's
+scripts see can't be limited: it is the site's own page. The site is as honest as the engine that reports it.
 
 Who could do what: the gateway (reached from the internet): delay. ampi-tools, or a tricked Ampi: make the phone ask (limited,
-it shows the site) and learn whether a login exists and was unlocked. ampi-signin or root: later, with filling, get the one login
-the owner approves, at that moment. Someone with the unlocked phone but not the finger: see sites and labels, delete.
+it shows the site), learn whether a login was unlocked, and, when the owner approves, use the signed-in page like any other (what
+commits to something still asks). ampi-signin or root: get the one login the owner approves, at that moment. Someone with the unlocked phone but not the finger: see sites and labels, delete.
 
-### What phase C must keep
+### Not yet
 
-- The site comes from the browser's controller (the real origin of the fields), never from Ampi; https, exact host.
-- The password only goes into a password field, the user name into the same form, the form's target and the top page are on the
-  same host, never a GET form; the value is kept out of every later answer ("show password" makes it a text field).
-- It goes ampi-signin -> controller only. For two-page logins ampi-signin holds it at most 3 minutes for that page, and exits
-  after it was used. (Strings can't be wiped in Python or Java; the process ends instead.)
-- One-time codes: an operation of their own where the owner types the code on the phone. Never a CAPTCHA.
+One-time codes (an operation of their own, where the owner types the code on the phone), sign-in forms inside frames, Google and
+the like, passkeys. Never a CAPTCHA.
 
 ## Order
 
 A. Gateway, `phone` command, app with notifications, alarms, timers, pairing (live). B. Saving and unlocking logins.
-C. Lightpanda engine + sign-in filling + prepaid bookings. D. Card payments on Lightpanda, confirmed in the app.
+C1. Signing in on a page. C2. Lightpanda engine, prepaid bookings. D. Card payments on Lightpanda, confirmed in the app.
 Each phase: skeptic review of the plan, build, security and correctness reviews, fixes, then the owner deploys.
 
 ## Release key

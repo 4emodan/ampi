@@ -12,10 +12,12 @@ import android.os.SystemClock;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,18 +31,20 @@ import java.util.function.Consumer;
 final class Unlock {
     private static final int NOTE = 3;
     private static final int PER_10_MIN = 6, PER_DAY = 30;
-    private static final long PAUSE = 60_000;
+    private static final long[] PAUSE = {60_000, 5 * 60_000, 30 * 60_000};  // after one refusal, two in a row, more
 
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static Ask current;
     private static Runnable watcher;
-    private static long refused = -PAUSE;  // elapsedRealtime
+    private static long refused;  // elapsedRealtime of the last refusal
+    private static int refusals;  // in a row
 
     private Unlock() {}
 
     /** One request. What it is about never changes. */
     static final class Ask {
         final String host, nonce;
+        final boolean fill;  // the login goes to the sign-in service (else only a test: nothing of it is sent)
         final List<Logins.Login> choices;
         final long deadline;  // elapsedRealtime
         private final Context app;
@@ -48,9 +52,11 @@ final class Unlock {
         private final Consumer<JSONObject> send;
         private boolean over;  // guarded by Unlock.class
 
-        private Ask(Context c, String host, List<Logins.Login> choices, long deadline, BooleanSupplier paired, Consumer<JSONObject> send) {
+        private Ask(Context c, String host, boolean fill, List<Logins.Login> choices, long deadline, BooleanSupplier paired,
+                    Consumer<JSONObject> send) {
             this.app = c.getApplicationContext();
             this.host = host;
+            this.fill = fill;
             this.nonce = Logins.newId();
             this.choices = choices;
             this.deadline = deadline;
@@ -92,25 +98,51 @@ final class Unlock {
             }
         }
 
-        /** The fingerprint was given and the login opened. */
-        void unlocked() {
-            String no = left() <= 0 ? "expired" : paired.getAsBoolean() ? null : "interrupted";
-            if (end()) answer(no);
+        /** The fingerprint was given and the login opened. Nothing of it is in an answer unless this decided the request,
+         *  in time, for a login that is still saved and the server it is paired with. */
+        void unlocked(Logins.Login l, byte[] plain) {
+            String no = left() <= 0 ? "expired" : paired.getAsBoolean() && stillSaved(l) ? null : "interrupted";
+            if (!end()) return;
+            if (no != null || !fill) {
+                if (no == null) calm();
+                answer(result(no));
+                return;
+            }
+            try {
+                JSONObject p = new JSONObject(new String(plain, StandardCharsets.UTF_8));
+                JSONObject o = result(null).put("user", p.getString("user")).put("secret", p.getString("secret"))
+                        .put("hosts", new JSONArray(l.hosts()));
+                calm();
+                answer(o);
+            } catch (JSONException e) {
+                answer(result("failed"));
+            }
+        }
+
+        private boolean stillSaved(Logins.Login l) {
+            try {
+                for (Logins.Login x : Logins.all(app)) if (x.id().equals(l.id())) return true;
+            } catch (IOException e) {
+                Log.e("Ampi", "logins", e);
+            }
+            return false;
         }
 
         void refuse() {
             synchronized (Unlock.class) {
-                if (!over) refused = SystemClock.elapsedRealtime();
+                if (!over) {
+                    refused = SystemClock.elapsedRealtime();
+                    refusals++;
+                }
             }
             end("denied");
         }
 
         void end(String why) {
-            if (end()) answer(why);
+            if (end()) answer(result(why));
         }
 
-        private void answer(String error) {
-            JSONObject o = result(error);
+        private void answer(JSONObject o) {
             new Thread(() -> send.accept(o), "ampi-answer").start();  // the network: not on the main thread
         }
     }
@@ -121,6 +153,10 @@ final class Unlock {
         } catch (JSONException e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    private static synchronized void calm() {
+        refusals = 0;
     }
 
     /** The one the owner can still decide, or null. */
@@ -158,7 +194,8 @@ final class Unlock {
     }
 
     /** Shows a request: answers why not, or "asking" and later the outcome. Not on the main thread. */
-    static Ask request(Context c, String host, long waitMs, byte[] signin, BooleanSupplier paired, Consumer<JSONObject> send) {
+    static Ask request(Context c, String host, boolean fill, long waitMs, byte[] signin, BooleanSupplier paired,
+                       Consumer<JSONObject> send) {
         Ask ask = null;
         String no;
         try {
@@ -168,7 +205,7 @@ final class Unlock {
             if (no == null) {
                 synchronized (Unlock.class) {
                     if (current != null) no = "busy";
-                    else current = ask = new Ask(c, host, List.copyOf(choices), SystemClock.elapsedRealtime() + waitMs, paired, send);
+                    else current = ask = new Ask(c, host, fill, List.copyOf(choices), SystemClock.elapsedRealtime() + waitMs, paired, send);
                 }
             }
         } catch (Logins.Gone e) {
@@ -206,7 +243,7 @@ final class Unlock {
             throws IOException, GeneralSecurityException, Logins.Gone {
         synchronized (Unlock.class) {
             if (current != null) return "busy";
-            if (SystemClock.elapsedRealtime() - refused < PAUSE) return "paused";
+            if (refusals > 0 && SystemClock.elapsedRealtime() - refused < PAUSE[Math.min(refusals, PAUSE.length) - 1]) return "paused";
         }
         if (!RingService.texts().isEmpty()) return "ringing";
         NotificationManager nm = c.getSystemService(NotificationManager.class);
