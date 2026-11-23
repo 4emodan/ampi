@@ -83,6 +83,9 @@ give_up() {
   echo "$1" >&2
   sed -i '/^AMPI_CHECKOUT_LP_UID=/d' "$CTL_ENV"
   systemctl stop ampi-checkout.service ampi-checkout-lp.service 2>/dev/null || true
+  # (Neither the controller's Wants= nor a later install-checkout.sh may bring it back.)
+  rm -f "$DIR/current" /etc/systemd/system/ampi-checkout-lp.service
+  systemctl daemon-reload
   exit 1
 }
 ask() {  # one request to the controller, as ampi-tools

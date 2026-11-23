@@ -469,6 +469,9 @@ final check.
    ```bash
    sudo bash deploy/install-lightpanda.sh        # removing it again: --uninstall
    ```
+
+   It doesn't know `sandbox` on frames or CSP: what a site shows inside such a frame (somebody's mail or comment as HTML) runs
+   as the site itself. So no sign-in on pages with one, and it isn't for mail or social accounts.
 2. Enter your details on the server, as a **personal info directory** of named entries: `me` (person), places
    (`home`, `work`, …), cards (`card-main`, …) and notes. Secret card values aren't shown as you type.
    ```bash
