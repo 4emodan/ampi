@@ -29,6 +29,8 @@ final class VaultSession implements Runnable {
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static final ArrayDeque<Long> opened = new ArrayDeque<>();  // elapsedRealtime
     private static VaultSession current;
+    private static Runnable next;  // a channel asked for while an older one was still ending
+    private static long nextUntil;
 
     private final Context c;
     private final Config cfg;
@@ -53,11 +55,13 @@ final class VaultSession implements Runnable {
      *  limits are this phone's own: a flood must not cost more than this. */
     static synchronized void open(Context c, Config cfg, String ch) {
         if (cfg.signin().length == 0 || !ch.matches("[0-9a-f]{32}")) return;
+        long now = SystemClock.elapsedRealtime();
         if (current != null) {
-            current.closeRaw();
+            if (next == null) current.closeRaw();  // (once)
+            next = () -> open(c, cfg, ch);
+            nextUntil = now + 8_000;  // the gateway waits 12 s
             return;
         }
-        long now = SystemClock.elapsedRealtime();
         while (!opened.isEmpty() && opened.peekFirst() <= now - 3600_000L) opened.removeFirst();
         if (opened.size() >= PER_HOUR || opened.stream().filter(t -> t > now - 60_000L).count() >= PER_MINUTE) return;
         opened.addLast(now);
@@ -139,6 +143,9 @@ final class VaultSession implements Runnable {
                 closeRaw();
                 synchronized (VaultSession.class) {
                     if (current == this) current = null;
+                    Runnable n = next;
+                    next = null;
+                    if (n != null && SystemClock.elapsedRealtime() < nextUntil) n.run();
                 }
                 if (lock.isHeld()) lock.release();
             }

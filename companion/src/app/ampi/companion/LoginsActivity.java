@@ -98,7 +98,10 @@ public final class LoginsActivity extends Activity {
                 Ui.body(card, e.getMessage());
                 Ui.button(card, "Delete all", true, v -> deleteAll());
             } catch (GeneralSecurityException | RuntimeException e) {
-                Log.w("Ampi", "logins", e);  // perhaps only now; using one says more
+                Log.w("Ampi", "logins", e);
+                LinearLayout card = Ui.card(page);
+                Ui.body(card, "The key to the saved logins can't be reached right now. If that stays so, delete them all and add them again.");
+                Ui.button(card, "Delete all", false, v -> deleteAll());
             }
         }
         for (Logins.Login l : all) {
