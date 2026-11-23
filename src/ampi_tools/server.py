@@ -47,7 +47,7 @@ from .keeper import (
 from .todoist import Todoist, ToolError
 from . import ops_social
 from . import meta_session
-from .ops_social_session import SOCIAL_ORIGIN, check_origin as check_social_origin
+from .ops_social_session import SOCIAL_ORIGIN, check_origin as check_social_origin, clip, is_social_request
 from .maps import LATLNG_RE, Maps, latlng, zone
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
@@ -183,7 +183,10 @@ class Daemon:
                     raise ToolError("youtube.ids/youtube.show are for watchers; use `youtube feed` / `youtube video`")
                 # Where the request really comes from: the claude run it descends from (never what it says).
                 origin = self.runs.origin_of(pid)
-                return self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin), ops)
+                resp = self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin), ops)
+                if origin == SOCIAL_ORIGIN and isinstance(resp.get("text"), str):
+                    resp["text"] = clip(resp["text"])
+                return resp
             if cmd == "home.timezone":
                 # Only the bridge (schedules); Ampi never asks for it.
                 side = self.services.checkout_side
@@ -208,8 +211,11 @@ class Daemon:
                 return {"ok": True, **{k: bool(c is not None and c.configured()) for k, c in (
                     ("instagram", self.services.igweb_client), ("threads", self.services.thweb_client))}}
             if cmd == "approvals.list":
-                return {"ok": True, "text": self.list_text()}
+                return {"ok": True, "text": self.list_text(self.runs.origin_of(pid))}
             if cmd == "approvals.status":
+                row = self.approvals.get(_int(request.get("id")))
+                if row is not None and not self._may_see(row, self.runs.origin_of(pid)) and not await self.trusted(pid):
+                    raise ToolError("no such request")
                 return self.status_of(_int(request.get("id")))
             if cmd == "approvals.pending":
                 store = self.tg_store
@@ -224,13 +230,17 @@ class Daemon:
                 return {"ok": True}
             if cmd == "approvals.decide":
                 choice = request.get("choice")
-                return await self.decide(
+                resp = await self.decide(
                     _int(request.get("id")), request.get("approve") is True,
                     str(request.get("nonce") or ""), _opt_int(request.get("message_id")),
                     always=request.get("always") is True,
                     choice=choice if isinstance(choice, str) else None,
                     confirmed=request.get("confirmed") is True,
                 )
+                row = self.approvals.get(_int(request.get("id")))
+                if row is not None and is_social_request(row):
+                    resp["social"] = True  # the bridge keeps it out of the chat logs
+                return resp
             if cmd == "runs.register":
                 origin = request.get("origin")
                 if not isinstance(origin, str) or not (
@@ -307,6 +317,8 @@ class Daemon:
                 ask = needs_approval(self.services, o, origin)  # also refuses "never" chats
                 if ask or o["op"] in self.policy.require_approval:
                     critical = True
+            elif origin == SOCIAL_ORIGIN and OPS[o["op"]].critical:
+                critical = True  # no relaxations for a run that reads strangers' text
             elif self.policy.critical(o["op"]) or await shares_with_others(self.services, o):
                 critical = True
         if critical:
@@ -346,7 +358,7 @@ class Daemon:
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
             if ops[0]["op"] == "checkout.pay" and self._pending_pay():  # again: another may have arrived meanwhile
                 raise ToolError("a payment is already waiting for the owner's answer")
-            approval_id = self.approvals.add(ops, summary, reason, grants)
+            approval_id = self.approvals.add(ops, summary, reason, grants, meta={"origin": origin})
             for o in telegram:
                 if o["op"] == "telegram.send":  # the duplicate guard also sees requests that are waiting
                     note_requested(self.services, o)
@@ -1009,8 +1021,13 @@ class Daemon:
             raise ToolError("no such request")
         return {"ok": True, "status": row["status"], "text": self._mask_obj((row.get("result") or "")[:2000], "all")}
 
-    def list_text(self) -> str:
-        rows = self.approvals.recent(10)
+    @staticmethod
+    def _may_see(row: dict, origin: str) -> bool:
+        """Social requests only for social runs (exactly), and social runs see nothing else."""
+        return is_social_request(row) == (origin == SOCIAL_ORIGIN)
+
+    def list_text(self, origin: str = "unknown") -> str:
+        rows = [r for r in self.approvals.recent(100) if self._may_see(r, origin)][:10]
         if not rows:
             return "No approval requests yet."
         return self._mask_obj("\n".join(

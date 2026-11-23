@@ -1302,7 +1302,7 @@ class Approvals:
     def unnotified(self) -> list[dict]:
         self.expire()
         rows = self.db.execute(
-            "SELECT id, summary, reason, nonce, created, grants, kind, choices, confirm_keys FROM approvals "
+            "SELECT id, summary, reason, nonce, created, grants, kind, choices, confirm_keys, ops, meta FROM approvals "
             "WHERE status='pending' AND notified=0 ORDER BY id"
         )
         out = []
@@ -1312,6 +1312,8 @@ class Approvals:
                 value = json.loads(item.pop(key) or "null")
                 if value:
                     item[key] = value
+            if ops_social_session.is_social_request({"ops": item.pop("ops"), "meta": item.pop("meta")}):
+                item["social"] = True
             if not item.get("kind"):
                 item.pop("kind", None)
             grants = json.loads(item.pop("grants") or "null")

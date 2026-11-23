@@ -46,14 +46,42 @@ OTHER_REFUSAL = ("Instagram and Threads content can only be read in a conversati
                  "(/social in their private chat), not from here.")
 WRITE_REFUSAL = ("Instagram and Threads changes (comments, likes, follows) can only be asked for from a conversation the "
                  "owner switched to social mode (/social in their private chat).")
+SOCIAL_ONLY = ("in social mode only Instagram and Threads are available (one action at a time); other services, plans "
+               "and personal info need another conversation")
 DM_REFUSAL = ("Instagram direct messages are read only by the owner's DM watcher (the owner can run it with "
               "`instagram dms`); they never come into a chat.")
+
+
+MAX_SOCIAL_TEXT = 15_000  # more would end up in a file (the client's, or Claude Code's own for long tool output)
+
+
+def is_social_request(row: dict) -> bool:
+    """An approval request that came from a social conversation, or is for the web session (older rows too): its
+    summary and result quote strangers, so only social runs (and the bridge) see it."""
+    import json
+    try:
+        meta = json.loads(row.get("meta") or "{}")
+        ops = json.loads(row.get("ops") or "[]")
+    except ValueError:
+        return True
+    return (isinstance(meta, dict) and meta.get("origin") == SOCIAL_ORIGIN) or any(
+        str(o.get("op", "")).startswith(("igweb.", "thweb.")) for o in ops)
+
+
+def clip(text: str) -> str:
+    if len(text) <= MAX_SOCIAL_TEXT:
+        return text
+    cut = text[:MAX_SOCIAL_TEXT].rsplit("\n", 1)[0]
+    return cut + "\n[cut here: nothing is saved in social mode; ask for fewer items with -n]"
 
 
 def check_origin(ops: list[dict], origin: str, via: str) -> None:
     """`via` is the daemon command: "run" (a chat or agent run's tool call) or "watch.run" (a watcher's own step).
     Reads and writes: exactly a social conversation (a write's approval text quotes captions, comments and names,
     and goes back to the calling run). DMs: only watcher steps."""
+    if via == "run" and origin == SOCIAL_ORIGIN and (
+            len(ops) != 1 or not ops[0]["op"].startswith(("igweb.", "thweb.", "instagram.", "threads."))):
+        raise ToolError(SOCIAL_ONLY)
     for o in ops:
         op = o["op"]
         if op in DM_OPS:
@@ -383,7 +411,8 @@ async def ig_inbox(s: Services, a: dict) -> Result:
     if not threads:
         return {"text": "No new direct messages.", "key": "", "count": 0, "threads": [], "stop": True}
     return {"text": _done(social_dm.inbox_text(threads)), "key": social_dm.inbox_key(threads), "count": len(threads),
-            "threads": social_dm.redact_threads(threads, _done)}
+            "threads": social_dm.redact_threads(threads, _done),
+            "more_threads": social_dm.more_threads(data, threads)}
 
 
 async def ig_dm(s: Services, a: dict) -> Result:
@@ -517,20 +546,49 @@ def _ig_media_target(m: dict) -> dict:
 
 def _ig_comment_target(cm: dict) -> dict:
     u = _user(cm)
-    return {"id": _pk(cm), "user_id": u["id"], "username": u["username"], "text": str(cm.get("text") or "")}
+    parent = str(cm.get("parent_comment_id") or "")
+    return {"id": _pk(cm), "user_id": u["id"], "username": u["username"], "text": str(cm.get("text") or ""),
+            "parent": parent if ID_RE.fullmatch(parent) else None}
 
 
 COMMENT_PAGES = 5      # newest comments first; older ones beyond ~5 pages aren't searched
 CHILD_LOOKUPS = 10     # top comments whose replies are searched
 
 
-async def _find_comment(c: WebClient, media_id: str, comment_id: str) -> dict:
-    """A comment by id: in the post's comment pages, then among the replies to them (both bounded)."""
+def _next_page(data: Any) -> tuple[str, str] | None:
+    """(parameter, cursor) of the next page of comments. GUESS: the web app's "headload" pages go on with
+    next_min_id, ordinary ones with next_max_id (or next_min_id when that's all there is)."""
+    if not isinstance(data, dict):
+        return None
+    tries = []
+    if data.get("has_more_headload_comments"):
+        tries.append("min_id")
+    if data.get("has_more_comments"):
+        tries += ["max_id", "min_id"]
+    return next(((k, v) for k in tries if isinstance(v := data.get(f"next_{k}"), str) and v), None)
+
+
+async def _find_reply(c: WebClient, media_id: str, parent: str, comment_id: str) -> dict | None:
+    data = await c.call("ig.child_comments", ids={"media": media_id, "comment": parent})
+    for cm in (data.get("child_comments") or []) if isinstance(data, dict) else []:
+        if isinstance(cm, dict) and _pk(cm) == comment_id:
+            return {**cm, "parent_comment_id": parent}
+    return None
+
+
+async def _find_comment(c: WebClient, media_id: str, comment_id: str, parent: str | None = None) -> dict:
+    """A comment by id: under its known parent first, then in the post's comment pages, then among the replies to
+    them (all bounded)."""
+    if parent:
+        found = await _find_reply(c, media_id, parent, comment_id)
+        if found:
+            return found
     parents: list[str] = []
-    cursor = None
+    cursor: tuple[str, str] | None = None
+    done: set[tuple[str, str]] = set()
     for _ in range(COMMENT_PAGES):
         data = await c.call("ig.media_comments", ids={"media": media_id},
-                            params={"min_id": cursor} if cursor else None)
+                            params=dict([cursor]) if cursor else None)
         page = [x for x in (data.get("comments") or []) if isinstance(x, dict)] if isinstance(data, dict) else []
         for cm in page:
             if _pk(cm) == comment_id:
@@ -539,15 +597,15 @@ async def _find_comment(c: WebClient, media_id: str, comment_id: str) -> dict:
                 parents.append(_pk(cm))
             for child in cm.get("preview_child_comments") or []:
                 if isinstance(child, dict) and _pk(child) == comment_id:
-                    return child
-        cursor = data.get("next_min_id") if isinstance(data, dict) and data.get("has_more_comments") else None
-        if not cursor or not isinstance(cursor, str):
+                    return {**child, "parent_comment_id": _pk(cm)}
+        cursor = _next_page(data)
+        if cursor is None or cursor in done:
             break
-    for parent in parents[:CHILD_LOOKUPS]:
-        data = await c.call("ig.child_comments", ids={"media": media_id, "comment": parent})
-        for cm in (data.get("child_comments") or []) if isinstance(data, dict) else []:
-            if isinstance(cm, dict) and _pk(cm) == comment_id:
-                return cm
+        done.add(cursor)
+    for p in [x for x in parents if x != parent][:CHILD_LOOKUPS]:
+        found = await _find_reply(c, media_id, p, comment_id)
+        if found:
+            return found
     raise ToolError("that comment wasn't found on the post (deleted, or too far down)")
 
 
@@ -577,7 +635,8 @@ async def ig_comment(s: Services, a: dict) -> Result:
     r = a.get("resolved") or await _prepare_ig_comment(s, a)
     _same_media(r["media"], _ig_media_target(await _ig_media(c, f"id:{r['media']['id']}")))
     if r["parent"]:
-        _same_comment(r["parent"], _ig_comment_target(await _find_comment(c, r["media"]["id"], r["parent"]["id"])))
+        _same_comment(r["parent"], _ig_comment_target(await _find_comment(c, r["media"]["id"], r["parent"]["id"],
+                                                                r["parent"].get("parent"))))
     form = {"comment_text": r["text"]}
     if r["parent"]:
         form["replied_to_comment_id"] = r["parent"]["id"]
@@ -615,7 +674,8 @@ def _ig_like_op(like: bool):
         r = a.get("resolved") or await _prepare_ig_like(s, a)
         _same_media(r["media"], _ig_media_target(await _ig_media(c, f"id:{r['media']['id']}")))
         if r["comment"]:
-            _same_comment(r["comment"], _ig_comment_target(await _find_comment(c, r["media"]["id"], r["comment"]["id"])))
+            _same_comment(r["comment"], _ig_comment_target(await _find_comment(c, r["media"]["id"], r["comment"]["id"],
+                                                                r["comment"].get("parent"))))
             await c.call("ig.comment_like" if like else "ig.comment_unlike", ids={"comment": r["comment"]["id"]})
             what = f"@{r['comment']['username']}'s comment"
         else:
@@ -679,7 +739,8 @@ async def ig_delete_comment(s: Services, a: dict) -> Result:
     c = igw(s)
     r = a.get("resolved") or await _prepare_ig_delete_comment(s, a)
     _same_media(r["media"], _ig_media_target(await _ig_media(c, f"id:{r['media']['id']}")))
-    _same_comment(r["comment"], _ig_comment_target(await _find_comment(c, r["media"]["id"], r["comment"]["id"])))
+    _same_comment(r["comment"], _ig_comment_target(await _find_comment(c, r["media"]["id"], r["comment"]["id"],
+                                                                r["comment"].get("parent"))))
     await c.call("ig.comment_delete", ids={"media": r["media"]["id"], "comment": r["comment"]["id"]})
     return f"Deleted @{r['comment']['username']}'s comment on Instagram."
 

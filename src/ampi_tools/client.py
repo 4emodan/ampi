@@ -786,11 +786,15 @@ def instagram_ops(a: argparse.Namespace) -> list[dict]:
     raise SystemExit(f"unknown command {c}")
 
 
+def in_social_mode() -> bool:
+    return os.environ.get("AMPI_ORIGIN") == "forwarded:social"
+
+
 def _web_session(service: str) -> bool:
     """Whether post links go through the owner's web session: only in a social-mode conversation (AMPI_ORIGIN; the
     daemon decides that from the process tree anyway) and only if a session is saved. Everywhere else the official
     API keeps working as before."""
-    if os.environ.get("AMPI_ORIGIN") != "forwarded:social":
+    if not in_social_mode():
         return False
     try:
         return bool(request({"cmd": "social.sessions"}).get(service))
@@ -824,6 +828,9 @@ DM_WATCHER = "instagram-dms"
 
 def _main(prog: str, parser: argparse.ArgumentParser, to_ops, argv: list[str] | None) -> int:
     args = parser.parse_args(argv)
+    social = prog in ("instagram", "threads") and in_social_mode()
+    if social and (args.cmd == "apply" or getattr(args, "text_file", None)):
+        raise SystemExit(f"{prog}: plans and --text-file aren't available in social mode; give the text directly")
     if prog == "instagram" and args.cmd == "dms":
         # Direct messages never come into a chat: this only starts the owner's DM watcher, whose summary goes to them.
         response = _watcher_run(DM_WATCHER)
@@ -841,7 +848,11 @@ def _main(prog: str, parser: argparse.ArgumentParser, to_ops, argv: list[str] | 
     if not response.get("ok"):
         print(f"{prog}: {response.get('error', 'failed')}", file=sys.stderr)
         return 1
-    print(deliver(response.get("text", "") or "Done.", None, f"{prog}-{args.cmd}", save_dir=Path(prog)))
+    text = response.get("text", "") or "Done."
+    if social:  # never saved to a file: later conversations (with the web) could read it there
+        print(text if len(text) <= 20_000 else text[:20_000] + "\n[cut here: ask for fewer items with -n]")
+        return 0
+    print(deliver(text, None, f"{prog}-{args.cmd}", save_dir=Path(prog)))
     return 0
 
 
