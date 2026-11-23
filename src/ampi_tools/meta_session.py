@@ -286,13 +286,17 @@ class SessionAuth:
         """Raises while paused or cooling down (the file is shared: the watchers stop too)."""
         d = self.load()
         if d.get("state") == "paused":
-            if d.get("paused_reason") == "user_agent":
-                raise ToolError(UA_TEXT.format(name=self.s.name, command=self.s.command))
-            raise ToolError(self.s.paused_text)
+            raise ToolError(self.paused_text())
         left = float(d.get("cooldown_until") or 0) - self.clock()
         if left > 0:
             raise ToolError(f"{self.s.name} asked to slow down; paused for {int(left // 60) + 1} more minute(s). "
                             "Don't try another way.")
+
+    def paused_text(self) -> str:
+        """Why it's paused, as far as that's known (never text from the service)."""
+        text = {"user_agent": UA_TEXT, "no_page_tokens": NEUTRAL_TEXT, "stale_tokens": NEUTRAL_TEXT}.get(
+            self.load().get("paused_reason"))
+        return text.format(name=self.s.name, command=self.s.command) if text else self.s.paused_text
 
     def pause(self, reason: str) -> None:
         """Until the owner resumes. One Telegram notice, on the change only."""
@@ -303,8 +307,9 @@ class SessionAuth:
         self.save(d)
         log.warning("%s session paused (%s)", self.s.name, reason)
         if self.notify is not None:
-            self.notify(UA_NOTICE.format(name=self.s.name, command=self.s.command) if reason == "user_agent"
-                        else PAUSE_NOTICE.format(name=self.s.name, command=self.s.command))
+            notice = {"user_agent": UA_NOTICE, "no_page_tokens": NEUTRAL_NOTICE,
+                      "stale_tokens": NEUTRAL_NOTICE}.get(reason, PAUSE_NOTICE)
+            self.notify(notice.format(name=self.s.name, command=self.s.command))
 
     def cool_down(self) -> None:
         d = self.load()
@@ -364,6 +369,10 @@ COOLDOWN_NOTICE = "⚠️ {name} asked Ampi to slow down: no {name} requests for
 UA_TEXT = ("{name}'s web endpoints refuse non-browser clients (they refused the assistant's honest user agent), and "
            "Ampi doesn't pretend to be a browser, so the {name} session is stopped (`ampi-tools {command} --resume` "
            "only if that changes)")
+NEUTRAL_TEXT = ("{name} didn't give a usable logged-in page, so the {name} session is stopped; the reason isn't known "
+                "(logged out, or the site changed). Check {name} in your browser, then `ampi-tools {command} --resume`")
+NEUTRAL_NOTICE = ("⚠️ {name} didn't give Ampi a usable logged-in page (logged out, or the site changed), so the {name} "
+                  "session is stopped. Check it in your browser, then run `ampi-tools {command} --resume` on the server.")
 UA_NOTICE = ("⚠️ {name}'s web endpoints refuse non-browser clients: they refused Ampi's honest user agent, so the "
              "{name} session is stopped. Ampi won't pretend to be a browser.")
 
@@ -409,16 +418,7 @@ class Budget:
             raise ToolError(f"the {name} limit for reads is used up ({READS_PER_DAY} a day); try again tomorrow")
         for kind in kinds:
             self.hits[kind].append(now)
-        self._last = (kinds, now)
-        self._save()
-
-    def refund_last(self) -> None:
-        kinds, at = getattr(self, "_last", ((), None))
-        for kind in kinds:
-            if at in self.hits[kind]:
-                self.hits[kind].remove(at)
-        self._last = ((), None)
-        self._save()
+        self._save()  # every request sent counts, refused or not
 
     def _save(self) -> None:
         if self.path is not None:
@@ -456,17 +456,20 @@ def pk_to_shortcode(pk: str | int) -> str:
 
 
 _CHALLENGES = ("checkpoint_required", "challenge_required", "login_required")
-_LOGIN_MARKERS = ("/accounts/login", '"is_logged_in":false', 'id="loginForm"', '"viewer":null')
+_LOGIN_MARKERS = ("/accounts/login", '"is_logged_in":false', 'id="loginForm"')
+# Whole phrases only: "This link has expired" or "Blog in maintenance" are not about the login.
+_LOGIN_RE = re.compile(r"\bnot logged in\b|\blog ?in (?:is )?required\b|\bplease log ?in\b|\b(?:login|session) (?:has )?"
+                       r"expired\b|\byou must log ?in\b|\blog in to continue\b", re.I)
 HOME = {"instagram": "ig.home", "threads": "th.home"}
 
 
 class _StaleTokens(Exception):
-    """The page tokens (fb_dtsg/lsd) were refused (Meta error 1357004): fetch them once more (reads only), never a
-    pause."""
+    """The page tokens (fb_dtsg/lsd) were refused (Meta error 1357004 on a GraphQL request)."""
 
-    def __init__(self, cls: str):
+    def __init__(self, cls: str, tokens: dict):
         super().__init__(cls)
         self.cls = cls
+        self.tokens = tokens
 _SLOW_DOWN = ("feedback_required", "please wait a few minutes", "rate_limit")
 
 
@@ -486,6 +489,8 @@ class WebClient:
         self._last = -1e9
         self.budget = Budget(usage, auth.clock)
         self._tokens: dict[str, Any] = {}
+        self._token_lock = asyncio.Lock()  # one token fetch at a time; waiting callers share its result
+        self._stale: list[dict] = []  # token sets refused in a row (several callers may have used the same set)
 
     def configured(self) -> bool:
         return self.auth.configured()
@@ -493,20 +498,23 @@ class WebClient:
     async def call(self, name: str, *, ids: dict[str, str] | None = None, params: dict | None = None,
                    form: dict | None = None, doc: str | None = None, variables: dict | None = None,
                    watch: bool = False) -> Any:
-        try:
-            return await self._call(name, ids, params, form, doc, variables, watch)
-        except _StaleTokens as e:
-            self._tokens = {}
-            self.budget.refund_last()  # a refused attempt doesn't count
-            if e.cls != "read":  # a change is never sent twice
-                raise ToolError(f"{self.s.name} refused the page tokens; nothing was changed. Ask again in a "
-                                "moment.") from None
-        try:
-            return await self._call(name, ids, params, form, doc, variables, watch)
-        except _StaleTokens:
-            self._tokens = {}
-            self.budget.refund_last()
-            raise ToolError(f"{self.s.name} refused the page tokens twice; try again later") from None
+        for attempt in (1, 2):
+            try:
+                return await self._call(name, ids, params, form, doc, variables, watch)
+            except _StaleTokens as e:
+                if not any(t is e.tokens for t in self._stale):
+                    self._stale.append(e.tokens)
+                if self._tokens is e.tokens:  # not if another caller already fetched newer ones
+                    self._tokens = {}
+                if len(self._stale) >= 2:  # fresh tokens refused too
+                    self._stale.clear()
+                    self.auth.pause("stale_tokens")
+                    raise ToolError(self.auth.paused_text()) from None
+                if e.cls != "read":  # a change is never sent twice
+                    raise ToolError(f"{self.s.name} refused the page tokens; nothing was changed. Ask again in a "
+                                    "moment.") from None
+                if attempt == 2:
+                    raise ToolError(f"{self.s.name} refused the page tokens; try again later") from None
 
     async def _call(self, name: str, ids: dict[str, str] | None, params: dict | None, form: dict | None,
                     doc: str | None, variables: dict | None, watch: bool) -> Any:
@@ -537,15 +545,18 @@ class WebClient:
             raise ToolError(f"refusing {self.s.name} request outside the allow-list")
         self.auth.check()
         cookies = self.auth.cookies()
+        tokens: dict = {}
         if ep.kind == "graphql":
-            form = {**(await self._graphql_form(cookies)), "fb_api_caller_class": "RelayModern",
+            tokens = await self._page_tokens()
+            cookies = self.auth.cookies()  # fetching the page may have rotated some
+            form = {**_token_form(cookies, tokens), "fb_api_caller_class": "RelayModern",
                     "fb_api_req_friendly_name": d.name, "variables": json.dumps(variables or {}, separators=(",", ":")),
                     "server_timestamps": "true", "doc_id": d.doc_id}
         headers = {"User-Agent": USER_AGENT, "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items())}
         for k, v in HEADERS[ep.headers].items():
             v = v.replace("{csrf}", cookies["csrftoken"]).replace("{friendly}", friendly or "")
             if "{lsd}" in v:
-                v = v.replace("{lsd}", self._tokens.get("lsd", ""))
+                v = v.replace("{lsd}", tokens.get("lsd", ""))
             headers[k] = v
         async with self._lock:  # one request at a time, a fixed gap between them
             self.auth.check()
@@ -566,7 +577,7 @@ class WebClient:
         self._set_cookies(resp)
         if len(body) > MAX_REPLY:
             raise ToolError(f"{self.s.name}: reply too big")
-        return self._answer(name, ep, resp, body, cls, d)
+        return self._answer(name, ep, resp, body, cls, d, tokens)
 
     def _set_cookies(self, resp: httpx.Response) -> None:
         for raw in resp.headers.get_list("set-cookie"):
@@ -580,7 +591,8 @@ class WebClient:
             elif not gone:
                 self.auth.rotate(cname, value)
 
-    def _answer(self, name: str, ep: Endpoint, resp: httpx.Response, body: bytes, cls: str, d: Doc | None) -> Any:
+    def _answer(self, name: str, ep: Endpoint, resp: httpx.Response, body: bytes, cls: str, d: Doc | None,
+                tokens: dict) -> Any:
         status = resp.status_code
         if 300 <= status < 400:
             self.auth.pause("redirect")  # to /accounts/login, /challenge or anywhere: never followed
@@ -604,12 +616,12 @@ class WebClient:
                 data = json.loads(stripped)
             except ValueError:
                 data = None
-        problem = _problem(status, data, text)
+        problem = _problem(status, data, text, ep.kind)
         if problem == "challenge":
             self.auth.pause("challenge" if status not in (401, 403) else f"http_{status}")
             raise ToolError(self.s.paused_text)
         if problem == "stale_tokens":
-            raise _StaleTokens(cls)
+            raise _StaleTokens(cls, tokens)
         if problem == "user_agent":
             self.auth.pause("user_agent")
             raise ToolError(UA_TEXT.format(name=self.s.name, command=self.s.command))
@@ -618,8 +630,10 @@ class WebClient:
         if data is None:
             raise ToolError(f"{self.s.name} sent an unexpected reply (HTTP {status})")
         if ep.kind == "graphql":
-            return self._graphql_data(d, data, status)
-        if status >= 400 or (isinstance(data, dict) and data.get("status") == "fail"):
+            inner = self._graphql_data(d, data, status)
+            self._stale.clear()
+            return inner
+        if status >= 400 or (isinstance(data, dict) and (data.get("status") == "fail" or "errorSummary" in data)):
             msg = redact(str(data.get("message", "")) if isinstance(data, dict) else "")[:200]
             raise ToolError(f"{self.s.name} error {status}" + (f": {msg}" if msg else ""))
         return data
@@ -646,51 +660,57 @@ class WebClient:
         d = self.auth.load()
         return cookies.get("sessionid"), d.get("saved_at"), d.get("resumed_at")
 
-    async def _graphql_form(self, cookies: dict[str, str]) -> dict:
-        """fb_dtsg, lsd and jazoest from the owner's logged-in page (fetched again every 30 minutes)."""
-        key = self._token_key(cookies)
-        if not self._tokens or self._tokens.get("key") != key or self._clock() - self._tokens.get("at", -1e9) > TOKEN_AGE:
+    async def _page_tokens(self) -> dict:
+        """fb_dtsg, lsd and jazoest from the owner's logged-in page (fetched again every 30 minutes). One fetch at a
+        time; each caller keeps the set it got, so a refresh by another caller can't pull it away."""
+        async with self._token_lock:
+            t = self._tokens
+            if t and t["key"] == self._token_key(self.auth.cookies()) and self._clock() - t["at"] <= TOKEN_AGE:
+                return t
             self._tokens = {}
             page = await self._call(HOME[self.s.key], None, None, None, None, None, False)
             dtsg = re.search(r'"DTSGInitialData",\[\],\{"token":"([^"]{8,200})"', page)
             lsd = re.search(r'"LSD",\[\],\{"token":"([^"]{4,200})"', page)
             if not dtsg or not lsd:
-                # A 200 page without the tokens: logged out, or a page for clients that aren't browsers. Either way
-                # stop (paused, so this is never fetched again in a loop).
-                if any(m in page for m in _LOGIN_MARKERS):
-                    self.auth.pause("login_required")
-                    raise ToolError(self.s.paused_text)
-                self.auth.pause("user_agent")
-                raise ToolError(UA_TEXT.format(name=self.s.name, command=self.s.command))
+                # A 200 page without the tokens: stop (paused, so this is never fetched again in a loop), and name a
+                # cause only when the page shows it.
+                self.auth.pause("login_required" if any(m in page for m in _LOGIN_MARKERS) else
+                                "user_agent" if re.search(r"user ?agent mismatch", page, re.I) else "no_page_tokens")
+                raise ToolError(self.auth.paused_text())
             fb_dtsg, lsd_token = dtsg.group(1), lsd.group(1)
             jazoest = "2" + str(sum(ord(c) for c in fb_dtsg))
             for v in (fb_dtsg, lsd_token):
                 register_secret(v)
             self._tokens = {"fb_dtsg": fb_dtsg, "lsd": lsd_token, "jazoest": jazoest, "at": self._clock(),
-                            "key": key}
-        return {"av": cookies["ds_user_id"], "__user": "0", "__a": "1", "__comet_req": "29",
-                "fb_dtsg": self._tokens["fb_dtsg"], "jazoest": self._tokens["jazoest"], "lsd": self._tokens["lsd"]}
+                            "key": self._token_key(self.auth.cookies())}
+            return self._tokens
 
 
-def _problem(status: int, data: Any, text: str) -> str | None:
-    """challenge (pause until resumed), slow_down, user_agent, or None."""
+def _token_form(cookies: dict[str, str], tokens: dict) -> dict:
+    return {"av": cookies["ds_user_id"], "__user": "0", "__a": "1", "__comet_req": "29",
+            "fb_dtsg": tokens["fb_dtsg"], "jazoest": tokens["jazoest"], "lsd": tokens["lsd"]}
+
+
+def _problem(status: int, data: Any, text: str, kind: str = "json") -> str | None:
+    """challenge (pause until resumed), slow_down, user_agent, stale_tokens (GraphQL only, and only when nothing
+    else in the reply says stop), or None."""
     if isinstance(data, dict):
-        msg = str(data.get("message", "")).lower()
-        summary = str(data.get("errorSummary", "")).lower()
-        if data.get("error") == 1357004:
-            return "stale_tokens"
-        if any(c in msg for c in _CHALLENGES) or "challenge" in data or "checkpoint_url" in data \
-                or data.get("require_login") is True or data.get("error") == 1357001 \
-                or re.search(r"log ?in|login required|expired", summary) is not None:
+        msg = str(data.get("message") or "").lower()
+        said = " | ".join(str(data.get(k) or "") for k in ("message", "errorSummary", "errorDescription"))
+        if any(c in msg for c in _CHALLENGES) or data.get("challenge") or data.get("checkpoint_url") \
+                or data.get("require_login") is True or data.get("error") == 1357001 or _LOGIN_RE.search(said):
             return "challenge"
         if "useragent" in msg or "user agent" in msg:
             return "user_agent"
-        if any(c in msg for c in _SLOW_DOWN) or data.get("spam") is True:
-            return "slow_down"
     if status in (401, 403):
         return "challenge"
     if status == 429:
         return "slow_down"
+    if isinstance(data, dict):
+        if any(c in msg for c in _SLOW_DOWN) or data.get("spam") is True:
+            return "slow_down"
+        if kind == "graphql" and data.get("error") == 1357004:
+            return "stale_tokens"
     if data is None and ("/accounts/login" in text or "/challenge/" in text):
         return "challenge"
     return None
