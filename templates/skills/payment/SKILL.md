@@ -1,6 +1,6 @@
 ---
 name: payment
-description: Buy things online for the owner with their card in the checkout browser (checkout command), each purchase approved by the owner, plus the payment log. Use when the owner asks you to buy, order, pay for or book something online.
+description: Buy things online for the owner with their card in the checkout browser (checkout command), each purchase approved by the owner, plus the payment log. Use when the owner asks you to buy, order or pay for something online (bookings and forms without a card payment: web-actions).
 ---
 
 # Payments and the checkout browser

@@ -97,7 +97,7 @@ class FakeEngine:
     def describe(self, n, e):
         d = {k: e[k] for k in ("kind", "tag", "type", "autocomplete", "name", "id", "label", "required")}
         d.update(n=n, checked=e["checked"] if e["kind"] == "checkbox" else None, filled=bool(e["value"]),
-                 disabled=bool(e.get("disabled")))
+                 disabled=bool(e.get("disabled")), role=e.get("role", ""))
         if e["kind"] == "select":
             d["options"] = e["options"]
         return d
@@ -111,6 +111,17 @@ class FakeEngine:
             if a.get("main"):
                 out["title"] = f.title
             return out
+        if a["op"] == "form":
+            if f.__dict__.get("form_broken"):
+                return None
+            return {"problem": f.__dict__.get("problem", ""), "hidden": f.__dict__.get("hidden", []), "fields": [
+                {"label": e["label"], "kind": e["kind"], "value": True if e["kind"] == "checkbox" else e["value"],
+                 "shown": not e.get("hidden"), "type": e["type"], "name": e["name"]}
+                for n, e in f.els.items() if e["connected"] and (e["checked"] or e["value"])]}
+        if a["op"] == "gate":
+            e = get(a["n"])
+            return {"connected": True, "tag": e["tag"], "texts": [e["label"]], "ident": e["id"], "submits": False,
+                    "search": False, "dest": e.get("dest", f.url), "method": "post", "around": f.text} if e else {"connected": False}
         if a["op"] == "inspect":
             e = get(a["n"])
             return {"connected": True, **self.describe(a["n"], e)} if e else {"connected": False}
@@ -712,7 +723,93 @@ def test_checkout_net_ruleset():
     assert "ampicheckout:x:991" in files["passwd"] and "0.0.0.0 www.youtube.com" in files["hosts"]
 
 
+def submit_request(c, sid, snap, label="Pay 23,90 €"):
+    b = c.handle({"cmd": "bind_submit", "session": sid, "ref": ref(snap, label)})
+    assert b["ok"], b
+    return b, {"cmd": "submit", "session": sid, "origin": b["origin"], "url": b["url"], "button": b["button"],
+               "digest": b["digest"], "expect_totals": b["totals"], "gen": b["gen"], "press": b["press"], "frames": b["frames"]}
+
+
+def test_submit_shows_the_form_and_presses_once(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    c.handle({"cmd": "type", "session": sid, "ref": ref(snap, "Email"), "text": "a@b.fi"})
+    eng.frames[0].els[2]["value"] = "4242424242424242"
+    b, rq = submit_request(c, sid, snap)
+    assert {"label": "Email", "kind": "input", "value": "a@b.fi", "shown": True} in b["form"]
+    assert "4242" not in json.dumps(b)
+    eng.on_click[("main", 4)] = f"{SHOP}/thanks"
+    r = c.handle(rq)
+    assert r["ok"] and eng.clicks == [("main", 4)] and "Order 1234" in r["snapshot"]["text"]
+    assert not c.handle(rq)["ok"] and eng.clicks == [("main", 4)]
+
+
+@pytest.mark.parametrize("change", ["value", "label", "url", "totals", "box", "reload", "disabled", "new_field", "hidden", "dest", "frame",
+                                    "unreadable", "typed", "clicked", "chosen"])
+def test_submit_refuses_anything_changed(env, change):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    _, rq = submit_request(c, sid, snap)
+    main = eng.frames[0]
+    if change == "value":
+        main.els[1]["value"] = "evil@x.y"
+    elif change == "label":
+        main.els[4]["label"] = "Delete account"
+    elif change == "url":
+        main.url = f"{SHOP}/other"
+    elif change == "totals":
+        main.text = "Total: 99,00 €"
+    elif change == "box":
+        main.els[3]["checked"] = True
+    elif change == "reload":
+        main.loader += "x"
+    elif change == "disabled":
+        main.els[4]["disabled"] = True
+    elif change == "new_field":
+        main.els[9] = el("input", label="Extra", value="1", hidden=True)
+    elif change == "hidden":
+        main.hidden = [["slot", "20:30"]]
+    elif change == "dest":
+        main.els[4]["dest"] = "https://evil.example/"
+    elif change == "frame":
+        eng.frames.append(Frame("new", "https://pay.example/w", parent="main"))
+    elif change == "unreadable":
+        main.form_broken = True
+    elif change == "typed":
+        assert c.handle({"cmd": "type", "session": sid, "ref": ref(snap, "Email"), "text": ""})["ok"]
+    elif change == "chosen":
+        assert c.handle({"cmd": "choose", "session": sid, "ref": ref(snap, "Country"), "option": "Sweden"})["ok"]
+    elif change == "clicked":
+        assert c.handle({"cmd": "click", "session": sid, "ref": ref(snap, "Save my card for next time")})["ok"]
+        eng.clicks.clear()
+    r = c.handle(rq)
+    assert not r["ok"] and r["phase"] == "verify" and eng.clicks == []
+
+
+def test_submit_refuses_what_it_cannot_show(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    for attr, value in (("form_broken", True), ("problem", "a file to upload")):
+        setattr(eng.frames[0], attr, value)
+        r = c.handle({"cmd": "bind_submit", "session": sid, "ref": ref(snap, "Pay 23,90 €")})
+        assert not r["ok"] and "owner" in r["error"]
+        setattr(eng.frames[0], attr, None)
+
+
+def test_submit_engine_dying_is_unknown(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    _, rq = submit_request(c, sid, snap)
+    eng.die_after_click = True
+    r = c.handle(rq)
+    assert not r["ok"] and r["phase"] == "sent" and "MAY" in r["error"]
+
+
 def test_page_js_has_no_value_reads_except_buttons():
+    # Besides a button's caption, values are read only by the `form` op (bind_submit, for the owner's approval).
     js = co.PAGE_JS
+    a, b = js.index("if (a.op === 'form')"), js.index("if (a.op === 'inspect')")
+    assert "if (secret) v = '(secret)'" in js[a:b]
+    js = (js[:a] + js[b:]).replace("n.value : '')", "")  # gate: a button's caption
     assert "el.value)" not in js.replace("(el.value || '') !== ''", "")
     assert "__ampiEls" not in js or True  # elements live in a closure Map inside the isolated world

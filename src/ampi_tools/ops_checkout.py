@@ -23,7 +23,7 @@ from typing import Any
 from .ops import ALWAYS_CRITICAL, FIELDS, OPS, PRE_RESOLVE, Op, Result, Services, _text, clean, need
 from . import ops as _ops
 from .todoist import ToolError
-from .vault import CARD_FIELDS, PROFILE_FIELDS, Vault, _address_full, check_entry, check_name, mask_coords, mask_obj, mask_text
+from .vault import CARD_FIELDS, PROFILE_FIELDS, TYPE_FIELDS, Vault, _address_full, check_entry, check_name, mask_coords, mask_obj, mask_text
 
 CTL_SOCKET = "/run/ampi-checkout.sock"  # root-owned (ampi-checkout.socket), group ampicheckoutctl-use
 REQUEST_TTL = 600            # fill/pay requests expire after 10 minutes (and with the session)
@@ -33,14 +33,54 @@ DEFAULT_PSP = ("https://js.stripe.com", "https://checkout.stripe.com", "https://
                "https://checkout.shopifycs.com", "https://pay.paytrail.com", "https://services.paytrail.com")
 PRIVATE_ONLY = {"info.fields", "info.reveal", "info.collect", "info.revoke", "info.save_place", "payment.log", "checkout.open",
                 "checkout.snapshot", "checkout.click", "checkout.type", "checkout.choose", "checkout.back",
-                "checkout.close", "checkout.fill", "checkout.pay"}
+                "checkout.close", "checkout.fill", "checkout.pay", "checkout.submit"}
 # Buttons that place an order: a plain click on them could complete an invoice / pay-later / saved-payment order
 # without the payment approval, so `checkout click` refuses them (the owner finishes such orders, or `checkout pay`).
 ORDER_BUTTON = re.compile(r"\b(pay|buy|order|purchase|place|confirm|complete|submit order|checkout now|book now)\b|"
                           r"tilaa|maksa|osta|vahvista|köp|betala|bestill|kaufen|bezahlen|bestellen|zahlungspflichtig",
                           re.I)
-NOT_ORDER = re.compile(r"add to (cart|bag|basket)|lisää (ostoskoriin|koriin)|continue|jatka|next|seuraava|"
-                       r"go to checkout|proceed to checkout|siirry kassalle|view (cart|bag)", re.I)
+# Buttons that commit to something without an order: also never by a plain click, only `checkout submit` (asks).
+SUBMIT_BUTTON = re.compile(
+    r"\b(submit|send|reserve|request|book|booking|register|sign ?up|subscribe|unsubscribe|join|enrol+|rsvp|post|publish|"
+    r"delete|apply|schedule|cancel (my |the |this )?(booking|order|reservation|appointment|class|subscription))\b|"
+    r"отправить|заброниров|записаться|подтверд|оформить|зарегистрир|подписаться|удалить|отменить (запись|бронь)|"
+    r"κράτηση|αποστολή|υποβολή|εγγραφή|επιβεβαίωση|lähetä|varaa|ilmoittaudu|rekisteröi|"
+    r"absenden|buchen|reservieren|senden|envoyer|réserver|boka|skicka", re.I)
+# Words (or an amount) that mean money: never pressed by `submit`; card payments go through `pay`, the rest is the owner's.
+PAY_BUTTON = re.compile(
+    r"\b(pay|buy|purchase|place (your |my )?order|order now|submit order|checkout|donate|tip)\b|apple ?pay|google ?pay|paypal|klarna|"
+    r"tilaa|maksa|osta|köp|betala|bestill|kaufen|bezahlen|bestellen|zahlungspflichtig|acheter|payer|"
+    r"купить|оплат|заказать|αγορά|παραγγελ|πληρωμ|(?:€|\$|£)\s?\d|\d\s?(?:€|\$|£|eur\b|usd\b|gbp\b|kr\b)", re.I)
+PAY_FRAME = re.compile(r"(^|[./])(stripe|adyen|braintreegateway|paypal|paypalobjects|klarna|klarnaservices|shop|checkout|"
+                       r"shopifycs|squareup|squarecdn|paytrail|mollie|worldpay|jccsmart|vivapayments|revolut)\.(com|net|app|io|fi|eu)$")
+# A whole caption that is only looking around, whatever kind of button it is.
+HARMLESS = re.compile(
+    r"(search|find|show results|filters?|apply (filters?|coupon|code)|clear( all| filters?)?|reset|sort( by)?|go|back|previous|"
+    r"next( page| month| week| step)?|continue( (to|as) [\w -]{1,30})?|continue shopping|log ?in|sign ?in|menu|close|×|more|show more|"
+    r"load more|add to (cart|bag|basket)|view (cart|bag|basket)|update( cart)?|go to checkout|proceed to checkout|decline( all)?|"
+    r"reject( all)?|accept( all)?( cookies)?|only necessary|jatka|seuraava|hae|lisää (ostoskoriin|koriin)|siirry kassalle|"
+    r"поиск|найти|далее|назад|αναζήτηση|επόμενο)", re.I)
+GENERIC = re.compile(r"(yes|ok(ay)?|finish|done|save|confirm|agree|i agree|✓|✔|да|готово|ναι|kyllä|ja|oui)", re.I)
+
+
+def commits(g: dict) -> str | None:
+    """Why pressing this needs the owner ("order" / "commit"), from what it would really press; None if it doesn't."""
+    texts = [t for t in g.get("texts") or [] if t]
+    words = texts or [str(g.get("ident") or "")]
+    if any(HARMLESS.fullmatch(t.strip()) is None for t in words):
+        if any(ORDER_BUTTON.search(t) or PAY_BUTTON.search(t) for t in words):
+            return "order"
+        plain_link = g.get("tag") == "a" and g.get("kind") == "link" and str(g.get("dest") or "").startswith(
+            str(g.get("frame_origin") or "?") + "/")
+        if any(SUBMIT_BUTTON.search(t) for t in words) and not plain_link and not g.get("search"):
+            return "commit"
+        if g.get("submits") and not g.get("search"):
+            return "commit"
+    if g.get("filled") and g.get("kind") == "button" and (not texts or any(GENERIC.fullmatch(t.strip()) for t in texts)):
+        return "commit"  # the owner's details are in the page: an OK / Yes / unlabelled button may send them
+    return None
+
+
 TOTAL_EXCLUDE = re.compile(r"sub|vat|alv|tax|vero|incl|sis\.|shipping|delivery|toimitus|discount|alennus|saved|säästä",
                            re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,5}")
@@ -414,12 +454,15 @@ def _simple(cmd: str, *keys: str):
         if cmd == "click":
             # A plain click must not place an order (invoice, pay later, a saved card at the shop...): those buttons
             # go through `checkout pay`, or the owner presses them.
-            b = await side.client.call({"cmd": "bind", "session": req["session"], "refs": [a.get("ref")]})
-            bd = next(iter(b.get("bindings") or []), {})
-            label = " ".join(str(bd.get(k) or "") for k in ("label", "name", "id"))
-            if ORDER_BUTTON.search(label) and not NOT_ORDER.search(label):
-                raise ToolError(f"“{side.scrub(clean(bd.get('label'), 60))}” looks like it places the order. Card "
-                                "payments go through `checkout pay`; for any other way of paying, tell the owner")
+            g = await side.client.call({"cmd": "gate", "session": req["session"], "ref": a.get("ref")})
+            why = commits(g)
+            shown = side.scrub(clean(next(iter(g.get("texts") or []), "") or "(no text)", 60))
+            if why == "order":
+                raise ToolError(f"“{shown}” looks like it places the order. Card payments go through `checkout pay`; if "
+                                "nothing is paid here, use `checkout submit REF --what …`, which asks the owner")
+            if why:
+                raise ToolError(f"“{shown}” may send or book something: use `checkout submit REF --what …`, which asks "
+                                "the owner first")
         resp = await side.client.call(req, timeout=90)
         if cmd == "close":
             side.allowed.pop(req.get("session", ""), None)
@@ -507,6 +550,8 @@ def _is_text_field(b: dict) -> bool:
 
 def _is_button(b: dict) -> bool:
     kind = str(b.get("kind") or b.get("tag") or "").lower()
+    if str(b.get("role") or "") in ("option", "gridcell", "tab", "menuitem", "radio"):
+        return False
     return kind == "button" or (kind == "input" and str(b.get("type") or "").lower() in ("submit", "button"))
 
 
@@ -669,19 +714,126 @@ async def describe_pay(s: Services, a: dict) -> str:
     ]))
 
 
+async def _resolve_submit(s: Services, a: dict) -> dict:
+    side = cs(s)
+    ref, what = need(a, "ref", "what")
+    st = await side.client.call({"cmd": "status"})
+    if not st.get("session"):
+        raise ToolError("no checkout session; start one with `checkout open URL`")
+    b = await side.client.call({"cmd": "bind_submit", "session": st["session"], "ref": ref})
+    origin, button = str(b.get("origin") or ""), b.get("button") or {}
+    if not re.fullmatch(r"https://[a-z0-9.-]+(:\d+)?", origin):
+        raise ToolError("buttons are pressed for you only on https pages")
+    if str(button.get("frame_origin") or "") in ("", "opaque", "null"):
+        raise ToolError("that button is in a frame without a real origin; refusing")
+    if b.get("captcha"):
+        raise ToolError("a captcha / bot check is showing: stop and tell the owner")
+    # Money never moves through here: no amounts, daily cap, totals check or purchase log as in `pay`.
+    press = b.get("press") or {}
+    pay = "this would pay or order for money: card payments go through `checkout pay`, anything else is the owner's to do"
+    if any(PAY_BUTTON.search(str(t)) for t in [*(press.get("texts") or []), str(button.get("label") or "")]):
+        raise ToolError(pay)
+    if any(is_psp(str(o), side.rules) or PAY_FRAME.search(str(o)) for o in b.get("frames") or []):
+        raise ToolError("the page has a payment form or wallet on it; " + pay)
+    if b.get("risky_checked"):
+        raise ToolError("untick the boxes that may add a subscription or cost first (or ask the owner): "
+                        + "; ".join(side.scrub(clean(x, 60)) for x in b["risky_checked"][:3]))
+    for t in b.get("totals") or []:
+        try:
+            money = Decimal(str(t.get("amount"))) > 0
+        except InvalidOperation:
+            money = True
+        if money:
+            raise ToolError(f"the page shows a total to pay ({clean(t.get('amount'), 20)}); " + pay)
+    dest = str(press.get("dest") or "")
+    m = re.match(r"https?://[^/?#]+", dest)
+    if dest and not (m and m.group().startswith("https://")):
+        raise ToolError("the form would be sent to an address that isn't https; refusing")
+    return {"resolved": {"session": st["session"], "origin": origin, "url": str(b.get("url") or ""), "button": button,
+                         "totals": b.get("totals") or [], "form": _shown_form(side, b.get("form") or []),
+                         "digest": b.get("digest"), "gen": b.get("gen"), "press": press, "frames": b.get("frames") or [],
+                         "dest_origin": m.group() if m else "", "around": side.scrub(clean(b.get("around"), 500)),
+                         "what": what, "title": side.scrub(clean(b.get("title"), 100)),
+                         "expires": side.clock() + REQUEST_TTL}}
+
+
+def _shown_form(side: CheckoutSide, form: list[dict]) -> list[str]:
+    """The filled-in fields as lines for the owner; their stored details by name, never as values (the request is kept)."""
+    names: dict[str, str] = {}
+    for e in side.vault.entries():
+        if e.get("type") not in ("person", "place"):
+            continue
+        for f in TYPE_FIELDS[e["type"]]:
+            try:
+                names.setdefault(" ".join(side.vault.value(f"{e['name']}.{f}").split()).casefold(), f"{e['name']}.{f}")
+            except ToolError:
+                continue
+    names.pop("", None)
+    lines = []
+    for f in form:
+        v = f.get("value")
+        label = clean(f.get("label"), 80) or str(f.get("kind") or "field")
+        if v is True:
+            line = f"{side.scrub(label)} (selected)"
+        else:
+            own = names.get(" ".join(str(v).split()).casefold())
+            line = f"{side.scrub(label)}: " + (f"[your {own}]" if own else side.scrub(clean(v)))
+        lines.append(line + ("" if f.get("shown", True) else " [not visible on the page]"))
+    return lines
+
+
+async def describe_submit(s: Services, a: dict) -> str:
+    side = cs(s)
+    r = a.get("resolved") or {}
+    bd = r.get("button") or {}
+    lines = [f"Press “{clean(bd.get('label'), 80) or '(no text)'}” on {r.get('origin')}",
+             *([f"  inside a frame from {bd.get('frame_origin')}"] if bd.get("frame_origin") != r.get("origin") else []),
+             f"Page: {clean(r.get('title'), 100)}", f"For (Ampi's words): {clean(r.get('what'), 200)}"]
+    if r.get("dest_origin") and r["dest_origin"] != r.get("origin"):
+        lines.append(f"⚠ Sends it to another site: {r['dest_origin']}")
+    if r.get("form"):
+        lines += ["Filled in there:", *(f"  - {x}" for x in r["form"])]
+    else:
+        lines.append("Nothing is filled in there.")
+    if r.get("around"):
+        lines.append(f"Page text around the button: “{r['around']}”")
+    return side.scrub("\n".join(lines))
+
+
+async def checkout_submit(s: Services, a: dict) -> Result:
+    side = cs(s)
+    r = a.get("resolved")
+    if not isinstance(r, dict):
+        raise ToolError("internal: not checked first")
+    await _check_live(side, r, "pressed")
+    try:
+        resp = await side.client.call({"cmd": "submit", "session": r["session"], "origin": r["origin"], "url": r["url"],
+                                       "button": r["button"], "digest": r["digest"], "gen": r["gen"],
+                                       "press": r["press"], "frames": r["frames"],
+                                       "expect_totals": [{"amount": t.get("amount"), "currency": t.get("currency")}
+                                                         for t in r["totals"]]}, timeout=90)
+    except CheckoutRefused:
+        raise
+    except ToolError as e:
+        raise ToolError(f"{e}. It MAY have gone through: look for a confirmation (page, email) before trying again") from None
+    snap = side.mask(resp.get("snapshot") or {}, r["session"], r["origin"])
+    return side.scrub(f"Pressed “{clean((r['button'] or {}).get('label'), 60)}” on {r['origin']}. The page now says: "
+                      f"{clean(snap.get('title'), 100)}: {_excerpt(snap)}\n(Not a confirmation by itself: check the page.)")
+
+
 def _values(side: CheckoutSide, fills: list[dict]) -> list[dict]:
     return [{"ref": f["ref"], "binding": f["binding"], "value": side.vault.value(f["field"]),
              "card": f["kind"].startswith("card.")} for f in fills]
 
 
-async def _check_live(side: CheckoutSide, r: dict) -> None:
+async def _check_live(side: CheckoutSide, r: dict, done: str = "filled") -> None:
     if side.clock() > r["expires"]:
-        raise ToolError("this request expired (10 minutes); nothing was filled. Ask Ampi to start again")
+        raise ToolError(f"this request expired (10 minutes); nothing was {done}. Ask Ampi to start again")
     st = await side.client.call({"cmd": "status"})
     if st.get("session") != r["session"]:
-        raise ToolError("the checkout session it was for has ended; nothing was filled")
+        raise ToolError(f"the checkout session it was for has ended; nothing was {done}")
     if st.get("state") == "readonly":
-        raise ToolError("that session already paid; nothing was filled")
+        raise ToolError(f"that session already paid; nothing was {done}")
 
 
 async def checkout_fill(s: Services, a: dict) -> Result:
@@ -759,8 +911,10 @@ CHECKOUT_OPS = [
     Op("checkout.close", False, _simple("close")),
     Op("checkout.fill", True, checkout_fill, describe_fill, "Fill personal info"),
     Op("checkout.pay", True, checkout_pay, describe_pay, "PAY"),
+    Op("checkout.submit", True, checkout_submit, describe_submit, "Press a button on a website"),
 ]
 OPS.update({op.name: op for op in CHECKOUT_OPS})
-PRE_RESOLVE.update({"checkout.fill": _resolve_fill, "checkout.pay": _resolve_pay, "info.reveal": _resolve_reveal,
+PRE_RESOLVE.update({"checkout.fill": _resolve_fill, "checkout.pay": _resolve_pay, "checkout.submit": _resolve_submit,
+                    "info.reveal": _resolve_reveal,
                     "info.save_place": _resolve_save_place})
-_ops.ALWAYS_CRITICAL = ALWAYS_CRITICAL | {"info.reveal", "checkout.pay", "info.save_place"}
+_ops.ALWAYS_CRITICAL = ALWAYS_CRITICAL | {"info.reveal", "checkout.pay", "checkout.submit", "info.save_place"}

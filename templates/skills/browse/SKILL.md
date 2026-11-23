@@ -21,7 +21,8 @@ browse status                               is the browser working
   Grep on that file instead of opening the page again.
 - `select` doesn't wait for late content; if it finds nothing on a JavaScript-heavy page, use
   `browse read URL --wait-for "CSS"` and read the result.
-- Read-only: no logins, cookies, forms or buttons. If a task needs those, tell the owner.
+- Read-only: no logins, cookies, forms or buttons. In the owner's own chat, use the **web-actions** skill
+  (`checkout open` …) for forms, calendars and bookings; don't say you can't before trying it.
 
 ## Safety
 

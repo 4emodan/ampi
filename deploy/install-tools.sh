@@ -58,7 +58,7 @@ done
 
 echo "==> Skills and watcher instructions in each profile workspace"
 for ws in "$APP_HOME"/profiles/*/; do
-  for skill in todoist gmail telegram youtube threads instagram maps wolt personal-info payment watchers; do
+  for skill in todoist gmail telegram youtube threads instagram maps wolt personal-info payment web-actions watchers; do
     install -d -m 755 "$ws.claude/skills/$skill"
     install -m 644 "$SRC_DIR/templates/skills/$skill/SKILL.md" "$ws.claude/skills/$skill/SKILL.md"
   done

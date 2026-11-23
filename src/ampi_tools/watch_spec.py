@@ -107,6 +107,7 @@ WRITE_OPS: dict[str, OpInfo] = {
     "checkout.close": OpInfo("high", route=("site",)),
     "checkout.fill": OpInfo("high", route=("site",)),
     "checkout.pay": OpInfo("high", route=("site",)),
+    "checkout.submit": OpInfo("high", route=("site",)),  # the owner's chat only (NOT_FOR_WATCHERS)
     # Instagram/Threads through the owner's web session: public, in the owner's name (never for watchers, below).
     "igweb.comment": OpInfo("high", route=("target", "comment")),
     "igweb.like": OpInfo("high", subject=("target", "comment")),
@@ -129,7 +130,8 @@ SOCIAL_SESSION_READS = frozenset({"igweb.feed", "igweb.profile", "igweb.posts", 
                                   "igweb.story", "thweb.feed", "thweb.profile", "thweb.posts", "thweb.post"})
 SOCIAL_SESSION_WRITES = frozenset(op for op in WRITE_OPS if op.startswith(("igweb.", "thweb.")))
 NOT_FOR_WATCHERS = frozenset({"telegram.revoke", "telegram.permissions", "info.revoke", "approvals.list",
-                              "info.fields", "info.reveal", "info.collect", "info.save_place", "payment.log"}) \
+                              "info.fields", "info.reveal", "info.collect", "info.save_place", "payment.log",
+                              "checkout.submit"}) \
     | SOCIAL_SESSION_READS | SOCIAL_SESSION_WRITES
 # Reads a watcher test run never makes for real: it gets stub data (ampi_tools.social_dm) instead.
 TEST_STUB_OPS = frozenset({"igweb.inbox", "igweb.dm"})

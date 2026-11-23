@@ -18,13 +18,18 @@ exactly the elements that were approved:
 - Frames with an opaque origin (about:, data:, blob:, srcdoc, javascript:) are never actionable.
 - After `pay` the session is read-only: the assistant can look, not click or type (3-D Secure is the owner's).
 
-No arbitrary JavaScript from the assistant, no reading of input values, no console/network events forwarded,
+`submit` presses a button that commits to something (book, send, reserve) after the owner approved the site, the
+button and everything filled in. Only for that, `bind_submit` reads the page's field values (never of password,
+card, code or hidden fields), for the owner's approval message; any change of them before the press refuses it.
+
+No arbitrary JavaScript from the assistant, no other reading of input values, no console/network events forwarded,
 no downloads, no file:// pages, no stealth and no captcha solving.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.client
 import json
 import os
@@ -378,6 +383,7 @@ PAGE_JS = r"""
       if (t === 'TEXTAREA') return 'textarea';
       if (t === 'SELECT') return 'select';
       if (role === 'switch' || role === 'checkbox') return 'checkbox';
+      if (['option', 'gridcell', 'tab', 'menuitem', 'radio'].includes(role) && t !== 'A') return 'button';
       if (t === 'BUTTON' || role === 'button') return 'button';
       if (t === 'A' && el.hasAttribute('href')) return 'link';
       return null;
@@ -400,7 +406,10 @@ PAGE_JS = r"""
       const d = { n: idOf(el), kind: kind, tag: el.tagName.toLowerCase(), type: (el.type || '').toLowerCase(),
         autocomplete: txt(el.getAttribute('autocomplete'), 60), name: txt(el.getAttribute('name'), 80),
         id: txt(el.id, 80), label: labelOf(el, kind), required: !!el.required, checked: null, filled: false,
-        disabled: disabledOf(el) };
+        disabled: disabledOf(el),
+        role: txt(el.getAttribute('role'), 30) };
+      for (const k of ['aria-selected', 'aria-pressed', 'aria-checked'])
+        if (kind === 'button' && el.hasAttribute(k)) d.checked = el.getAttribute(k) === 'true' || !!d.checked;
       if (kind === 'checkbox' || kind === 'radio') d.checked = isChecked(el);
       if (kind === 'input' || kind === 'textarea') d.filled = (el.value || '') !== '';
       if (kind === 'select') { d.options = Array.from(el.options).slice(0, 30).map(o => txt(o.text, 60));
@@ -421,7 +430,7 @@ PAGE_JS = r"""
       if (a.op === 'enumerate') {
         const list = [];
         // Form controls first, links after: on big shops the cap must not cut off the inputs and buttons.
-        for (const sel of ['input,textarea,select,button,[role=button],[role=switch],[role=checkbox]', 'a[href]']) {
+        for (const sel of ['input,textarea,select,button,[role=button],[role=switch],[role=checkbox],[role=option],[role=gridcell],[role=tab],[role=menuitem],[role=radio]', 'a[href]']) {
           for (const el of document.querySelectorAll(sel)) {
             if (list.length >= 400) break;
             if (kindOf(el) && visible(el)) list.push(describe(el));
@@ -444,6 +453,65 @@ PAGE_JS = r"""
         if (a.main) { out.title = txt(document.title, 300); out.text = body.slice(0, 200000); }
         else { out.text = body.slice(0, 4000); }
         return out;
+      }
+      if (a.op === 'form') {  // what would be sent (bind_submit/submit). Secret values never leave the page.
+        const out = [], hidden = []; let problem = '';
+        const sel = 'input,textarea,select,[contenteditable=""],[contenteditable=true],[role=switch],[role=checkbox],[role=radio],' +
+          '[role=option],[role=gridcell],[role=tab],[aria-selected=true],[aria-pressed=true],[aria-checked=true]';
+        for (const n of document.querySelectorAll('*'))
+          if (n.shadowRoot && n.shadowRoot.querySelector('input,textarea,select')) problem = 'a form inside a web component';
+        for (const el of document.querySelectorAll(sel)) {
+          const ty = (el.type || '').toLowerCase(), tag = el.tagName;
+          if (tag === 'INPUT' && ['submit', 'button', 'image', 'reset'].includes(ty)) continue;
+          if (tag === 'INPUT' && ty === 'file') { if (el.files && el.files.length) problem = 'a file to upload'; continue; }
+          const name = txt(el.getAttribute('name'), 80);
+          if (tag === 'INPUT' && ty === 'hidden') { hidden.push([name, String(el.value || '').slice(0, 20000)]); continue; }
+          const kind = kindOf(el) || 'text', ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+          const secret = ty === 'password' || /(^| )(cc-|one-time-code|current-password|new-password)/.test(ac) ||
+            /cvc|cvv|csc|iban|passw|\botp\b/i.test(name + ' ' + el.id);
+          let v = null;
+          if (tag === 'SELECT') v = Array.from(el.options).filter((o, i) => o.selected || (!el.multiple && i === el.selectedIndex)).map(o => txt(o.text, 200) + (txt(o.text, 200) === txt(o.value, 200) ? '' : ' (' + txt(o.value, 200) + ')')).join('; ');
+          else if (tag === 'INPUT' && (ty === 'checkbox' || ty === 'radio')) { if (el.checked) v = true; }
+          else if (tag === 'INPUT' || tag === 'TEXTAREA') v = String(el.value || '');
+          else if (['aria-selected', 'aria-pressed', 'aria-checked'].some(k => el.getAttribute(k) === 'true')) v = true;
+          else if (el.hasAttribute('contenteditable')) v = String(el.textContent || '').trim();
+          if (v === null || v === '') continue;
+          if (secret) v = '(secret)';
+          if (v !== true && v.length > 1000) problem = 'a very long text';
+          if (out.length >= 60) { problem = 'too many filled fields'; break; }
+          out.push({ label: labelOf(el, v === true ? 'button' : kind), kind: kind, value: v, shown: visible(el), name: name, type: ty });
+        }
+        return { fields: out, hidden: hidden, problem: problem };
+      }
+      if (a.op === 'gate') {  // what a press on this element would really press
+        const el = get(a.n); if (!el) return { connected: false };
+        const lab = el.closest('label');
+        const c = el.closest('button,input,a[href],[role=button]') || (lab && lab.control) || el;
+        const texts = [];
+        for (const n of (c === el ? [el] : [el, c])) {
+          for (const s of [n.getAttribute('aria-label'), n.tagName === 'INPUT' ? (['submit', 'button', 'image', 'reset'].includes((n.type || '').toLowerCase()) ? n.value : '') : n.textContent, n.getAttribute('title'), n.getAttribute('alt')]) {
+            const t = txt(s, 200); if (t && !texts.includes(t)) texts.push(t);
+          }
+          n.querySelectorAll && n.querySelectorAll('img[alt]').forEach(i => { const t = txt(i.getAttribute('alt'), 100); if (t && texts.length < 12 && !texts.includes(t)) texts.push(t); });
+        }
+        const owner = c.form instanceof HTMLFormElement ? c.form : (c.closest ? c.closest('form') : null);
+        const cty = c.tagName === 'BUTTON' ? (c.getAttribute('type') || 'submit').toLowerCase() : (c.type || '').toLowerCase();
+        const presses = (c.tagName === 'BUTTON' || c.tagName === 'INPUT') && ['submit', 'image'].includes(cty);
+        const submits = !!owner && presses;
+        let search = false;
+        if (owner) {
+          const fs = Array.from(owner.querySelectorAll('input,textarea,select')).filter(i => !['hidden', 'submit', 'button', 'image', 'reset'].includes((i.type || '').toLowerCase()));
+          search = fs.length <= 1 && ((owner.getAttribute('role') || '') === 'search' || !!owner.closest('[role=search]') || (fs.length === 1 && (fs[0].type === 'search' || /^(q|s|query|search|keyword)$/i.test(fs[0].getAttribute('name') || ''))));
+        }
+        const resolve = (u) => { try { return String(new URL(u || '', document.baseURI || location.href)); } catch (e) { return 'unreadable'; } };
+        let dest = '', method = '';
+        if (c.tagName === 'A') { dest = resolve(c.getAttribute('href')); method = 'link'; }
+        else if (owner) { dest = resolve(c.getAttribute('formaction') || owner.getAttribute('action'));
+          method = (c.getAttribute('formmethod') || owner.getAttribute('method') || 'get').toLowerCase(); }
+        let box = owner || c.closest('[role=dialog],dialog,section,article,main') || c.parentElement;
+        return { connected: true, tag: c.tagName.toLowerCase(), texts: texts.slice(0, 12), ident: txt((c.getAttribute('name') || '') + ' ' + c.id, 120),
+          submits: submits, search: search, dest: dest.slice(0, 1000), method: method, href: String(location.href),
+          around: txt(box ? (box.innerText || box.textContent) : '', 600) };
       }
       if (a.op === 'inspect') { const el = get(a.n); return el ? Object.assign({ connected: true }, describe(el)) : { connected: false }; }
       if (a.op === 'set') { const el = get(a.n); if (!el) return { ok: false }; setValue(el, a.value); return { ok: true }; }
@@ -478,6 +546,8 @@ class Session:
         self.started = self.last = now
         self.hold_until = 0.0
         self.readonly = False
+        self.gen = 0         # counts everything done in the session: an approved press needs it unchanged
+        self.filled = False  # the owner's details were filled in
         self.frame_names: dict[str, str] = {}      # CDP frameId -> "f0", "f1", …
         self.worlds: dict[str, tuple[str, int]] = {}  # CDP frameId -> (loaderId, isolated world context id)
 
@@ -506,6 +576,8 @@ class Controller:
         # "filled" (values written, Pay not pressed), "sent" (Pay was pressed: outcome unknown).
         self._phase: str | None = None
 
+    CHANGES = ("open", "click", "type", "choose", "back", "fill", "pay")
+
     # --- request entry -------------------------------------------------------------------
 
     def _error(self, text: str) -> dict:
@@ -523,9 +595,11 @@ class Controller:
             cmd = req["cmd"]
             fn = {"status": self.status, "open": self.open, "snapshot": self.snapshot_cmd, "click": self.click,
                   "type": self.type_text, "choose": self.choose, "back": self.back, "close": self.close,
-                  "bind": self.bind, "fill": self.fill, "pay": self.pay, "hold": self.hold}.get(cmd)
+                  "bind": self.bind, "gate": self.gate, "bind_submit": self.bind_submit, "submit": self.submit, "fill": self.fill, "pay": self.pay, "hold": self.hold}.get(cmd)
             if fn is None:
                 raise Refused("unknown command")
+            if cmd in self.CHANGES and self.session is not None:
+                self.session.gen += 1
             return fn(req)
         except Refused as e:
             return self._error(str(e))
@@ -693,7 +767,7 @@ class Controller:
         s.worlds[frame["frame_id"]] = (frame["loader"], ctx)
         return ctx
 
-    ELEMENT_OPS = ("inspect", "set", "click", "choose")
+    ELEMENT_OPS = ("inspect", "gate", "set", "click", "choose")
 
     def _eval(self, s: Session, frame: dict, op: dict) -> dict | None:
         ctx = self._world(s, frame)
@@ -871,10 +945,113 @@ class Controller:
                     "main": frame is frames[0], "kind": d.get("kind"), "disabled": bool(d.get("disabled"))}
             for k in self.BOUND + ("label",):
                 item[k] = str(d.get(k) or "")[:120]
+            item["role"] = str(d.get("role") or "")[:30]
             out.append(item)
         snap = self.snapshot(s)
         return {"ok": True, "session": s.id, "origin": snap["origin"], "bindings": out, "totals": snap["totals"],
                 "risky_checked": snap["risky_checked"]}
+
+    # --- submit: a button that commits to something, after approval ---------------------------
+
+    def _form(self, s: Session, frames: list[dict], bframe: dict) -> tuple[list[dict], str]:
+        """(what is filled in on the page and in the button's frame, a fingerprint that also covers hidden fields).
+        Anything that can't be read or shown in full is refused, never left out."""
+        fields: list[dict] = []
+        raw = []
+        for f in ([frames[0]] if bframe["frame_id"] == frames[0]["frame_id"] else [frames[0], bframe]):
+            data = self._run(s, f, {"op": "form"})
+            if not isinstance(data, dict) or not isinstance(data.get("fields"), list) or not isinstance(data.get("hidden"), list):
+                raise Refused("the form on this page can't be read; the owner has to do this")
+            if data.get("problem"):
+                raise Refused(f"the page has {str(data['problem'])[:60]}, which can't be shown to the owner; they have to do this")
+            raw.append([f["frame_id"], data["fields"], data["hidden"]])
+            for e in data["fields"]:
+                value = e.get("value")
+                shown = True if value is True else br.MARKERS.sub("", br.clean(str(value or "")))
+                if isinstance(shown, str) and has_card_number(shown):
+                    shown = "(secret)"
+                fields.append({"label": br.MARKERS.sub("", br.clean(str(e.get("label") or "")))[:120],
+                               "kind": str(e.get("kind") or "")[:20], "value": shown, "shown": bool(e.get("shown"))})
+        return fields, hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest()
+
+    def _gate(self, s: Session, frame: dict, n: int) -> dict:
+        g = self._run(s, frame, {"op": "gate", "n": n}) or {}
+        if not g.get("connected"):
+            raise Refused(PAGE_CHANGED)
+        return {"tag": str(g.get("tag") or "")[:20], "texts": [br.MARKERS.sub("", br.clean(str(t)))[:200] for t in (g.get("texts") or [])[:12]],
+                "ident": br.clean(str(g.get("ident") or ""))[:120], "submits": bool(g.get("submits")), "search": bool(g.get("search")),
+                "dest": br.clean(str(g.get("dest") or ""))[:1000], "method": str(g.get("method") or "")[:10],
+                "around": br.MARKERS.sub("", br.clean(str(g.get("around") or "")))[:600]}
+
+    def gate(self, req: dict) -> dict:
+        """What pressing an element would really press, so the daemon can decide whether it needs the owner."""
+        s = self._session(req)
+        frame, d, n = self._element(s, req.get("ref"))
+        return {"ok": True, "session": s.id, "kind": d.get("kind"), "frame_origin": frame["origin"], "filled": s.filled,
+                **self._gate(s, frame, n)}
+
+    @staticmethod
+    def _press(g: dict) -> dict:
+        return {k: g[k] for k in ("tag", "texts", "dest", "method", "submits")}
+
+    def bind_submit(self, req: dict) -> dict:
+        b = self.bind({**req, "refs": [req.get("ref")]})
+        s = self._session(req)
+        frames = self._frames(s)
+        bframe, d, n = self._element(s, req.get("ref"), frames)
+        if d.get("kind") not in ("button", "link") or d.get("disabled"):
+            raise Refused("give the ref of an enabled button")
+        snap = self.snapshot(s)
+        g = self._gate(s, bframe, n)
+        fields, digest = self._form(s, frames, bframe)
+        return {"ok": True, "session": s.id, "origin": b["origin"], "url": frames[0]["url"], "button": b["bindings"][0],
+                "totals": snap["totals"], "risky_checked": snap["risky_checked"], "captcha": snap["captcha"],
+                "title": snap["title"], "form": fields, "digest": digest, "gen": s.gen, "press": self._press(g),
+                "around": g["around"], "frames": sorted({f["origin"] for f in frames})}
+
+    def submit(self, req: dict) -> dict:
+        s = self._session(req)
+        self._phase = "verify"
+        changed = Refused("the page changed since the approval; nothing was pressed")
+        b = req.get("button")
+        if not isinstance(b, dict):
+            raise Refused("bad button")
+        frames = self._frames(s)
+        if frames[0]["origin"] != req.get("origin") or frames[0]["origin"] == "opaque" or frames[0]["url"] != req.get("url"):
+            raise changed
+        try:
+            bframe, d, n = self._element(s, b.get("ref"), frames)
+        except Refused:
+            raise changed from None
+        if (bframe["frame_id"] != b.get("frame_id") or bframe["origin"] != b.get("frame_origin")
+                or d.get("kind") not in ("button", "link") or d.get("disabled")
+                or any(str(d.get(k) or "")[:120] != str(b.get(k) or "") for k in self.BOUND + ("label",))):
+            raise changed
+        if req.get("gen") != s.gen:
+            raise Refused("something else was done in the browser since the approval; nothing was pressed")
+        if self._press(self._gate(s, bframe, n)) != req.get("press"):
+            raise changed
+        snap = self.snapshot(s)
+        if totals_key(snap["totals"]) != totals_key(req.get("expect_totals") or []) or snap["captcha"] \
+                or snap["risky_checked"] or sorted({f["origin"] for f in frames}) != req.get("frames"):
+            raise changed
+        if self._form(s, frames, bframe)[1] != req.get("digest"):
+            raise changed
+        # Whatever happens from here on, the press may have happened: never a definite refusal.
+        s.gen += 1  # an approval is good for one press
+        self._phase = "sent"
+        try:
+            r = self._run(s, bframe, {"op": "click", "n": n}) or {}
+            if not r.get("ok"):
+                return self._error("the button vanished while being pressed; it MAY have gone through")
+            return {**self._after_action(s), "phase": "sent"}
+        except (Refused, CdpProtocolError):
+            return self._error("after pressing, the page changed or went somewhere this browser doesn't open; it MAY "
+                               "have gone through")
+        except Exception:
+            self.retire = True
+            self.drop()
+            return self._error("the browser failed after pressing; it MAY have gone through")
 
     def _verify(self, s: Session, req: dict, fields: Any, allow_card: bool) -> tuple[list[dict], list[tuple]]:
         """All-or-nothing: every field must still be exactly the element that was approved."""
@@ -917,6 +1094,7 @@ class Controller:
         self._phase = "verify"
         _, plan = self._verify(s, req, req.get("fields"), allow_card=False)
         self._phase = "filled"
+        s.filled = True
         self._set_all(s, plan)
         self._phase = None  # done: later problems (settling, the snapshot) are ordinary errors
         return self._after_action(s)
