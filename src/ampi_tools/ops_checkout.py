@@ -55,7 +55,7 @@ PAY_WORDS = re.compile(
     r"tilaa|maksa|osta|köp|betala|bestill|kaufen|bezahlen|bestellen|zahlungspflichtig|acheter|payer|"
     r"купить|оплат|заказать|αγορά|παραγγελ|πληρωμ", re.I)
 # A price says what something costs (a slot, a delivery option, "Add to cart - €12"), not what a button does.
-AMOUNT_RE = re.compile(r"[-+–—]?\s*(?:(?:€|\$|£)\s?\d[\d .,]*|\d[\d.,]*\s?(?:€|\$|£|(?:eur|usd|gbp|kr|zł)\b))", re.I)
+AMOUNT_RE = re.compile(r"[-+–—]?\s*(?:(?:€|\$|£)\s?\d[\d .,]*|(?<![\d:.,])\d[\d.,]*\s?(?:€|\$|£|(?:eur|usd|gbp|kr|zł)\b))", re.I)
 PAY_FRAME = re.compile(r"(^|[./])(stripe|adyen|braintreegateway|paypal|paypalobjects|klarna|klarnaservices|shop|checkout|"
                        r"shopifycs|squareup|squarecdn|paytrail|mollie|worldpay|jccsmart|vivapayments|revolut)\.(com|net|app|io|fi|eu)$")
 # Whole captions (without prices, counts and arrows) that only look around or move on, never commit. Where money is in
@@ -101,8 +101,8 @@ ACCOUNT_SAFE = re.compile(
     r"(previous|next) (page|month|week|day|slide)|menu|open menu|close menu|show more|load more|more|see more|"
     r"add (\d+ )?(items? )?to (my |your |the )?(cart|bag|basket)|view (my |your )?(cart|bag|basket)|"
     r"hae|lisää (ostoskoriin|koriin)|seuraava|edellinen|valikko|поиск|найти|назад|вперёд|меню|αναζήτηση|πίσω)", re.I)
-ACCOUNT_CLOSE = re.compile(r"(close|×|dismiss|decline( all)?|reject( all)?|accept( all)? cookies|(only )?necessary( cookies)?( only)?|sulje|закрыть|κλείσιμο)",
-                           re.I)
+ACCOUNT_CLOSE = re.compile(r"(close|×|dismiss|sulje|закрыть|κλείσιμο)", re.I)
+ACCOUNT_COOKIES = re.compile(r"(decline|reject|deny)( all)?( cookies)?|accept( all)? cookies|(only )?necessary( cookies)?( only)?", re.I)
 _DAY = r"(mon(day)?|tue(s(day)?)?|wed(nesday)?|thu(r(s(day)?)?)?|fri(day)?|sat(urday)?|sun(day)?)"
 _MONTH = r"(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sept?(ember)?|oct(ober)?|nov(ember)?|dec(ember)?)"
 _TIME = r"\d{1,2}([:.]\d{2})( ?[ap]\.?m\.?)?|\d{1,2} ?[ap]\.?m\.?"
@@ -128,6 +128,10 @@ ACCOUNT_PLACES = frozenset({"", "home", "index", "start", "classes", "class", "c
 ACCOUNT_OWN = frozenset({"account", "my-account", "profile", "me", "dashboard", "orders", "my-orders", "order-history", "bookings", "my-bookings", "booking",
                          "reservations", "my-reservations", "my-classes", "my-schedule", "members", "member", "members-area", "membership",
                          "memberships", "subscriptions", "tickets", "history"})
+# A part of such an address that does something all the same (old sites book with a plain link).
+ACCOUNT_VERB = re.compile(r"(re|un|de)?-?(book|register|sign-?up|sign-?in|rsvp|attend|apply|request|use|order|add|start|check-?in|refund|like|vote|"
+                          r"follow|go|do|run|set|put|post|take|get|hold|select|choose|schedule|call|action|process|complete|finish|done|varaa|ilmoittaudu|osta)"
+                          r"([-_]?(now|it|this|me|in|up|off|out|class|lesson|course|event|session|spot|seat|place|ticket|online|free|\d+))*", re.I)
 ACCOUNT_VIEW = re.compile(r"\d+|[0-9a-f]{6,}(-[0-9a-f]+)*|details?|view|history|upcoming|past|list|overview|orders|bookings|reservations|profile|index", re.I)
 ACCOUNT_QUERY = frozenset({"page", "p", "q", "query", "date", "month", "week", "day", "time", "from", "to", "start", "end", "category", "sort", "lang", "locale",
                            "view", "id", "tab", "location", "filter", "service", "staff", "duration", "referral"})
@@ -153,6 +157,8 @@ def _place(dest: str, here: str, origin: str) -> bool:
     parts = [x.lower().removesuffix(".html").removesuffix(".php") for x in path.strip("/").split("/")]
     if re.fullmatch(r"[a-z]{2}(-[a-z]{2})?", parts[0]) and len(parts) > 1:  # /en/…
         parts = parts[1:]
+    if any(ACCOUNT_VERB.fullmatch(x) for x in parts[1:]):
+        return False
     if parts[0] in ACCOUNT_OWN:
         if not all(ACCOUNT_VIEW.fullmatch(x) for x in parts[1:]):
             return False
@@ -174,14 +180,20 @@ def account_acts(g: dict, texts: list[str], raw: list[str], money: bool) -> bool
     if kind == "input":
         return False  # (a click into a text field)
     if not texts:
-        return True
-    if g.get("dialog") and _all((ACCOUNT_CLOSE,), texts) and not g.get("submits"):
+        return bool(g.get("submits") or money) or not arrows(raw)
+    closing = {"dialog": (ACCOUNT_CLOSE,), "cookies": (ACCOUNT_CLOSE, ACCOUNT_COOKIES)}.get(str(g.get("dialog") or ""))
+    if closing and _all(closing, texts) and not g.get("submits"):
         return False
     if g.get("submits"):
         return not (g.get("search") and _all((re.compile(r"search|find|hae|поиск|найти|αναζήτηση", re.I),), texts))
     if _all((ACCOUNT_DATE, re.compile(r"(back|menu|previous|next (month|week|day))", re.I)), texts):
         return False
     return not _all((ACCOUNT_SAFE,), texts) or (money and not _all((ADD_TO_CART,), texts))
+
+
+def arrows(raw: list[str]) -> bool:
+    """Only an arrow (the next month, the next picture)."""
+    return bool(raw) and all(re.fullmatch(r"[\s‹›<>«»←→]+", t) for t in raw)
 
 
 def caption(text: str) -> str:
@@ -216,7 +228,7 @@ def priced_ok(raw: list[str]) -> bool:
 
 def money_around(side: "CheckoutSide | None", totals: Any, frames: Any) -> str:
     """Why money may be in play on this page ("" if not)."""
-    total = next((str(t.get("amount")) for t in totals or [] if _money(t)), None)
+    total = next((str(t.get("amount")) for t in totals or [] if t.get("currency") != "?" and _money(t)), None)
     if total:
         return f"shows a total to pay ({clean(total, 20)})"
     psp = side.rules.psp_origins if side is not None else DEFAULT_PSP
@@ -241,6 +253,8 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
     if g.get("signed_in") and account_acts(g, texts, raw, money):
         bad = any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in words)
         return "order" if bad else "commit"
+    if g.get("signed_in") and g.get("tag") == "a" and g.get("kind") == "link":
+        return None  # a plain link to a known place (account_acts): a price or a word next to it does nothing
     if g.get("filled") and money and button and not _all((HARMLESS,) if g.get("submits") else (HARMLESS, MINOR, OPTION), words):
         # Something is entered and there is something to pay: any other button may be the one that orders.
         bad = any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in words if not STEP.fullmatch(t))
@@ -248,7 +262,7 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
     rest = [t for t in words if not any(r.fullmatch(t) for r in (HARMLESS, STEP))]
     if any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in rest):
         return "order"
-    if button and ((raw and not texts) or not priced_ok(raw)):
+    if button and ((raw and not texts and (g.get("submits") or not arrows(raw))) or not priced_ok(raw)):
         return "commit"  # only a price, or a price with something unknown
     if rest:
         here, there = str(g.get("href") or "").split("#")[0], dest.split("#")[0]
@@ -265,8 +279,12 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
     return None
 
 
-TOTAL_EXCLUDE = re.compile(r"sub|vat|alv|tax|vero|incl|sis\.|shipping|delivery|toimitus|discount|alennus|saved|säästä",
-                           re.I)
+# A total line that isn't the amount charged; what it says it includes (VAT, delivery) doesn't count for that.
+TOTAL_EXCLUDE = re.compile(r"sub|\bvat\b|alv|\btax|vero|mwst|moms|shipping|delivery|toimitus|versand|discount|alennus|rabatt|"
+                           r"sav(e|ed|ings?)\b|säästä|\bexcl|\bbefore\b|\bwithout\b|per (person|night|item|month)", re.I)
+_INCLUDED = re.compile(r"\b(incl\w*|inkl\w*|inc|sis\w*|with|after)\b\.?:?.{0,25}?\b(discounts?|alennu\w*|vat|tax(es)?|alv|mwst|moms|gst|btw|iva|tva|fees?|"
+                       r"shipping|delivery|toimitus\w*|versand\w*)\b|\b(vat|tax(es)?|alv|mwst|moms|gst|btw|iva|tva|shipping|delivery)\b\.? "
+                       r"(incl\w*|inkl\w*|sis\w*)", re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,5}")
 
 
@@ -830,9 +848,13 @@ def grand_total(totals: list[dict], currency: str, card_currency: str) -> Decima
     best = None
     for t in totals:
         cur = str(t.get("currency") or "").upper()
+        if TOTAL_EXCLUDE.search(_INCLUDED.sub(" ", str(t.get("label") or ""))):
+            continue
+        if cur == "?":  # a number without a readable currency on a total line: it may be the amount charged
+            return None
         if cur == "KR" and card_currency in ("SEK", "NOK", "DKK"):
             cur = card_currency
-        if cur != currency or TOTAL_EXCLUDE.search(str(t.get("label") or "")):
+        if cur != currency:
             continue
         try:
             amount = Decimal(str(t.get("amount")))
@@ -914,7 +936,10 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
     st = await side.client.call({"cmd": "status"})
     if not st.get("session"):
         raise ToolError("no checkout session; start one with `checkout open URL`")
-    b = await side.client.call({"cmd": "bind_submit", "session": st["session"], "ref": ref})
+    opt = {"option": a["option"]} if a.get("option") is not None else {}
+    b = await side.client.call({"cmd": "bind_submit", "session": st["session"], "ref": ref, **opt})
+    if (b.get("set") is not None) != bool(opt):
+        raise ToolError("internal: the checkout browser answered something else")
     origin, button = str(b.get("origin") or ""), b.get("button") or {}
     if not re.fullmatch(r"https://[a-z0-9.-]+(:\d+)?", origin):
         raise ToolError("buttons are pressed for you only on https pages")
@@ -926,16 +951,19 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
     # something to pay, only known harmless captions (a step, an option, a voucher) are pressed, whatever the language.
     press = b.get("press") or {}
     pay = "card payments go through `checkout pay`, anything else that pays or orders is the owner's to do"
-    captions = [str(t) for t in [*(press.get("texts") or []), str(button.get("label") or "")] if t]
+    captions = [str(t) for t in [*([a["option"]] if opt else press.get("texts") or []), str(button.get("label") or "")] if t]
     plain = [c for c in (caption(t) for t in captions) if c]
     known = (HARMLESS, STEP, MINOR, OPTION)
     moves_on = _all(known, plain) and priced_ok(captions)
     if any(mixed_scripts(t) for t in captions):
         raise ToolError("the button's text mixes alphabets (a disguise); refusing")
     box = b.get("box") if b.get("box") in ("checkbox", "radio") else None
-    if not moves_on and any(PAY_WORDS.search(t) for t in plain):
+    # A tick or a choice by itself pays nothing; what it says about paying is the owner's to judge.
+    still = bool(opt) or bool(box and press.get("tag") == "input")
+    pays = any(PAY_WORDS.search(t) for t in plain) or any(AMOUNT_RE.search(t) for t in captions)
+    if not moves_on and not still and any(PAY_WORDS.search(t) for t in plain):
         raise ToolError("this would pay or order for money: " + pay)
-    if not moves_on and (any(AMOUNT_RE.search(t) for t in captions) or (captions and not plain)):
+    if not moves_on and not still and (any(AMOUNT_RE.search(t) for t in captions) or (captions and not plain and not arrows(captions))):
         raise ToolError("the button shows a price: " + pay)
     in_frame = str(button.get("frame_origin") or "")
     if is_psp(in_frame, side.rules) or PAY_FRAME.search(in_frame):
@@ -944,7 +972,7 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
         raise ToolError("untick the boxes that may add a subscription or cost first (or ask the owner): "
                         + "; ".join(side.scrub(clean(x, 60)) for x in b["risky_checked"][:3]))
     money = money_around(side, b.get("gate_totals") or b.get("totals"), b.get("frames"))
-    if money and not moves_on and not (box and press.get("tag") == "input"):  # (a tick by itself orders nothing)
+    if money and not moves_on and not still:
         raise ToolError(f"the page {money} and this may be the button that orders: {pay}")
     dest = str(press.get("dest") or "")
     m = re.match(r"https?://[^/?#]+", dest)
@@ -956,6 +984,8 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
                          "seen": b.get("seen"), "priced": bool(b.get("priced")), "dest_origin": m.group() if m else "", "around": side.scrub(clean(b.get("around"), 500)),
                          "what": what, "title": side.scrub(clean(b.get("title"), 100)),
                          **({"box": box, "checked": b.get("checked") is True} if box else {}),
+                         **({"set": b["set"], "option": a["option"], "was": side.scrub(clean(b.get("was"), 60))} if opt else {}),
+                         **({"pays": True} if still and pays else {}),
                          "expires": side.clock() + REQUEST_TTL}}
 
 
@@ -997,11 +1027,15 @@ async def describe_submit(s: Services, a: dict) -> str:
     r = a.get("resolved") or {}
     bd = r.get("button") or {}
     do = "Press" if not r.get("box") else "Choose" if r["box"] == "radio" else "Untick" if r.get("checked") else "Tick"
-    lines = [f"{do} “{clean(bd.get('label'), 80) or '(no text)'}” on {r.get('origin')}",
+    label = clean(bd.get("label"), 80) or "(no text)"
+    lines = [f"{do} “{label}” on {r.get('origin')}" if not r.get("set") else
+             f"Set “{label}” to “{clean(r.get('option'), 200)}” on {r.get('origin')}" + (f" (now: {r['was']})" if r.get("was") else ""),
              *([f"  inside a frame from {bd.get('frame_origin')}"] if bd.get("frame_origin") != r.get("origin") else []),
              f"Page: {clean(r.get('title'), 100)}", f"For (Ampi's words): {clean(r.get('what'), 200)}"]
     if r.get("dest_origin") and r["dest_origin"] != r.get("origin"):
         lines.append(f"⚠ Sends it to another site: {r['dest_origin']}")
+    if r.get("pays"):
+        lines.append("⚠ It says something about paying")
     if r.get("form"):
         lines += ["Filled in there:", *(f"  - {x}" for x in r["form"])]
     else:
@@ -1026,7 +1060,7 @@ async def checkout_submit(s: Services, a: dict) -> Result:
         resp = await side.client.call({"cmd": "submit", "session": r["session"], "origin": r["origin"], "url": r["url"],
                                        "button": r["button"], "digest": r["digest"], "gen": r["gen"],
                                        "press": r["press"], "frames": r["frames"], "seen": r.get("seen"),
-                                       **{k: r[k] for k in ("box", "checked") if k in r},
+                                       **{k: r[k] for k in ("box", "checked", "set", "option") if k in r},
                                        "expect_totals": [{"amount": t.get("amount"), "currency": t.get("currency")}
                                                          for t in r["totals"]]}, timeout=90)
     except CheckoutRefused:
@@ -1034,7 +1068,7 @@ async def checkout_submit(s: Services, a: dict) -> Result:
     except ToolError as e:
         raise ToolError(f"{e}. It MAY have gone through: look for a confirmation (page, email) before trying again") from None
     snap = side.mask(resp.get("snapshot") or {}, r["session"], r["origin"])
-    return side.scrub(f"Pressed “{clean((r['button'] or {}).get('label'), 60)}” on {r['origin']}. The page now says: "
+    return side.scrub(f"{'Set' if r.get('set') else 'Pressed'} “{clean((r['button'] or {}).get('label'), 60)}” on {r['origin']}. The page now says: "
                       f"{clean(snap.get('title'), 100)}: {_excerpt(snap)}\n(Not a confirmation by itself: check the page.)")
 
 

@@ -9,7 +9,7 @@ from decimal import Decimal
 import pytest
 
 from ampi_tools.ops import Approvals, Policy, Services, validate
-from ampi_tools.ops_checkout import CheckoutSide, PaymentRules, field_matches, render
+from ampi_tools.ops_checkout import CheckoutSide, PaymentRules, field_matches, grand_total, render
 from ampi_tools.server import Daemon
 from ampi_tools.todoist import ToolError
 from ampi_tools.vault import Vault, check_card, has_card_number, luhn_ok, mask_text
@@ -462,6 +462,20 @@ def test_a_total_that_cannot_be_read_is_not_guessed(tmp_path):
     assert run(d.run(req("checkout.pay", **PAY), None, origin="private")).get("approval")
 
 
+@pytest.mark.parametrize("text,total", [
+    ("Subtotal €90.00\nTotal €99.00", "99.00"), ("Total incl. VAT: €99.00", "99.00"), ("Total (incl. €20.00 VAT) €99.00", "99.00"),
+    ("Yhteensä (sis. ALV 24%) 99,00 €", "99.00"), ("Gesamtsumme 12 €\nGesamt inkl. MwSt. 99,00 €", "99.00"), ("Total with delivery €99", "99.00"),
+    ("Total €99.00\nTotal savings: €120.00\nTotal tax €200.00", "99.00"), ("Total after discount €99.00", "99.00"), ("Total VAT included €99", "99.00"),
+    ("Total savings: €12.00\nYou pay: €99.00", None), ("Total tax €20.00", None), ("Total excl. VAT €80", None), ("Total per person €8", None),
+    ("Total €50.00\nGrand total 1234.00", None), ("Order total\nIncl. VAT €20.00\n€99.00", None), ("Total €50\nTotal 3 x €40", None),
+    ("Total €50\nTotal weight: 2.5 kg\nTotal items: 3", "50.00"),
+])
+def test_the_total_that_is_charged(text, total):
+    from ampi_tools import checkout as co
+    got = grand_total(co.extract_totals(text), "EUR", "EUR")
+    assert got == (None if total is None else Decimal(total)), co.extract_totals(text)
+
+
 def test_kr_counts_as_the_card_currency(tmp_path):
     d, _, ctl = make(tmp_path, currency="SEK")
     ctl.totals = [{"amount": "23.90", "currency": "KR", "label": "Totalt"}]
@@ -686,9 +700,33 @@ def test_a_box_is_ticked_with_approval(tmp_path, box, says):
     ctl.elements["f0:20"]["tag"] = "div"  # something that only looks like a box
     with pytest.raises(ToolError, match="may be the button that orders"):
         run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
-    ctl.elements["f0:20"].update(label="Pay with my saved card", tag="input")
-    with pytest.raises(ToolError):
+    ctl.elements["f0:20"].update(label="I understand that I pay at the desk", tag="input")
+    run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    assert "⚠ It says something about paying" in d.approvals.unnotified()[-1]["card"]["details"]
+
+
+def test_a_field_is_set_with_approval(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"].update(label="Payment", tag="select")
+    ctl.box, ctl.totals, ctl.gate_totals = {"set": "select", "option": "Pay at the desk", "was": "Card"}, TOTAL, TOTAL
+    res = run(d.run(req("checkout.submit", **SUBMIT, option="Pay at the desk"), None, origin="private"))
+    det = d.approvals.unnotified()[0]["card"]["details"]
+    assert det.startswith("Set “Payment” to “Pay at the desk” on") and "(now: Card)" in det and "⚠ It says something about paying" in det
+    assert approve(d, res)["status"] == "done"
+    (call,) = [c for c in ctl.calls if c["cmd"] == "submit"]
+    assert call["set"] == "select" and call["option"] == "Pay at the desk"
+    assert [c for c in ctl.calls if c["cmd"] == "bind_submit"][0]["option"] == "Pay at the desk"
+    with pytest.raises(ToolError, match="something else"):  # (never a press where a value was asked for, or the other way round)
         run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    ctl.box = {}
+    with pytest.raises(ToolError, match="something else"):
+        run(d.run(req("checkout.submit", **SUBMIT, option="2"), None, origin="private"))
+
+
+def test_an_arrow_can_be_pressed_with_approval(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals = "›", []
+    assert run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))["approval"]
 
 
 def test_submit_says_when_it_goes_to_another_site(tmp_path):
