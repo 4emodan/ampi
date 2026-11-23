@@ -21,14 +21,8 @@ if [[ $EUID -ne 0 ]]; then
   echo "Run as root: sudo bash deploy/install-lightpanda.sh" >&2
   exit 1
 fi
-busy() {  # an open checkout session (perhaps paying) must not be cut off
-  out=$(sudo -u ampitools /usr/bin/python3 -I -c '
-import json, socket
-s = socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect("/run/ampi-checkout.sock")
-s.sendall(b"{\"cmd\": \"status\"}\n"); print(json.loads(s.recv(4096)).get("session") or "")' 2>/dev/null || true)
-  [[ -n $out ]]
-}
-if busy; then
+. "$SRC_DIR/deploy/checkout-busy.sh"
+if checkout_busy; then  # an open checkout session (perhaps paying) must not be cut off
   echo "A checkout session is open; close it (or wait 10 minutes) and run this again." >&2
   exit 1
 fi
@@ -84,25 +78,46 @@ systemctl daemon-reload
 systemctl stop ampi-checkout.service ampi-checkout-engine.service ampi-checkout-lp.service 2>/dev/null || true
 systemctl restart ampi-checkout-net.service
 
+# Until it has shown that it works, it isn't offered.
+give_up() {
+  echo "$1" >&2
+  sed -i '/^AMPI_CHECKOUT_LP_UID=/d' "$CTL_ENV"
+  systemctl stop ampi-checkout.service ampi-checkout-lp.service 2>/dev/null || true
+  exit 1
+}
+ask() {  # one request to the controller, as ampi-tools
+  sudo -u ampitools /usr/bin/python3 -I -c '
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(90); s.connect("/run/ampi-checkout.sock")
+s.sendall(sys.argv[1].encode() + b"\n"); r = json.loads(s.makefile().readline())
+v = r
+for k in sys.argv[2].split("."): v = (v or {}).get(k)
+print(v if r.get("ok") else "error: " + str(r.get("error")))' "$@"
+}
+
 echo "==> Check"
-busy || true  # (any request starts the controller, and with it both engines)
+ask '{"cmd": "status"}' state >/dev/null || give_up "the checkout browser doesn't answer"  # (starts it, with both engines)
 for _ in $(seq 1 30); do
   ss -Hltn 'sport = :19334' | grep -q . && break
   sleep 0.5
 done
 systemctl is-active --quiet ampi-checkout-lp.service && ss -Hltn 'sport = :19334' | grep -q . || {
-  echo "The engine didn't start; see: systemctl status ampi-checkout-lp" >&2; exit 1; }
+  give_up "The engine didn't start; see: systemctl status ampi-checkout-lp"; }
 if [[ $(ss -Hltnpe 'sport = :19334' | grep -o 'uid:[0-9]*' | head -1) != "uid:$(id -u "$LP_USER")" ]]; then
-  echo "the listener on 19334 isn't $LP_USER's" >&2; exit 1
+  give_up "the listener on 19334 isn't $LP_USER's"
 fi
-systemctl is-active --quiet ampi-checkout-engine.service || { echo "the first engine isn't running" >&2; exit 1; }
+systemctl is-active --quiet ampi-checkout-engine.service || give_up "the first engine isn't running"
 for u in assistant ampitools; do
   id "$u" >/dev/null 2>&1 || continue
   if sudo -u "$u" /usr/bin/python3 -I -c '
 import socket; socket.create_connection(("127.0.0.1", 19334), timeout=3)' 2>/dev/null; then
-    echo "SECURITY: user $u could connect to the engine's port; check the nft table" >&2
-    exit 1
+    give_up "SECURITY: user $u could connect to the engine's port; check the nft table"
   fi
 done
 echo "    engine port refused for other users: ok"
+# A real page, with everything it runs under (firewall, no writable code, filtered system calls).
+title=$(ask '{"cmd": "open", "url": "https://example.com/", "engine": "lightpanda"}' snapshot.title) || title=
+ask "{\"cmd\": \"close\", \"session\": \"$(ask '{"cmd": "status"}' session || true)\"}" ok >/dev/null || true
+[[ $title == "Example Domain" ]] || give_up "it didn't open a page (${title:-no answer}); see: systemctl status ampi-checkout-lp"
+echo "    opened a page: ok"
 echo "Done."

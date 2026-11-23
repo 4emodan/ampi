@@ -87,8 +87,8 @@ class FakeCtl:
                     "totals": self.totals, "risky_checked": self.risky, "captcha": getattr(self, "captcha", False),
                     "title": "Booking", "form": self.form, "digest": "d1", "gen": 3, "around": "Fri 10:00 selected", "seen": "s1", "priced": getattr(self, "priced", False),
                     "frames": getattr(self, "frames", [SHOP]),
-                    "press": {"tag": "button", "texts": [e["label"]], "dest": getattr(self, "dest", SHOP + "/b"), "method": "post",
-                              "submits": True}}
+                    "press": {"tag": e.get("tag", "button"), "texts": [e["label"]], "dest": getattr(self, "dest", SHOP + "/b"), "method": "post",
+                              "submits": True}, **getattr(self, "box", {})}
         if cmd == "submit":
             if self.fail_pay:
                 raise self.fail_pay
@@ -418,6 +418,50 @@ def test_stated_amount_must_be_the_grand_total(tmp_path):
         run(d.run(req("checkout.pay", **{**PAY, "amount": "109.00"}), None, origin="private"))
 
 
+def test_the_engine_reaches_the_controller_only_when_chosen(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.session = None
+    run(d.run(req("checkout.open", url=f"{SHOP}/x", engine="lightpanda"), None, origin="private"))
+    run(d.run(req("checkout.open", url=f"{SHOP}/x"), None, origin="private"))
+    a, b = [c for c in ctl.calls if c["cmd"] == "open"]
+    assert a["engine"] == "lightpanda" and "engine" not in b
+    with pytest.raises(ToolError, match="obscura or lightpanda"):
+        req("checkout.open", url=f"{SHOP}/x", engine="chrome")
+
+
+def test_no_card_payments_in_the_second_engine(tmp_path):
+    d, _, ctl = make(tmp_path)
+    real = ctl.call
+
+    async def call(rq, timeout=None):
+        r = await real(rq, timeout)
+        return {**r, "engine": "lightpanda"} if rq["cmd"] == "status" else r
+    ctl.call = call
+    with pytest.raises(ToolError, match="default engine"):
+        run(d.run(req("checkout.pay", **PAY), None, origin="private"))
+    assert not [c for c in ctl.calls if c["cmd"] in ("bind", "pay")]
+
+
+def test_the_command_line_passes_the_engine(monkeypatch):
+    from ampi_tools import client
+    seen = []
+    monkeypatch.setattr(client, "_run_waiting", lambda who, ops, *a: seen.append(ops) or 0)
+    client.checkout_main(["open", "https://x.example/", "--engine", "lightpanda"])
+    client.checkout_main(["open", "https://x.example/"])
+    a, b = ([o["args"] for o in (x if isinstance(x, list) else [x])][0] for x in seen)
+    assert a["engine"] == "lightpanda" and not b.get("engine")
+
+
+def test_a_total_that_cannot_be_read_is_not_guessed(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.totals = [{"amount": "23.90", "currency": "EUR", "label": "total"},
+                  {"amount": "unreadable (1,23,456)", "currency": "EUR", "label": "grand total"}]
+    with pytest.raises(ToolError, match="no order total in EUR found.*unreadable"):
+        run(d.run(req("checkout.pay", **PAY), None, origin="private"))
+    ctl.totals[1]["label"] = "subtotal"  # (not what is charged)
+    assert run(d.run(req("checkout.pay", **PAY), None, origin="private")).get("approval")
+
+
 def test_kr_counts_as_the_card_currency(tmp_path):
     d, _, ctl = make(tmp_path, currency="SEK")
     ctl.totals = [{"amount": "23.90", "currency": "KR", "label": "Totalt"}]
@@ -624,6 +668,27 @@ def test_submit_asks_the_owner_and_presses_after_approval(tmp_path):
     assert out["status"] == "done" and "Booking confirmed" in out["text"]
     (call,) = [c for c in ctl.calls if c["cmd"] == "submit"]
     assert call["digest"] == "d1" and call["url"].endswith("/book") and call["gen"] == 3
+
+
+@pytest.mark.parametrize("box,says", [({"box": "checkbox", "checked": False}, "Tick"), ({"box": "checkbox", "checked": True}, "Untick"),
+                                      ({"box": "radio", "checked": False}, "Choose")])
+def test_a_box_is_ticked_with_approval(tmp_path, box, says):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"].update(label="I accept the house rules", tag="input")
+    ctl.box, ctl.totals, ctl.gate_totals = box, TOTAL, TOTAL  # (a tick by itself orders nothing, also where there is a total)
+    ctl.form = [{"label": "Email", "kind": "input", "value": "•••", "shown": True}]
+    res = run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    det = d.approvals.unnotified()[0]["card"]["details"]
+    assert det.startswith(f"{says} “I accept the house rules” on") and "Email: (your login)" in det
+    assert approve(d, res)["status"] == "done"
+    (call,) = [c for c in ctl.calls if c["cmd"] == "submit"]
+    assert {k: call[k] for k in ("box", "checked")} == box
+    ctl.elements["f0:20"]["tag"] = "div"  # something that only looks like a box
+    with pytest.raises(ToolError, match="may be the button that orders"):
+        run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    ctl.elements["f0:20"].update(label="Pay with my saved card", tag="input")
+    with pytest.raises(ToolError):
+        run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
 
 
 def test_submit_says_when_it_goes_to_another_site(tmp_path):

@@ -12,6 +12,7 @@ Description=Claude Assistant checkout browser: the engine (Obscura, CDP on 127.0
 BindsTo=ampi-checkout.service
 Requires=ampi-checkout-net.service
 After=ampi-checkout-net.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

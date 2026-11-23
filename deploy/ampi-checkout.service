@@ -8,6 +8,9 @@ After=ampi-checkout-net.service ampi-checkout-engine.service ampi-checkout.socke
 Wants=ampi-checkout-lp.service
 After=ampi-checkout-lp.service
 
+# Every session can end with a restart.
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 User=ampicheckoutctl
@@ -15,6 +18,9 @@ Group=ampicheckoutctl
 EnvironmentFile=/etc/ampi-checkout/ctl.env
 ExecStartPre=+/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout_net.py check
 ExecStart=/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout.py serve
+# Before this counts as stopped, the engine is really gone: else a request that is already waiting could start this again
+# while the old engine still runs, and it would get a second session.
+ExecStopPost=-+/bin/sh -c 'systemctl kill --signal=KILL ampi-checkout-engine.service ampi-checkout-lp.service 2>/dev/null; for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -u ampicheckout,ampicheckoutlp >/dev/null || break; sleep 0.2; done'
 # A clean exit (after a payment or an engine failure) isn't restarted: the socket starts it again on the next
 # request, together with a fresh engine (ampi-checkout-engine.service has BindsTo= this unit).
 Restart=on-failure

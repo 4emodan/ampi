@@ -695,6 +695,29 @@ def test_bad_requests():
     ("Total $3.00", [("3.00", "USD")]),
     ("Total (2 items)", []),
     ("Subtotal 10.00 EUR\nTotal 12,50 EUR", [("10.00", "EUR"), ("12.50", "EUR")]),
+    # A number is read whole or not at all.
+    ("Total: €2500.00", [("2500.00", "EUR")]),
+    ("Total: 1234.00 €", [("1234.00", "EUR")]),
+    ("Total 12345 €", [("12345.00", "EUR")]),
+    ("Total EUR 1234,5", [("1234.50", "EUR")]),
+    ("Total: 1 234,00 €", [("1234.00", "EUR")]),
+    ("Total: 1\u00a0234\u00a0567,00 €", [("1234567.00", "EUR")]),
+    ("Total: 1\u202f234,00 €", [("1234.00", "EUR")]),
+    ("Total: 1\u2009234 kr", [("1234.00", "KR")]),
+    ("Total 1’234.50 CHF", [("1234.50", "CHF")]),
+    ("Total 1'234.50 CHF", [("1234.50", "CHF")]),
+    ("Total 1.234,56 €", [("1234.56", "EUR")]),
+    ("Total 1.234 €", [("1234.00", "EUR")]),
+    ("Total 2 1234.00 €", [("1234.00", "EUR")]),
+    ("Total 10:30 12 €", [("12.00", "EUR")]),
+    ("Total: 12.00 zł", [("12.00", "PLN")]),
+    ("Total 120.00€.", [("120.00", "EUR")]),
+    ("Total 1,23,456 €", [("unreadable (1,23,456)", "EUR")]),
+    ("Total 1234:50 kr", [("unreadable (1234:50)", "KR")]),
+    ("Total 12·50 €", [("unreadable (12·50)", "EUR")]),
+    ("Total €0.1234", [("unreadable (0.1234)", "EUR")]),
+    ("Total 1,234,50 €", [("unreadable (1,234,50)", "EUR")]),
+    ("Total\n.50 €", [("unreadable (.50)", "EUR")]),
 ])
 def test_extract_totals(text, expected):
     assert [(t["amount"], t["currency"]) for t in co.extract_totals(text)] == expected
@@ -734,6 +757,9 @@ def test_checkout_net_ruleset_with_the_second_engine():
     assert "\t\ttcp sport 19334 meta skuid != 993 drop" in added
     same = [ln.replace("991", "993").replace("19333", "19334") for ln in one.splitlines() if "991" in ln or "19333" in ln]
     assert [ln for ln in added if "993" in ln or "19334" in ln] == same  # exactly the same rules, for its user and port
+    ports = [i for i, ln in enumerate(both) if "dport 1933" in ln or "sport 1933" in ln]
+    rest = [i for i, ln in enumerate(both) if "meta skuid 99" in ln]
+    assert len(ports) == 4 and max(ports) < min(rest)  # nothing is allowed before both ports are closed
     files = checkout_net.files(991, 994, ["185.12.64.1"], (993, 995))
     assert "ampicheckoutlp:x:993:995:" in files["passwd-lp"] and "991" not in files["passwd-lp"] + files["group-lp"]
     assert "ampicheckout:x:991:994:" in files["passwd"]
@@ -776,6 +802,14 @@ def test_unknown_or_missing_engines(env):
     assert "isn't installed" in c.handle({"cmd": "open", "url": f"{SHOP}/checkout", "engine": "lightpanda"})["error"]
 
 
+def test_two_engines_need_more_memory(two):
+    c, _, _ = two
+    c.mem_mb = lambda: co.MIN_MEM_MB + 100
+    assert "short of memory" in c.handle({"cmd": "open", "url": f"{SHOP}/checkout"})["error"]
+    c.engines = {"obscura"}
+    assert c.handle({"cmd": "open", "url": f"{SHOP}/checkout"})["ok"]
+
+
 def test_no_card_goes_into_the_second_engine(two):
     c, eng, _ = two
     r = c.handle({"cmd": "open", "url": f"{SHOP}/checkout", "engine": "lightpanda"})
@@ -786,6 +820,7 @@ def test_no_card_goes_into_the_second_engine(two):
 def test_each_engine_has_its_own_user_and_port(monkeypatch):
     seen = []
     monkeypatch.setattr(co, "connect_engine", lambda uid, **kw: seen.append((uid, kw["port"])))
+    assert co.CDP_PORT == checkout_net.CDP_PORT and co.ENGINES == {"obscura": checkout_net.CDP_PORT, "lightpanda": checkout_net.LP_PORT}
     c = co.Controller(engine_uid=11, lp_uid=12)
     c._connect("obscura")
     c._connect("lightpanda")

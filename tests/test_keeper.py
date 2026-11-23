@@ -376,6 +376,8 @@ def test_checkout_from_a_watcher_is_bound_to_its_site_and_session(keeper_daemon)
         run(daemon.run([{"op": "checkout.open", "args": {"url": "https://evil.example/x"}}], None, None, origin))
     with pytest.raises(Exception, match="may only open"):
         run(daemon.run([{"op": "checkout.open", "args": {"url": "http://tickets.example/x"}}], None, None, origin))
+    with pytest.raises(Exception, match="default browser engine"):
+        run(daemon.run([{"op": "checkout.open", "args": {"url": "https://tickets.example/x", "engine": "lightpanda"}}], None, None, origin))
     # A session someone else opened (the owner's chat) can't be driven by the watcher.
     with pytest.raises(Exception, match="wasn't opened by this watcher"):
         run(daemon.run([{"op": "checkout.click", "args": {"ref": "f0:1"}}], None, None, origin))
