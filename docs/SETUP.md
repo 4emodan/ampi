@@ -524,6 +524,30 @@ you type the passphrase twice). Changes apply at once (no restart). "Find from a
 Google Maps (needs `MAPS_API_KEY`; at most 30 lookups a day from the hub). The page refuses other hostnames and
 cross-site requests, so a site open in your browser can't use the tunnel.
 
+## 8g. Companion app: your Android phone (optional)
+
+Notifications, alarms and timers on your phone, asked for in chat ("wake me at 7"). Android 16 or later. How it works and
+what protects it: [COMPANION.md](COMPANION.md).
+
+1. Server: `sudo bash deploy/install-phone.sh`. Nothing listens on the network until a phone is paired; pairing the first
+   phone opens TCP port 28471 (in `ufw`, if you use it; a Hetzner Cloud firewall needs the same rule), and removing the
+   last phone closes it.
+2. Your PC (Android SDK and Android Studio installed): `.\companion\build.ps1 -Release` builds the app and, the first
+   time, makes your signing key in `%USERPROFILE%\.ampi-companion`. Keep a copy of that folder offline.
+3. Phone: Settings → About phone → tap Build number 7 times; Developer options → USB debugging. Connect the cable, then:
+
+   ```powershell
+   .\scripts\companion.ps1 -Install -Pair
+   ```
+
+   Confirm on the phone, compare the code on both screens, answer yes on the PC, then press "The codes match". Switch USB
+   debugging off again. The app shows what it still needs (notifications, background, full-screen alarms).
+4. Server: add `"Bash(phone:*)"` to `allowed_tools` in `/home/assistant/config.toml`, then
+   `systemctl restart claude-assistant`.
+
+`ampi-phone status` and `ampi-phone devices` (root) show the state; **lost phone:** `ampi-phone remove phone`. Updating the
+app: build again and `-Install`; the pairing stays. `sudo bash deploy/install-phone.sh --uninstall` removes everything.
+
 ## 9. Watchers (automations)
 
 A watcher wakes on **triggers** (a time, a new email, a new Telegram message, a new Todoist task, a YouTube
