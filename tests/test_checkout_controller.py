@@ -757,6 +757,9 @@ def test_checkout_net_ruleset_with_the_second_engine():
     assert "\t\ttcp sport 19334 meta skuid != 993 drop" in added
     same = [ln.replace("991", "993").replace("19333", "19334") for ln in one.splitlines() if "991" in ln or "19333" in ln]
     assert [ln for ln in added if "993" in ln or "19334" in ln] == same  # exactly the same rules, for its user and port
+    ports = [i for i, ln in enumerate(both) if "dport 1933" in ln or "sport 1933" in ln]
+    rest = [i for i, ln in enumerate(both) if "meta skuid 99" in ln]
+    assert len(ports) == 4 and max(ports) < min(rest)  # nothing is allowed before both ports are closed
     files = checkout_net.files(991, 994, ["185.12.64.1"], (993, 995))
     assert "ampicheckoutlp:x:993:995:" in files["passwd-lp"] and "991" not in files["passwd-lp"] + files["group-lp"]
     assert "ampicheckout:x:991:994:" in files["passwd"]
@@ -799,6 +802,14 @@ def test_unknown_or_missing_engines(env):
     assert "isn't installed" in c.handle({"cmd": "open", "url": f"{SHOP}/checkout", "engine": "lightpanda"})["error"]
 
 
+def test_two_engines_need_more_memory(two):
+    c, _, _ = two
+    c.mem_mb = lambda: co.MIN_MEM_MB + 100
+    assert "short of memory" in c.handle({"cmd": "open", "url": f"{SHOP}/checkout"})["error"]
+    c.engines = {"obscura"}
+    assert c.handle({"cmd": "open", "url": f"{SHOP}/checkout"})["ok"]
+
+
 def test_no_card_goes_into_the_second_engine(two):
     c, eng, _ = two
     r = c.handle({"cmd": "open", "url": f"{SHOP}/checkout", "engine": "lightpanda"})
@@ -809,6 +820,7 @@ def test_no_card_goes_into_the_second_engine(two):
 def test_each_engine_has_its_own_user_and_port(monkeypatch):
     seen = []
     monkeypatch.setattr(co, "connect_engine", lambda uid, **kw: seen.append((uid, kw["port"])))
+    assert co.CDP_PORT == checkout_net.CDP_PORT and co.ENGINES == {"obscura": checkout_net.CDP_PORT, "lightpanda": checkout_net.LP_PORT}
     c = co.Controller(engine_uid=11, lp_uid=12)
     c._connect("obscura")
     c._connect("lightpanda")

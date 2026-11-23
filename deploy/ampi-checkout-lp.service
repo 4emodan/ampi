@@ -8,6 +8,9 @@ Description=Claude Assistant checkout browser: the second engine (Lightpanda, CD
 BindsTo=ampi-checkout.service
 Requires=ampi-checkout-net.service
 After=ampi-checkout-net.service
+# Every session can end with a restart; but one that can't start at all doesn't try for ever.
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=simple
@@ -16,7 +19,7 @@ Group=ampicheckoutlp
 Environment=HOME=/tmp/h
 Environment=LIGHTPANDA_DISABLE_TELEMETRY=true
 ExecStartPre=+/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout_net.py check
-ExecStart=/usr/local/lib/lightpanda/current/lightpanda serve --host 127.0.0.1 --port 19334 --load-resources worker --load-resources iframe --load-resources stylesheet --user-agent-suffix AmpiBrowser/1.0 --v8-flags-unsafe "--jitless --max-old-space-size=512" --log-level error
+ExecStart=/usr/local/lib/lightpanda/current/lightpanda serve --host 127.0.0.1 --port 19334 --load-resources worker --load-resources iframe --load-resources stylesheet --user-agent-suffix AmpiBrowser/1.0 --v8-flags-unsafe "--jitless --max-old-space-size=512" --block-private-networks --log-level error
 # Nothing from pages (console output, errors) reaches the journal.
 StandardOutput=null
 StandardError=null

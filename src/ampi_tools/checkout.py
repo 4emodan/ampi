@@ -787,7 +787,7 @@ class Controller:
         self.fresh = signin
         uids = {"obscura": engine_uid, "lightpanda": lp_uid}
         self._connect = (lambda engine: connect()) if connect else (
-            lambda engine: connect_engine(uids[engine], port=ENGINES[engine]))
+            lambda engine: connect_engine(uids[engine], port=ENGINES[engine], wait=ENGINE_WAIT if engine == "obscura" else 8))
         self.engines = {"obscura"} | ({"lightpanda"} if lp_uid is not None else set())
         self.clock, self.mem_mb, self.sleep = clock, mem_mb, sleep
         self.check_url = check_url or br.check_url
@@ -915,7 +915,8 @@ class Controller:
             raise Refused("the checkout browser is starting afresh; try again in a few seconds")
         if engine not in self.engines:
             raise Refused("the second browser engine isn't installed")
-        if self.mem_mb() < MIN_MEM_MB:
+        # (The first engine idles next to the second one's session, or the other way round.)
+        if self.mem_mb() < MIN_MEM_MB + (200 if len(self.engines) > 1 else 0):
             raise Refused("the server is short of memory right now; try again later")
         cdp = self._connect(engine)
         try:

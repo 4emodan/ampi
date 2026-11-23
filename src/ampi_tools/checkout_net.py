@@ -39,7 +39,16 @@ STATE = "/run/ampi-checkout-net.sha256"
 TABLE = "ampi_checkout"
 
 
-def engine_rules(u: int, port: int, ctl_uid: int, resolvers: list[str]) -> list[str]:
+def port_rules(u: int, port: int, ctl_uid: int) -> list[str]:
+    return [
+        # The debugger port, for every user and both families: only the controller and root may connect.
+        f"\t\ttcp dport {port} meta skuid != {{ 0, {ctl_uid} }} reject with tcp reset",
+        # Anti-squatter: whatever answers from that port must be the engine's user.
+        f"\t\ttcp sport {port} meta skuid != {u} drop",
+    ]
+
+
+def engine_rules(u: int, resolvers: list[str]) -> list[str]:
     r4 = [r for r in resolvers if ":" not in r]
     r6 = [r for r in resolvers if ":" in r]
     dns = []
@@ -48,10 +57,6 @@ def engine_rules(u: int, port: int, ctl_uid: int, resolvers: list[str]) -> list[
     if r6:
         dns.append(f"\t\tmeta skuid {u} ip6 daddr {{ {', '.join(r6)} }} meta l4proto {{ tcp, udp }} th dport 53 accept")
     return [
-        # The debugger port, for every user and both families: only the controller and root may connect.
-        f"\t\ttcp dport {port} meta skuid != {{ 0, {ctl_uid} }} reject with tcp reset",
-        # Anti-squatter: whatever answers from that port must be the engine's user.
-        f"\t\ttcp sport {port} meta skuid != {u} drop",
         # The engine's answers to the controller (and to the sites it opened) on connections already allowed.
         f"\t\tmeta skuid {u} ct state established,related accept",
         *dns,
@@ -68,14 +73,15 @@ def ruleset(engine_uid: int, ctl_uid: int, own4: list[str], own6: list[str], res
             lp_uid: int | None = None) -> str:
     deny4 = bn._collapse(list(bn.DENY4) + own4)
     deny6 = bn._collapse(list(bn.DENY6) + own6)
+    engines = [(engine_uid, CDP_PORT), *([(lp_uid, LP_PORT)] if lp_uid is not None else [])]
     return "\n".join([
         f"table inet {TABLE} {{",
         "\tset deny4 {", "\t\ttype ipv4_addr", "\t\tflags interval", f"\t\telements = {{ {', '.join(deny4)} }}", "\t}",
         "\tset deny6 {", "\t\ttype ipv6_addr", "\t\tflags interval", f"\t\telements = {{ {', '.join(deny6)} }}", "\t}",
         "\tchain output {",
         "\t\ttype filter hook output priority 0; policy accept;",
-        *engine_rules(engine_uid, CDP_PORT, ctl_uid, resolvers),
-        *(engine_rules(lp_uid, LP_PORT, ctl_uid, resolvers) if lp_uid is not None else []),
+        *(r for uid, port in engines for r in port_rules(uid, port, ctl_uid)),
+        *(r for uid, _ in engines for r in engine_rules(uid, resolvers)),
         "\t}",
         "}",
     ]) + "\n"

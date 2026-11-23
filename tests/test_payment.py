@@ -418,6 +418,40 @@ def test_stated_amount_must_be_the_grand_total(tmp_path):
         run(d.run(req("checkout.pay", **{**PAY, "amount": "109.00"}), None, origin="private"))
 
 
+def test_the_engine_reaches_the_controller_only_when_chosen(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.session = None
+    run(d.run(req("checkout.open", url=f"{SHOP}/x", engine="lightpanda"), None, origin="private"))
+    run(d.run(req("checkout.open", url=f"{SHOP}/x"), None, origin="private"))
+    a, b = [c for c in ctl.calls if c["cmd"] == "open"]
+    assert a["engine"] == "lightpanda" and "engine" not in b
+    with pytest.raises(ToolError, match="obscura or lightpanda"):
+        req("checkout.open", url=f"{SHOP}/x", engine="chrome")
+
+
+def test_no_card_payments_in_the_second_engine(tmp_path):
+    d, _, ctl = make(tmp_path)
+    real = ctl.call
+
+    async def call(rq, timeout=None):
+        r = await real(rq, timeout)
+        return {**r, "engine": "lightpanda"} if rq["cmd"] == "status" else r
+    ctl.call = call
+    with pytest.raises(ToolError, match="default engine"):
+        run(d.run(req("checkout.pay", **PAY), None, origin="private"))
+    assert not [c for c in ctl.calls if c["cmd"] in ("bind", "pay")]
+
+
+def test_the_command_line_passes_the_engine(monkeypatch):
+    from ampi_tools import client
+    seen = []
+    monkeypatch.setattr(client, "_run_waiting", lambda who, ops, *a: seen.append(ops) or 0)
+    client.checkout_main(["open", "https://x.example/", "--engine", "lightpanda"])
+    client.checkout_main(["open", "https://x.example/"])
+    a, b = ([o["args"] for o in (x if isinstance(x, list) else [x])][0] for x in seen)
+    assert a["engine"] == "lightpanda" and not b.get("engine")
+
+
 def test_a_total_that_cannot_be_read_is_not_guessed(tmp_path):
     d, _, ctl = make(tmp_path)
     ctl.totals = [{"amount": "23.90", "currency": "EUR", "label": "total"},

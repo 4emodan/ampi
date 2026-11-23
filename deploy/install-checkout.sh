@@ -61,10 +61,11 @@ if [[ ! -f $CONF_DIR/resolvers ]]; then
 fi
 printf 'AMPI_CHECKOUT_CLIENT_UIDS=%s\nAMPI_CHECKOUT_ENGINE_UID=%s\n' "$(id -u "$TOOLS_USER")" "$(id -u "$ENGINE_USER")" \
   > "$CONF_DIR/ctl.env"
-# The sign-in service (deploy/install-phone.sh) may ask the controller to fill a login in, and for nothing else.
+# The second engine, where deploy/install-lightpanda.sh has put it.
 if [[ -x /usr/local/lib/lightpanda/current/lightpanda ]] && id ampicheckoutlp >/dev/null 2>&1; then
   printf 'AMPI_CHECKOUT_LP_UID=%s\n' "$(id -u ampicheckoutlp)" >> "$CONF_DIR/ctl.env"
 fi
+# The sign-in service (deploy/install-phone.sh) may ask the controller to fill a login in, and for nothing else.
 if id ampisignin >/dev/null 2>&1; then printf 'AMPI_CHECKOUT_SIGNIN_UIDS=%s\n' "$(id -u ampisignin)" >> "$CONF_DIR/ctl.env"; fi
 chmod 644 "$CONF_DIR/resolvers" "$CONF_DIR/ctl.env"
 
