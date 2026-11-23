@@ -16,9 +16,6 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
-MAX_THREADS = 20
-MAX_ITEMS = 5
-
 _HIDDEN = re.compile(r"[­͏؜ᅟᅠ឴឵᠋-᠏​-‏‪-‮"
                      r"⁠-⁯ㅤ︀-️﻿ﾠ￰-￸]")
 
@@ -82,24 +79,31 @@ def inbox_threads(data: Any, owner_id: str) -> list[dict]:
             continue  # a group the owner never wrote in: someone added them
         users = _users(t)
         seen = _last_seen(t, owner_id)
-        new = []
+        new, oldest = [], None
         for i in t.get("items") or []:
-            if not isinstance(i, dict) or str(i.get("user_id")) == owner_id:
+            if not isinstance(i, dict):
                 continue
             try:
                 ts = int(i.get("timestamp") or 0)
             except (TypeError, ValueError):
                 continue
-            if ts > seen:
+            oldest = ts if oldest is None else min(oldest, ts)
+            if ts > seen and str(i.get("user_id")) != owner_id:
                 new.append({"id": str(i.get("item_id", "")), "from": users.get(str(i.get("user_id")), "?"),
                             "time": _when(ts), "ts": ts, "text": _item_text(i)})
         if new:
-            new.sort(key=lambda x: x["ts"])
+            new.sort(key=lambda x: (x["ts"], x["id"]))
             out.append({"thread": str(t.get("thread_id", "")), "title": one_line(t.get("thread_title"), 80),
                         "group": bool(t.get("is_group")), "with": sorted(v for k, v in users.items() if k != owner_id),
-                        "items": new[-MAX_ITEMS:], "more": max(0, len(new) - MAX_ITEMS)})
+                        "items": new, "seen": seen, "oldest": oldest, "has_older": t.get("has_older") is True})
     out.sort(key=lambda x: x["items"][-1]["ts"], reverse=True)
-    return out[:MAX_THREADS]
+    return out
+
+
+def more_threads(data: Any, threads: list[dict]) -> bool:
+    """Instagram has more conversations than it sent, and every one it sent is unread: there may be more unread."""
+    inbox = data.get("inbox") if isinstance(data, dict) and isinstance(data.get("inbox"), dict) else {}
+    return inbox.get("has_older") is True and len(threads) == len(inbox.get("threads") or [])
 
 
 def inbox_text(threads: list[dict]) -> str:
@@ -109,7 +113,7 @@ def inbox_text(threads: list[dict]) -> str:
     for t in threads:
         who = ", ".join(f"@{u}" for u in t["with"]) or "?"
         head = f"group “{t['title']}” ({who})" if t["group"] else who
-        lines.append(f"[thread {t['thread']}] {head}" + (f" (+{t['more']} earlier new)" if t["more"] else ""))
+        lines.append(f"[thread {t['thread']}] {head}")
         lines += [f"  - @{i['from']} · {i['time']}: {i['text']}" for i in t["items"]]
     return "\n".join(lines)
 
@@ -117,6 +121,7 @@ def inbox_text(threads: list[dict]) -> str:
 def redact_threads(threads: list[dict], clean=lambda t: t) -> list[dict]:
     """The structured form a watcher step gets (its own script keeps a per-conversation cursor)."""
     return [{"thread": t["thread"], "title": clean(t["title"]), "group": t["group"], "with": t["with"],
+             "seen": t["seen"], "oldest": t["oldest"], "has_older": t["has_older"],
              "items": [{"id": i["id"], "from": i["from"], "time": i["time"], "ts": i["ts"], "text": clean(i["text"])}
                        for i in t["items"]]} for t in threads]
 

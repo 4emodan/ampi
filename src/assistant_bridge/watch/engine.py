@@ -110,11 +110,27 @@ class WatchEngine:
         reply = await asyncio.to_thread(browser_request, {"op": "read", "url": url, "text": True, "origin": None})
         return reply or {"ok": False, "error": "the browser is busy"}
 
+    def _social(self, name: str | None) -> bool:
+        w = self.watchers.get(name or "")
+        return w is not None and w.spec.social
+
+    @staticmethod
+    def _kept_error(w: Active, error: str | None) -> str | None:
+        """An error as it may be stored or shown: the text of a step that read Instagram/Threads can quote messages."""
+        if not error or not w.spec.social:
+            return error
+        m = re.match(r"step ([a-z][a-z0-9_]*):", error)
+        return f"step {m.group(1)} failed (details aren't kept for a watcher that reads Instagram/Threads)" if m else error
+
     async def _notify_text(self, text: str, fmt: str, name: str | None = None) -> None:
         header = f"🔔 {name}\n\n" if name else ""
         try:
-            await self.bot._send_text(self.profile.owner_chat_id, 0, header + text, markdown=(fmt == "markdown"))
+            await self.bot._send_text(self.profile.owner_chat_id, 0, header + text, markdown=(fmt == "markdown"),
+                                      **({"social": True} if self._social(name) else {}))
         except Exception as e:  # noqa: BLE001
+            if self._social(name):
+                log.warning("[%s] watcher message failed: %s", self.profile.name, type(e).__name__)
+                raise StepError(f"couldn't send the message ({type(e).__name__})") from None
             log.warning("[%s] watcher message failed: %s", self.profile.name, e)
             raise StepError(f"couldn't send the message: {e}") from None
 
@@ -316,7 +332,10 @@ class WatchEngine:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("[%s] watcher %s: run crashed", self.profile.name, w.name)
+                if w.spec.social:  # the exception's text could quote a message
+                    log.error("[%s] watcher %s: run crashed", self.profile.name, w.name)
+                else:
+                    log.exception("[%s] watcher %s: run crashed", self.profile.name, w.name)
                 self.db.set_item(row["id"], "failed")
 
     def _cap_reached(self, w: Active) -> str | None:
@@ -410,6 +429,9 @@ class WatchEngine:
             status = "failed"
             st.ctx.setdefault("error", "saving the watcher's data failed")
         error = st.ctx.get("error")
+        if status.startswith("parked:") and w.spec.social:
+            status, error = "failed", "a watcher that reads Instagram/Threads can't wait for an approval"
+            st.ctx["error"] = error
         if status.startswith("parked:"):
             approval = int(status.split(":", 1)[1])
             step_index = next(i for i, s in enumerate(w.spec.steps) if s["id"] == st.log[-1]["id"])
@@ -430,6 +452,7 @@ class WatchEngine:
             if attempts < len(RETRY_DELAYS):
                 retry = True
                 self.db.set_item(row["id"], "queued", retry_at=now() + timedelta(seconds=RETRY_DELAYS[attempts]))
+        error = self._kept_error(w, error)
         summary = self._summary(st)
         self.db.update_run(st.run_id, status="retrying" if retry else final, steps_done=len(st.log),
                            llm_calls=st.llm_calls, actions=st.actions, error=(error or "")[:1000] or None,
@@ -460,19 +483,32 @@ class WatchEngine:
             data = {"run": st.run_id, "watcher": w.name, "hash": w.spec.hash, "status": status, "test": st.test,
                     "item": st.ctx.get("item"), "error": st.ctx.get("error"), "llm_calls": st.llm_calls,
                     "actions": st.actions, "steps": st.log, "previews": st.previews}
+            if w.spec.social:
+                data = self._bare(data, w)
             (d / f"{st.run_id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1, default=str),
                                                  encoding="utf-8")
         except OSError as e:
             log.warning("[%s] couldn't write run file: %s", self.profile.name, e)
+
+    def _bare(self, data: dict, w: Active) -> dict:
+        """A run of a watcher that reads Instagram/Threads: which steps ran and how long, never what they saw."""
+        item = data.get("item") if isinstance(data.get("item"), dict) else {}
+        return {**{k: data.get(k) for k in ("run", "watcher", "hash", "status", "test", "llm_calls", "actions")},
+                "item": {k: item[k] for k in ("manual", "owner", "by", "time") if k in item},
+                "error": self._kept_error(w, data.get("error")),
+                "steps": [{k: e[k] for k in ("id", "type", "at", "status", "ms") if k in e}
+                          for e in data.get("steps") or []]}
 
     def run_file(self, name: str, run_id: str) -> dict | None:
         if not re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", run_id) or not ws.NAME_RE.fullmatch(name):
             return None
         p = self.runs_dir / name / run_id[:6] / f"{run_id}.json"
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        w = self.watchers.get(name)
+        return self._bare(data, w) if w is not None and w.spec.social and isinstance(data, dict) else data
 
     # --- parked runs ----------------------------------------------------------------------------------
 
@@ -568,6 +604,7 @@ class WatchEngine:
             return "No such run."
         if run["status"] not in ("failed", "maybe", "cancelled"):
             return f"Run {run_id} ended as {run['status']}; only failed runs can be retried."
+        self.db.disown(run["item_id"])  # a retry asked for in chat isn't the owner's own tap
         self.db.requeue(run["item_id"])
         if run["name"] in self.tasks:
             self.tasks[run["name"]].wake.set()
@@ -650,7 +687,8 @@ class WatchEngine:
             st = await self._new_state(w, run_id, item, spec.triggers[0]["type"], test=True, space=space)
             status = await self._execute(w, st, 0, None)
             self.db.update_run(run_id, status=status if status in FINAL else "ok", steps_done=len(st.log),
-                               llm_calls=st.llm_calls, error=st.ctx.get("error"), summary=self._summary(st))
+                               llm_calls=st.llm_calls, error=self._kept_error(w, st.ctx.get("error")),
+                               summary=self._summary(st))
             self._write_run_file(w, st, status)
             lines.append(f"\n— item {k}: {trig.describe_item(item) or json.dumps(item, ensure_ascii=False)[:120]}")
             for e in st.log:

@@ -173,6 +173,9 @@ class Control:
             data = e.run_file(run["name"], run_id)
             return json.dumps(data, ensure_ascii=False, indent=1)[:30000] if data else "The run file is gone."
         if cmd == "space":
+            w = e.watchers.get(name)
+            if w is not None and w.spec.social:
+                return "The saved data of a watcher that reads Instagram/Threads isn't shown."
             got = await e.tools({"cmd": "watch.space_get", "name": name})
             if not got.get("ok"):
                 return f"No space: {got.get('error')}"
@@ -209,11 +212,13 @@ class Control:
             import time
             if e.db.busy_count(e.profile.name, name):
                 return f"A run of {name} is already queued or running; its summary will come to the owner."
-            last = self._social_runs.get(e.profile.name, 0.0)
-            if time.monotonic() - last < SOCIAL_RUN_GAP:
+            last = self._social_runs.get(e.profile.name)
+            if last is not None and time.monotonic() - last < SOCIAL_RUN_GAP:
                 return f"{name} was started from here less than 10 minutes ago; not again yet."
-            self._social_runs[e.profile.name] = time.monotonic()
-            return e.manual(name, "Ampi in social mode")
+            text = e.manual(name, "Ampi in social mode")
+            if text.startswith("Queued "):  # a refused start doesn't count
+                self._social_runs[e.profile.name] = time.monotonic()
+            return text
         if cmd == "run":
             return e.manual(name, "Ampi in chat")
         if cmd == "retry":

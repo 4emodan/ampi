@@ -1,5 +1,6 @@
-📩 **New Instagram messages**
+📩 **{{steps.fresh.count}} new Instagram message(s)**
 
 {{steps.summary.summary}}
 
+{{steps.fresh.note}}
 (Reply in the Instagram app; Ampi can't send direct messages.)

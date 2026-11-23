@@ -214,7 +214,7 @@ class Pipeline:
             body = ws.text_of(w.spec.files, s["template"]) if "template" in s else s["text"]
             # In Markdown messages, text from outside (emails, AI answers) can't form links or code: a stranger
             # mustn't be able to put a disguised link into a message from Ampi.
-            text = ws.render(body, _defang(st.ctx) if s["format"] == "markdown" else st.ctx)
+            text = ws.render(body, _defang(st.ctx, w.spec.social) if s["format"] == "markdown" else st.ctx)
             if not isinstance(text, str):
                 text = json.dumps(text, ensure_ascii=False)
             entry["input"] = _clip(text)
@@ -295,7 +295,9 @@ class Pipeline:
                               "only." if last_error else ""),
                     cwd=self.svc.workspace, session_id=_uuid(), started=False, model=s["model"], allowed_tools=(),
                     tools="", system_prompt=system, json_schema=json.dumps(json_schema_for(s["schema"])),
-                    origin=f"{w.origin}#{s['id']}", semaphore=False)
+                    origin=f"{w.origin}#{s['id']}", semaphore=False,
+                    # Direct messages: no transcript of this call on disk (it is never resumed).
+                    extra_args=("--no-session-persistence",) if w.spec.social else ())
                 if not result.ok:
                     raise StepError(f"the AI call failed: {result.error}")
                 try:
@@ -400,28 +402,29 @@ class Pipeline:
         return outcome
 
 
-_SCHEME = re.compile(r"\b(h)tt(ps?)://", re.I)
-_OTHER_SCHEME = re.compile(r"\b(ftp|tg|mailto|javascript|data):", re.I)
-_DOMAIN = re.compile(r"\b((?:[a-z0-9-]+\.)+)(com|net|org|me|io|co|ly|gl|link|info|biz|xyz|ru|app|dev|site|online|top|gg"
-                     r"|to|cc|tk|us|uk|de|in|tv|ai|so|sh|club|shop|live|page|cn|eu)\b", re.I)
+_DOT = re.compile(r"(?<=\w)[.。．｡](?=[^\W\d_])|(?<=\d)[.。．｡](?=\d{1,3}[.。．｡]\d)|(?<=[.。．｡]\d)[.。．｡](?=\d)"
+                  r"|(?<=[.。．｡]\d\d)[.。．｡](?=\d)|(?<=[.。．｡]\d\d\d)[.。．｡](?=\d)")
 
 
-def defang_text(s: str) -> str:
-    """Outside text in a Markdown message to the owner: no link or code syntax, and no clickable addresses
-    (https:// → hxxps://, t.me → t(.)me), so neither Telegram nor a quick tap turns it into a link."""
-    s = s.replace("[", "(").replace("]", ")").replace("`", "'")
-    s = _SCHEME.sub(lambda m: f"{m.group(1)}xx{m.group(2)}://", s)
-    s = _OTHER_SCHEME.sub(lambda m: f"{m.group(1)}(:)", s)
-    return _DOMAIN.sub(lambda m: m.group(1).replace(".", "(.)") + m.group(2), s)
+def _unlink(s: str) -> str:
+    """Strangers' messages (Instagram/Threads watchers): nothing Telegram would make clickable. Addresses of any kind
+    and TLD (https://, tg:, t.me, 1.2.3.4), @names (they'd link to unrelated Telegram users) and /commands."""
+    s = re.sub(r"\bhttp(s?)://", r"hxxp\1(:)//", s, flags=re.I)
+    s = re.sub(r"\b([a-z][a-z0-9+-]{1,20})://", r"\1(:)//", s, flags=re.I)
+    s = re.sub(r"\b(tg|mailto|tel|javascript|data|ftp|sms):(?=\S)", r"\1(:)", s, flags=re.I)
+    s = _DOT.sub("(.)", s)
+    s = re.sub(r"@(?=\w)", "@ ", s)
+    return re.sub(r"(?<![\w/)])/(?=[A-Za-z])", "/ ", s)
 
 
-def _defang(v: Any) -> Any:
+def _defang(v: Any, social: bool = False) -> Any:
     if isinstance(v, str):
-        return defang_text(v)
+        v = v.replace("[", "(").replace("]", ")").replace("`", "'")
+        return _unlink(v) if social else v
     if isinstance(v, list):
-        return [_defang(x) for x in v]
+        return [_defang(x, social) for x in v]
     if isinstance(v, dict):
-        return {k: _defang(x) for k, x in v.items()}
+        return {k: _defang(x, social) for k, x in v.items()}
     return v
 
 

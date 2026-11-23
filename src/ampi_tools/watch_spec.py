@@ -673,8 +673,10 @@ def _check_social_shape(steps: list[dict]) -> None:
             raise SpecError(f"{where}: no agent or web steps in this watcher (step {s['id']}); use a structured AI step")
         if s["type"] == "notify" and s["format"] != "markdown":
             raise SpecError(f"{where}: its messages must use format = \"markdown\" (step {s['id']})")
-        if (s["type"] == "adapter" and is_write(s["op"])) or any(is_write(a["op"]) for a in s.get("actions", [])):
-            raise SpecError(f"{where}: it can't change anything (step {s['id']}); it only messages the owner")
+        used = [s["op"]] if s["type"] == "adapter" else [a["op"] for a in s.get("actions", [])]
+        if any(is_write(op) or not social(op) for op in used):  # a search elsewhere would send the text out, too
+            raise SpecError(f"{where}: it can't change anything or use other services (step {s['id']}); it only "
+                            "messages the owner")
 
 
 @dataclass
@@ -687,6 +689,12 @@ class Spec:
     files: dict[str, bytes] = field(repr=False, default_factory=dict)
     hash: str = ""
     uses: list[str] = field(default_factory=list)  # personal info entries/fields it may use (by reference only)
+
+    @property
+    def social(self) -> bool:
+        """Reads the owner's Instagram/Threads web session: nothing of what its steps see is kept anywhere."""
+        return any(op.startswith(("igweb.", "thweb.")) for s in self.steps
+                   for op in ([s["op"]] if s["type"] == "adapter" else [a["op"] for a in s.get("actions", [])]))
 
 
 LIMIT_DEFAULTS = {"runs_per_day": 200, "llm_calls_per_day": 50, "actions_per_day": 50, "run_timeout": 300}

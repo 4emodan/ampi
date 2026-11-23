@@ -135,6 +135,13 @@ class WatchDB:
         d["item"] = json.loads(d["item"])
         return d
 
+    def disown(self, item_id: int) -> None:
+        row = self.item(item_id)
+        if row and isinstance(row["item"], dict) and row["item"].get("owner"):
+            self.db.execute("UPDATE wt_items SET item=? WHERE id=?",
+                            (json.dumps({**row["item"], "owner": False}, ensure_ascii=False), item_id))
+            self.db.commit()
+
     def requeue(self, item_id: int) -> None:
         self.db.execute("UPDATE wt_items SET status='queued', not_before=NULL, expires=? WHERE id=?",
                         (iso(now() + timedelta(hours=1)), item_id))

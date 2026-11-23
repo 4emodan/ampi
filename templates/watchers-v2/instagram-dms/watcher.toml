@@ -21,26 +21,33 @@ type = "adapter"
 op = "igweb.inbox"
 args = { quiet = "23:00-08:00", manual = "{{item.owner}}" }
 
-# Only messages newer than the last one reported in each conversation: each message is reported once.
+# The messages not reported yet, oldest first, in bounded batches (a big backlog takes several runs).
 [[steps]]
 id = "fresh"
 type = "script"
 run = "scripts/new_only"
-args = { threads = "{{steps.inbox.threads}}", test = "{{steps.inbox.test}}" }
+args = { threads = "{{steps.inbox.threads}}", more_threads = "{{steps.inbox.more_threads}}", test = "{{steps.inbox.test}}" }
 
-# An AI without any tools reads the messages (as untrusted data) and answers in a fixed form.
+# An AI without any tools reads the messages (as untrusted data) and answers in a fixed form. It can't hold a report
+# back: the owner always hears how many messages there are.
 [[steps]]
 id = "summary"
 type = "llm"
 model = "haiku"
 prompt = "prompts/dms.md"
 input = "{{steps.fresh.text}}"
-schema = { worth = ["yes", "no"], summary = "text:1500" }
+schema = { summary = "text:3000" }
 
-# Markdown, so text from the messages can't form links or code in the message to you.
+# Markdown, so text from the messages can't form links, code or addresses in the message to you.
 [[steps]]
 id = "send"
 type = "notify"
 format = "markdown"
 template = "templates/dms.txt"
-when = { path = "steps.summary.worth", equals = "yes" }
+
+# Only now are these messages counted as reported: if anything above fails they are reported again, never lost.
+[[steps]]
+id = "commit"
+type = "script"
+run = "scripts/commit"
+args = { commit = "{{steps.fresh.commit}}" }

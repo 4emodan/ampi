@@ -1,38 +1,69 @@
-"""Keeps only messages newer than the last one already reported in each conversation (space/cursors.json),
-so an old unread message is summarized once, not again with every new one. Stops the run when nothing is new."""
+"""Picks the messages to report now: those after the last one already reported in each conversation, oldest first,
+at most BATCH_MESSAGES / BATCH_CHARS (the rest stays for the next run). Saves nothing: commit.py moves the cursor
+once the message to the owner was sent, so a failed run repeats messages rather than losing them."""
 
 import json
 import sys
 from pathlib import Path
 
 CURSORS = Path("space") / "cursors.json"
-KEEP = 500  # conversations remembered
+BATCH_MESSAGES = 40
+BATCH_CHARS = 10000
+
+
+def cursors():
+    """{conversation: (timestamp, {ids reported at that timestamp})}; anything unreadable counts as not reported."""
+    try:
+        raw = json.loads(CURSORS.read_text(encoding="utf-8"))
+        items = raw.items()
+    except (OSError, ValueError, AttributeError):
+        return {}
+    out = {}
+    for k, v in items:
+        try:
+            out[k] = (int(v["ts"]), {str(i) for i in list(v["ids"])})
+        except (TypeError, ValueError, KeyError):
+            pass
+    return out
 
 
 def main(req):
-    threads = (req.get("args") or {}).get("threads") or []
-    try:
-        cursors = json.loads(CURSORS.read_text(encoding="utf-8")) if CURSORS.is_file() else {}
-    except ValueError:
-        cursors = {}
-    lines, count = [], 0
-    for t in threads:
-        last = int(cursors.get(t["thread"], 0))
-        new = [i for i in t["items"] if int(i["ts"]) > last]
-        if not new:
-            continue
-        cursors[t["thread"]] = max(int(i["ts"]) for i in new)
+    args = req.get("args") or {}
+    seen = cursors()
+    waiting, notes = [], []
+    for t in args.get("threads") or []:
+        ts, ids = seen.get(t["thread"], (0, set()))
+        new = [i for i in t["items"] if int(i["ts"]) > ts or (int(i["ts"]) == ts and i["id"] not in ids)]
         who = ", ".join("@" + u for u in t["with"]) or "?"
-        lines.append(f"[conversation] {('group ' + t['title'] + ' (' + who + ')') if t['group'] else who}")
-        lines += [f"  - @{i['from']} · {i['time']}: {i['text']}" for i in new]
-        count += len(new)
-    if not count:
+        head = f"group {t['title']} ({who})" if t["group"] else who
+        if new and t.get("has_older") and int(t.get("oldest") or 0) > max(ts, int(t.get("seen") or 0)):
+            notes.append("Instagram didn't send the earlier messages of a conversation: see the app.")
+        waiting += [(int(i["ts"]), i["id"], t["thread"], head, i) for i in new]
+    if not waiting:
         return {"stop": True}
-    CURSORS.parent.mkdir(parents=True, exist_ok=True)
-    CURSORS.write_text(json.dumps(dict(list(cursors.items())[-KEEP:])), encoding="utf-8")
-    if (req.get("args") or {}).get("test"):
-        lines.insert(0, "(test data, not your real messages)")
-    return {"text": "\n".join(lines), "count": count}
+    waiting.sort(key=lambda m: m[:3])
+    picked, size = [], 0
+    for m in waiting:
+        n = len(m[3]) + len(m[4]["text"]) + 80
+        if picked and (len(picked) >= BATCH_MESSAGES or size + n > BATCH_CHARS):
+            break
+        picked.append(m)
+        size += n
+    commit, groups = {}, {}
+    for ts, mid, thread, head, i in picked:
+        old_ts, old_ids = seen.get(thread, (0, set()))
+        c = commit.setdefault(thread, {"ts": old_ts, "ids": sorted(old_ids)})
+        commit[thread] = {"ts": ts, "ids": c["ids"] + [mid] if ts == c["ts"] else [mid]}
+        groups.setdefault(thread, [f"[conversation] {head}"]).append(f"  - @{i['from']} - {i['time']}: {i['text']}")
+    left = len(waiting) - len(picked)
+    if left:
+        notes.append(f"{left} more new message(s) follow in the next check.")
+    if args.get("more_threads"):
+        notes.append("There may be more unread conversations: see the app.")
+    text = "\n".join(line for g in groups.values() for line in g)
+    if args.get("test"):
+        text = "(test data, not your real messages)\n" + text
+    return {"text": text, "count": len(picked), "note": "\n".join(dict.fromkeys(notes)), "commit": commit}
 
 
 if __name__ == "__main__":
