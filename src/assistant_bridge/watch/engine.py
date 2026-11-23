@@ -33,7 +33,11 @@ TRIGGER_FAILS_BEFORE_NOTICE = 3
 RETRY_DELAYS = (60, 300, 1800)
 TRANSIENT = re.compile(r"usage limit|rate limit|overloaded|not reachable|timed? ?out|temporar|try again|network|"
                        r"connection|\b(?:HTTP|status)\s*5\d\d\b", re.I)
-PASSING = re.compile(r"stopped after|\b(?:429|5\d\d)\b|unavailable|capacity", re.I)
+# Failed AI calls that are about the content itself. Any other failed call (limits, login, crashes, anything new) could
+# pass, so it never counts against the messages.
+REFUSED = re.compile(r"usage policy|content[ -](?:filter|polic)|violat\w* (?:our|the|\w+'s) [\w ]*polic|"
+                     r"stop_reason\W{0,4}refusal|\b(?:model|claude) (?:refused|declined)\b", re.I)
+SOCIAL_FAILS = 40  # a social watcher's failed runs in a row, waiting ones included (3 to 4 hours of 15-minute checks)
 BUILDER_TOOLS = ("Read", "Glob", "Grep", "Bash(watchers:*)")
 BUILDER_GUIDE = Path(__file__).with_name("BUILDER.md")
 RUNS_KEEP_DAYS = 60
@@ -130,7 +134,10 @@ class WatchEngine:
             return {"step": "", "transient": True}
         text = m.group(2)
         # An answer that doesn't fit the form quotes the answer: never judged by its words.
-        transient = not text.startswith("the AI's answer") and bool(TRANSIENT.search(text) or PASSING.search(text))
+        if text.startswith("the AI call failed:"):
+            transient = not REFUSED.search(text)
+        else:
+            transient = not text.startswith("the AI's answer") and bool(TRANSIENT.search(text))
         return {"step": m.group(1), "transient": transient}
 
     async def _notify_text(self, text: str, fmt: str, name: str | None = None, social: bool = False) -> None:
@@ -471,7 +478,8 @@ class WatchEngine:
         retry = False
         if status == "failed" and row is not None and st.actions == 0 and error and TRANSIENT.search(error):
             attempts = row.get("attempts", 0)
-            if attempts < len(RETRY_DELAYS):
+            # A newer check replaces the one waiting for its retry, so its attempts never run out: count runs as well.
+            if attempts < len(RETRY_DELAYS) and not (w.spec.social and self._waiting_too_long(w)):
                 retry = True
                 self.db.set_item(row["id"], "queued", retry_at=now() + timedelta(seconds=RETRY_DELAYS[attempts]))
         error = self._kept_error(w, error)
@@ -488,12 +496,16 @@ class WatchEngine:
                               + "; ".join(f"{e['id']}" for e in acted)[:800])
         if final == "failed" and not retry:
             streak = self.db.failed_streak(self.profile.name, w.name, self.streak_since.get(w.name))
-            if streak >= FAILS_BEFORE_FAILING:
+            if streak >= FAILS_BEFORE_FAILING or (w.spec.social and self._waiting_too_long(w)):
                 await self.tools({"cmd": "watch.status", "name": w.name, "status": "failing"})
-                await self.notify(f"⚠️ Watcher {w.name} failed {streak} times in a row and is paused. Last error: "
+                await self.notify(f"⚠️ Watcher {w.name} failed {max(streak, 1)} times in a row and is paused. Last error: "
                                   f"{(error or '?')[:300]}\nResume it with /watcher {w.name} once it's fixed.")
                 self._status_dirty = True
         return final
+
+    def _waiting_too_long(self, w: Active) -> bool:
+        return self.db.failed_streak(self.profile.name, w.name, self.streak_since.get(w.name), waiting=True) \
+            >= SOCIAL_FAILS
 
     def _summary(self, st: RunState) -> str:
         return ", ".join(f"{e['id']}:{e['status']}" for e in st.log)

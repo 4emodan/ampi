@@ -377,7 +377,7 @@ def test_a_batch_the_ai_cannot_handle_is_counted_and_passed(tmp_path):
         async def __call__(self, prompt, **kw):
             if "POISON" in prompt:
                 self.calls.append((prompt, kw))
-                return NS(ok=False, text="", error="refused")
+                return NS(ok=False, text="", error="the model refused")
             return await super().__call__(prompt, **kw)
 
     items = [("a", 10, "POISON")]
