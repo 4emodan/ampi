@@ -22,6 +22,10 @@ exactly the elements that were approved:
 button and everything filled in. Only for that, `bind_submit` reads the page's field values (never of password,
 card, code or hidden fields), for the owner's approval message; any change of them before the press refuses it.
 
+`bind_login` and `fill_login` are only for ampi-signin (another uid, and it may ask for nothing else): they say which site
+the sign-in form is really on, and fill in a login the owner unlocked on their phone for exactly that site. The password
+goes only into a password field of that site's own page, and is cut out of everything this answers afterwards.
+
 No arbitrary JavaScript from the assistant, no other reading of input values, no console/network events forwarded,
 no downloads, no file:// pages, no stealth and no captcha solving.
 """
@@ -30,6 +34,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import http.client
 import json
 import os
@@ -89,6 +94,11 @@ SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP", "kr": "KR", "zł": "PLN", "CA$
 _CUR = r"(?:CA|AU|US|NZ|A|C)\$|€|\$|£"
 CONFIRMATION = re.compile(r"order|confirm|thank|kiitos|tilaus|vahvist", re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
+# The same as HOST_RE in ampi_phone/signin.py: the sites a login can be saved for.
+LOGIN_HOST = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])")
+USER_FIELD = re.compile(r"user|login|e-?mail|phone|mobile|account|member|customer|\bid\b|käyttäjä|sähköposti|benutzer|"
+                        r"utilisateur|usuario|пользовател|логин|почт|телефон", re.I)
+MIN_HIDE = 4  # a shorter password would cut pieces out of ordinary words
 AMOUNT = re.compile(
     rf"(?P<pre>{_CUR}|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr)\b)?\s?"
     r"(?P<num>\d{1,3}(?:[  .,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
@@ -185,6 +195,39 @@ def extract_totals(text: str, words: "re.Pattern | None" = None) -> list[dict]:
 
 def totals_key(totals: list[dict]) -> set[tuple[str, str]]:
     return {(str(t.get("amount")), str(t.get("currency"))) for t in totals or [] if isinstance(t, dict)}
+
+
+def login_host(url: str) -> str:
+    """The site a page is on, as logins are saved for it; "" when none can be (not https, a port, an address)."""
+    try:
+        u = urllib.parse.urlsplit(url)
+        host = (u.hostname or "").lower().removeprefix("www.")
+        ok = u.scheme == "https" and u.port in (None, 443) and LOGIN_HOST.fullmatch(host)
+    except ValueError:
+        return ""
+    return host if ok else ""
+
+
+def hidden(value: Any, secrets_: list[str]) -> Any:
+    """Everything a reply says, without the passwords that were filled in (as they are, or as a URL or HTML writes them)."""
+    forms: set[str] = set()
+    for s in secrets_:
+        if len(s) >= MIN_HIDE:
+            forms |= {s, urllib.parse.quote(s, safe=""), urllib.parse.quote(s), urllib.parse.quote_plus(s), html.escape(s),
+                      html.escape(s, quote=False), json.dumps(s)[1:-1], " ".join(s.split())}
+    order = sorted((f for f in forms if len(f) >= MIN_HIDE), key=len, reverse=True)
+
+    def walk(x: Any) -> Any:
+        if isinstance(x, str):
+            for f in order:
+                x = x.replace(f, "•••")
+            return x
+        if isinstance(x, list):
+            return [walk(v) for v in x]
+        if isinstance(x, dict):
+            return {k: walk(v) for k, v in x.items()}
+        return x
+    return walk(value) if order else value
 
 
 def origin_of(url: str, security_origin: str | None = None) -> str:
@@ -364,7 +407,7 @@ PAGE_JS = r"""
 (function () {
   const G = globalThis;
   if (!G.__ampi) {
-    const els = new Map(), ids = new WeakMap();
+    const els = new Map(), ids = new WeakMap(), kept = new WeakSet();  // kept: fields a password was put into
     let next = 1;
     const txt = (s, n) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, n || 120);
     const shown = (n) => {
@@ -474,7 +517,7 @@ PAGE_JS = r"""
           const name = txt(el.getAttribute('name'), 80);
           if (tag === 'INPUT' && ty === 'hidden') { hidden.push([name, String(el.value || '').slice(0, 20000)]); continue; }
           const kind = kindOf(el) || 'text', ac = (el.getAttribute('autocomplete') || '').toLowerCase();
-          const secret = ty === 'password' || /(^| )(cc-|one-time-code|current-password|new-password)/.test(ac) ||
+          const secret = ty === 'password' || kept.has(el) || /(^| )(cc-|one-time-code|current-password|new-password)/.test(ac) ||
             /cvc|cvv|csc|iban|passw|\botp\b/i.test(name + ' ' + el.id);
           let v = null;
           if (tag === 'SELECT') v = Array.from(el.options).filter((o, i) => o.selected || (!el.multiple && i === el.selectedIndex)).map(o => txt(o.text, 200) + (txt(o.text, 200) === txt(o.value, 200) ? '' : ' (' + txt(o.value, 200) + ')')).join('; ');
@@ -521,8 +564,25 @@ PAGE_JS = r"""
           submits: submits, search: search, dest: dest.slice(0, 1000), method: method, href: String(location.href),
           around: txt(box ? (box.innerText || box.textContent) : '', 600) };
       }
+      if (a.op === 'login') {  // what the fields of a sign-in form belong to
+        const U = a.user ? get(a.user) : null, S = a.secret ? get(a.secret) : null, P = a.press ? get(a.press) : null;
+        if ((a.user && !U) || (a.secret && !S) || (a.press && !P)) return { connected: false };
+        const formOf = (e) => e.form instanceof HTMLFormElement ? e.form : (e.closest ? e.closest('form') : null);
+        const F = formOf(S || U);
+        const resolve = (u) => { try { return String(new URL(u || '', document.baseURI || location.href)); } catch (e) { return 'unreadable'; } };
+        const B = P ? (P.closest('button,input,a[href],[role=button]') || P) : null;
+        return { connected: true, hasForm: !!F,
+          sameForm: [U, S].every(e => !e || formOf(e) === F) && (!B || (F ? formOf(B) === F : true)),
+          passwords: Array.from((F || document).querySelectorAll('input[type=password]')).filter(visible).length,
+          shown: [U, S, P].every(e => !e || visible(e)),
+          method: F ? (F.getAttribute('method') || '').toLowerCase() : '',
+          action: F ? resolve(F.getAttribute('action')).slice(0, 1000) : '',
+          pressTag: B ? B.tagName.toLowerCase() : '', pressMethod: B ? (B.getAttribute('formmethod') || '').toLowerCase() : '',
+          pressAction: B && B.hasAttribute('formaction') ? resolve(B.getAttribute('formaction')).slice(0, 1000) : '',
+          href: String(location.href).slice(0, 2000) };
+      }
       if (a.op === 'inspect') { const el = get(a.n); return el ? Object.assign({ connected: true }, describe(el)) : { connected: false }; }
-      if (a.op === 'set') { const el = get(a.n); if (!el) return { ok: false }; setValue(el, a.value); return { ok: true }; }
+      if (a.op === 'set') { const el = get(a.n); if (!el) return { ok: false }; if (a.keep) kept.add(el); setValue(el, a.value); return { ok: true }; }
       if (a.op === 'click') { const el = get(a.n); if (!el) return { ok: false };
         try { el.scrollIntoView && el.scrollIntoView({ block: 'center' }); } catch (e) {} el.click(); return { ok: true }; }
       if (a.op === 'choose') { const el = get(a.n); if (!el || el.tagName !== 'SELECT') return { ok: false };
@@ -556,6 +616,7 @@ class Session:
         self.readonly = False
         self.gen = 0         # counts everything done in the session: an approved press needs it unchanged
         self.filled = False  # the owner's details were filled in
+        self.secrets: list[str] = []  # passwords filled in: cut out of every reply
         self.frame_names: dict[str, str] = {}      # CDP frameId -> "f0", "f1", …
         self.worlds: dict[str, tuple[str, int]] = {}  # CDP frameId -> (loaderId, isolated world context id)
 
@@ -585,6 +646,7 @@ class Controller:
         self._phase: str | None = None
 
     CHANGES = ("open", "click", "type", "choose", "back", "fill", "pay")
+    SIGNIN = ("bind_login", "fill_login")  # for ampi-signin, and nothing else is
 
     # --- request entry -------------------------------------------------------------------
 
@@ -594,14 +656,24 @@ class Controller:
             out["phase"] = self._phase
         return out
 
-    def handle(self, req: Any) -> dict:
+    def handle(self, req: Any, signin: bool = False) -> dict:
+        """`signin`: the caller is ampi-signin."""
+        s = self.session
+        out = self._handle(req, signin)
+        secrets_ = [x for session in {s, self.session} if session is not None for x in session.secrets]
+        return hidden(out, secrets_) if secrets_ else out
+
+    def _handle(self, req: Any, signin: bool) -> dict:
         self._phase = None
         try:
             self.expire()
             if not isinstance(req, dict) or not isinstance(req.get("cmd"), str):
                 raise Refused("bad request")
             cmd = req["cmd"]
-            fn = {"status": self.status, "open": self.open, "snapshot": self.snapshot_cmd, "click": self.click,
+            if signin is not (cmd in self.SIGNIN):
+                raise Refused("unknown command")
+            fn = {"bind_login": self.bind_login, "fill_login": self.fill_login,
+                  "status": self.status, "open": self.open, "snapshot": self.snapshot_cmd, "click": self.click,
                   "type": self.type_text, "choose": self.choose, "back": self.back, "close": self.close,
                   "bind": self.bind, "gate": self.gate, "bind_submit": self.bind_submit, "submit": self.submit, "fill": self.fill, "pay": self.pay, "hold": self.hold}.get(cmd)
             if fn is None:
@@ -638,8 +710,8 @@ class Controller:
         s, self.session = self.session, None
         if s is None:
             return
-        if s.readonly:
-            self.retire = True  # it paid: start over with a fresh engine
+        if s.readonly or s.secrets:
+            self.retire = True  # it paid, or signed in: start over with a fresh engine
         try:
             s.cdp.call("Target.disposeBrowserContext", {"browserContextId": s.context}, timeout=5)
         except Exception:
@@ -1126,6 +1198,126 @@ class Controller:
         self._phase = None  # done: later problems (settling, the snapshot) are ordinary errors
         return self._after_action(s)
 
+    # --- signing in (only ampi-signin) ---------------------------------------------------------
+
+    LOGIN_FACTS = ("hasForm", "sameForm", "passwords", "shown", "method", "action", "pressTag", "pressMethod", "pressAction")
+
+    def _login(self, s: Session, req: dict) -> tuple[dict, dict, dict]:
+        """(top frame, {"user"/"password"/"press": (description, number)}, facts): a sign-in form of the page's own site,
+        or a refusal. What it is comes from the page, never from the caller."""
+        frames = self._frames(s)
+        top = frames[0]
+        host = login_host(top["url"])
+        if not host or top["origin"] != f"https://{urllib.parse.urlsplit(top['url']).netloc.lower().removesuffix(':443')}":
+            raise Refused("this isn't an https page a login can be used on")
+        els: dict[str, tuple[dict, int]] = {}
+        for k in ("user", "password", "press"):
+            if req.get(k) is None:
+                continue
+            frame, d, n = self._element(s, req[k], frames)
+            if frame is not top:
+                raise Refused("the sign-in form is inside a frame; that isn't supported")
+            if d.get("disabled") and k != "press":  # (the button often wakes up when the fields are filled)
+                raise Refused(f"the {k} field is disabled")
+            els[k] = (d, n)
+        if not els or set(els) == {"press"}:
+            raise Refused("give the user field, the password field, or both")
+        if "password" in els:
+            d = els["password"][0]
+            if d.get("tag") != "input" or d.get("type") != "password":
+                raise Refused("that isn't a password field")
+            if "new-password" in str(d.get("autocomplete") or "").lower():
+                raise Refused("that field sets a new password; only the owner does that")
+        if "user" in els:
+            d = els["user"][0]
+            words = " ".join(str(d.get(k) or "") for k in ("autocomplete", "name", "id", "label"))
+            if d.get("tag") != "input" or d.get("type") not in ("", "text", "email", "tel"):
+                raise Refused("that isn't a field for a user name")
+            if d.get("type") not in ("email", "tel") and not USER_FIELD.search(words):
+                raise Refused("that doesn't look like the field for a user name or email")
+        if "press" in els and els["press"][0].get("kind") != "button":
+            raise Refused("give the sign-in button")
+        facts = self._run(s, top, {"op": "login", **{k2: els[k][1] if k in els else None for k, k2 in (
+            ("user", "user"), ("password", "secret"), ("press", "press"))}}) or {}
+        if not facts.get("connected"):
+            raise Refused(PAGE_CHANGED)
+        facts = {k: facts.get(k) for k in self.LOGIN_FACTS}
+        if not facts["sameForm"]:
+            raise Refused("those fields don't belong to the same form")
+        if not facts["shown"]:
+            raise Refused("one of those fields isn't visible on the page")
+        if "password" in els and facts["passwords"] != 1:
+            raise Refused("that form has several password fields: it registers or changes a password, it doesn't sign in")
+        if "get" in (facts["method"], facts["pressMethod"]):
+            raise Refused("that form would put the login into the address of a page; refusing")
+        for where in (facts["action"], facts["pressAction"]):
+            if where and login_host(where) != host:
+                raise Refused("that form sends the login to another site; refusing")
+        if facts["pressTag"] == "a":
+            raise Refused("give the sign-in button, not a link")
+        return top, els, facts
+
+    def bind_login(self, req: dict) -> dict:
+        """Which site the form is on (the owner is asked for exactly that one), and what it is, to check it again."""
+        s = self._session(req)
+        top, els, facts = self._login(s, req)
+        snap = self.snapshot(s)
+        if snap["captcha"]:
+            raise Refused("the page has a captcha; signing in there is for the owner")
+        return {"ok": True, "session": s.id, "host": login_host(top["url"]), "bound": {
+            "gen": s.gen, "frame_id": top["frame_id"], "origin": top["origin"], "loader": top["loader"], "facts": facts,
+            "elements": {k: {"ref": req[k], **{b: str(d.get(b) or "")[:120] for b in self.BOUND}} for k, (d, _) in els.items()}}}
+
+    def fill_login(self, req: dict) -> dict:
+        """Fills in what the owner unlocked, into exactly what was bound, and presses the button if one was given."""
+        s = self._session(req)
+        self._phase = "verify"
+        changed = Refused("the page changed meanwhile; nothing was filled in")
+        bound = req.get("bound")
+        if not isinstance(bound, dict) or not isinstance(bound.get("elements"), dict):
+            raise Refused("bad request")
+        if bound.get("gen") != s.gen:
+            raise changed
+        try:
+            top, els, facts = self._login(s, {k: v.get("ref") for k, v in bound["elements"].items() if isinstance(v, dict)})
+        except Refused:
+            raise changed from None
+        if (top["frame_id"] != bound.get("frame_id") or top["origin"] != bound.get("origin")
+                or top["loader"] != bound.get("loader") or facts != bound.get("facts") or login_host(top["url"]) != req.get("host")
+                or {k: {"ref": bound["elements"][k].get("ref"), **{b: str(d.get(b) or "")[:120] for b in self.BOUND}}
+                    for k, (d, _) in els.items()} != bound["elements"]):
+            raise changed
+        values = {k: req.get(k) for k in ("user", "password") if k in els}
+        if any(not isinstance(v, str) or not 0 < len(v) <= 200 or any(ord(c) < 32 for c in v) for v in values.values()):
+            raise Refused("bad request")
+        s.gen += 1
+        s.filled = True
+        # From the first value on the engine is never used for another session (it may keep the password in memory).
+        if "password" in values:
+            s.secrets.append(values["password"])
+        else:
+            s.secrets.append("")
+        self._phase = "filled"
+        for k, v in values.items():
+            r = self._run(s, top, {"op": "set", "n": els[k][1], "value": v, "keep": k == "password"}) or {}
+            if not r.get("ok"):
+                raise Refused("a field disappeared while filling; check the page before trying again")
+        if "press" not in els:
+            return {"ok": True, "session": s.id, "pressed": False}
+        self.sleep(0.5)  # forms enable their button when the fields are filled
+        cur = self._run(s, top, {"op": "inspect", "n": els["press"][1]}) or {}
+        if not cur.get("connected") or cur.get("disabled"):
+            raise Refused("the login was filled in, but the sign-in button is gone or disabled; it was not pressed")
+        self._phase = "sent"
+        try:
+            r = self._run(s, top, {"op": "click", "n": els["press"][1]}) or {}
+            if r.get("ok"):
+                self._settle(s, NAV_TIMEOUT)
+            return {"ok": True, "session": s.id, "pressed": bool(r.get("ok"))}
+        except (Refused, CdpProtocolError):
+            return self._error("after the sign-in button was pressed, the page changed or went somewhere this browser doesn't "
+                               "open; look at it before trying again")
+
     def _set_all(self, s: Session, plan: list[tuple]) -> None:
         for frame, n, value in plan:
             r = self._run(s, frame, {"op": "set", "n": n, "value": value}) or {}
@@ -1221,20 +1413,21 @@ def read_line(conn: socket.socket) -> bytes:
 
 
 def serve_one(controller: Controller, conn: socket.socket, allowed_uids: set[int],
-              uid_of: Callable[[socket.socket], int] = peer_uid) -> None:
+              uid_of: Callable[[socket.socket], int] = peer_uid, signin_uids: set[int] = frozenset()) -> None:
     try:
         try:
             line = read_line(conn)  # read first (bounded), so the peer always gets an answer, not a reset
         except (Refused, OSError):
             line = b""
-        if uid_of(conn) not in allowed_uids:
+        uid = uid_of(conn)
+        if uid not in allowed_uids and uid not in signin_uids:
             resp = {"ok": False, "error": "not allowed"}
         else:
             try:
                 req = json.loads(line or b"null")
             except ValueError:
                 req = None
-            resp = controller.handle(req)
+            resp = controller.handle(req, signin=uid in signin_uids)
         conn.settimeout(30)
         conn.sendall(json.dumps(resp, ensure_ascii=False).encode() + b"\n")
     except OSError:
@@ -1266,6 +1459,7 @@ def main() -> int:
         print("usage: checkout.py serve", file=sys.stderr)
         return 2
     allowed = _uids("AMPI_CHECKOUT_CLIENT_UIDS")
+    signin = _uids("AMPI_CHECKOUT_SIGNIN_UIDS") - allowed  # ampi-signin; nobody when it isn't installed
     engine = _uids("AMPI_CHECKOUT_ENGINE_UID")
     if not allowed or len(engine) != 1:
         print("AMPI_CHECKOUT_CLIENT_UIDS and AMPI_CHECKOUT_ENGINE_UID must be set", file=sys.stderr)
@@ -1278,7 +1472,7 @@ def main() -> int:
         controller.expire()
         if ready:
             conn, _ = srv.accept()
-            serve_one(controller, conn, allowed)
+            serve_one(controller, conn, allowed, signin_uids=signin)
         if should_exit(controller):
             # A session paid or lost the engine: exit, so systemd stops the engine too (BindsTo=) and the next
             # request on the socket starts both fresh. The socket (Accept=no) keeps listening meanwhile.
