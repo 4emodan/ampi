@@ -805,11 +805,25 @@ def test_submit_refuses_any_change_of_the_text_around(env, a, b):
     assert not r["ok"] and r["phase"] == "verify" and eng.clicks == []
 
 
+@pytest.mark.parametrize("line", ["Σύνολο 24,00 €", "Итого: 24,00 €", "Razem 24,00 €", "À payer 24,00 €", "Te betalen 24,00 €"])
+def test_totals_in_more_languages(line):
+    assert co.extract_totals(line)
+
+
+def test_prices_in_frames_count(env):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.frames[0].text = "Delivery"
+    assert not c.handle({"cmd": "gate", "session": sid, "ref": ref(snap, "Email")})["priced"]
+    eng.frames[1].text = "Your price: 12 €"
+    assert c.handle({"cmd": "gate", "session": sid, "ref": ref(snap, "Email")})["priced"]
+
+
 def test_gate_reports_money_and_entered_text(env):
     c, _, _ = env
     sid, snap = opened(c)
     g = c.handle({"cmd": "gate", "session": sid, "ref": ref(snap, "Pay 23,90 €")})
-    assert g["ok"] and not g["filled"] and g["totals"] and PSP in g["frames"]
+    assert g["ok"] and not g["filled"] and g["totals"] and PSP in g["frames"] and g["priced"]
     c.handle({"cmd": "type", "session": sid, "ref": ref(snap, "Email"), "text": "a"})
     assert c.handle({"cmd": "gate", "session": sid, "ref": ref(snap, "Pay 23,90 €")})["filled"]
 

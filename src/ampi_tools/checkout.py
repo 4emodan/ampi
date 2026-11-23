@@ -73,7 +73,9 @@ TEXT_TYPES = {"", "text", "email", "tel", "search", "url", "number"}
 RISKY = re.compile(r"subscri|recurring|membership|auto-?renew|save (my )?card|remember (this |my )?card|\blink\b|"
                    r"tilaus|jäsenyys|kestotilaus", re.I)
 TOTAL_WORDS = re.compile(r"\b(grand total|order total|total|subtotal|to pay|amount due|summa|yhteensä|maksettava|"
-                         r"totalt|att betala|gesamt|summe)\b", re.I)
+                         r"totalt|att betala|gesamt|summe|σύνολο|πληρωτέο|итого|к оплате|razem|do zapłaty|suma|totale|à payer|te betalen|"
+                         r"totaal|kokku|a pagar|zu zahlen)\b", re.I)
+PRICE = re.compile(r"(?:€|\$|£|₽|₪|zł)\s?\d|\d\s?(?:€|\$|£|₽|₪|zł|(?:eur|usd|gbp|sek|nok|dkk|pln|chf|kr|руб)\b)", re.I)
 CURRENCY_CODES = {"EUR", "USD", "GBP", "SEK", "NOK", "DKK", "PLN", "CHF", "CZK", "HUF", "ISK", "CAD", "AUD", "NZD",
                   "JPY"}
 # "kr" stays "KR" (Swedish, Norwegian, Danish, Icelandic krona all print as kr): the daemon maps it to the card's.
@@ -845,6 +847,7 @@ class Controller:
                     item["selected"] = br.clean(str(e.get("selected") or ""))[:60] or None
                 snap["elements"].append(item)
         snap["totals"] = extract_totals(snap["text"])
+        snap["priced"] = bool(PRICE.search(snap["text"]) or any(PRICE.search(t) for t in texts))
         # Every checked box counts, also hidden ones and role=switch toggles (they're sent with the form too).
         labels = [el["label"] for el in snap["elements"] if el["kind"] == "checkbox" and el["checked"]] + checked_labels
         snap["risky_checked"] = list(dict.fromkeys(x for x in labels if RISKY.search(x or "")))
@@ -910,7 +913,7 @@ class Controller:
             raise Refused("that field is disabled right now")
         if any(SECRET_FIELD.search(str(d.get(k) or "")) for k in ("type", "autocomplete", "name", "id")):
             raise Refused("that field is for card, password or code details; those are only filled with approval")
-        if d.get("type") != "search":
+        if d.get("type") not in ("search", "number"):
             s.filled = True  # something was entered: buttons may send it
         r = self._run(s, frame, {"op": "set", "n": n, "value": text}) or {}
         if not r.get("ok"):
@@ -994,7 +997,7 @@ class Controller:
         g = self._gate(s, frame, n)
         snap = self.snapshot(s)
         return {"ok": True, "session": s.id, "kind": d.get("kind"), "frame_origin": frame["origin"], "filled": s.filled,
-                "totals": snap["totals"], "frames": sorted({f["origin"] for f in self._frames(s)}), **g}
+                "totals": snap["totals"], "priced": snap["priced"], "frames": sorted({f["origin"] for f in self._frames(s)}), **g}
 
     @staticmethod
     def _seen(g: dict, title: str) -> str:
@@ -1019,7 +1022,7 @@ class Controller:
         return {"ok": True, "session": s.id, "origin": b["origin"], "url": frames[0]["url"], "button": b["bindings"][0],
                 "totals": snap["totals"], "risky_checked": snap["risky_checked"], "captcha": snap["captcha"],
                 "title": snap["title"], "form": fields, "digest": digest, "gen": s.gen, "press": self._press(g),
-                "seen": self._seen(g, snap["title"]),
+                "seen": self._seen(g, snap["title"]), "priced": snap["priced"],
                 "around": g["around"], "frames": sorted({f["origin"] for f in frames})}
 
     def submit(self, req: dict) -> dict:

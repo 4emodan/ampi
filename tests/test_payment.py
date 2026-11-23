@@ -80,12 +80,12 @@ class FakeCtl:
             return {"ok": True, "kind": "link" if e["tag"] == "a" else "button", "frame_origin": e["frame_origin"], "tag": e["tag"],
                     "filled": getattr(self, "filled", False), "texts": e.get("texts", [e["label"]] if e["label"] else []),
                     "ident": e["id"], "submits": e.get("posts", False), "search": e.get("search", False), "dest": e.get("dest", ""),
-                    "href": SHOP + "/page", "totals": self.gate_totals, "frames": getattr(self, "frames", [SHOP])}
+                    "href": SHOP + "/page", "totals": self.gate_totals, "priced": getattr(self, "priced", False), "frames": getattr(self, "frames", [SHOP])}
         if cmd == "bind_submit":
             e = self.elements[req["ref"]]
             return {"ok": True, "origin": self.origin, "url": self.origin + "/book", "button": e,
                     "totals": self.totals, "risky_checked": self.risky, "captcha": getattr(self, "captcha", False),
-                    "title": "Booking", "form": self.form, "digest": "d1", "gen": 3, "around": "Fri 10:00 selected", "seen": "s1",
+                    "title": "Booking", "form": self.form, "digest": "d1", "gen": 3, "around": "Fri 10:00 selected", "seen": "s1", "priced": getattr(self, "priced", False),
                     "frames": getattr(self, "frames", [SHOP]),
                     "press": {"tag": "button", "texts": [e["label"]], "dest": getattr(self, "dest", SHOP + "/b"), "method": "post",
                               "submits": True}}
@@ -485,7 +485,9 @@ def test_plain_click_on_a_committing_button_is_refused(tmp_path, label):
                                             ("Continue to order summary", True, True), ("€15", False, False),
                                             ("Tip $5", False, False), ("P€1ay", False, False), ("Quick checkout", True, False),
                                             ("Instant checkout", False, False), ("Continue with email", True, False),
-                                            ("Accept", True, False), ("Accept offer", True, False), ("Accept all", True, True),
+                                            ("Accept", True, False), ("Accept offer", True, False), ("Accept all", True, True), ("Continue €45", False, False),
+                                            ("Next €45", True, False), ("Confirm choices", True, False),
+                                            ("Confirm my choices", True, False), ("Go to checkout €4", False, False),
                                             ("Add €12", False, False), ("Рay", False, False), ("Ｐay now", False, False),
                                             ("Dodaj do koszyka 49,99 zł", True, True), ("Review order", True, True),
                                             ("Fri 26 - €15", False, True), ("Choose €45", False, True),
@@ -562,6 +564,21 @@ def test_harmless_buttons_still_work_there(tmp_path, label):
     ctl.elements["f0:20"].update(label=label, id="x")
     ctl.filled, ctl.gate_totals = True, TOTAL
     assert run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"], label
+
+
+@pytest.mark.parametrize("label", ["Commander", "Bestelling plaatsen", "Завершить заказ", "Hotovo"])
+def test_any_price_counts_once_something_is_entered(tmp_path, label):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"].update(label=label, id="x")
+    ctl.filled, ctl.priced = True, True
+    assert not run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]
+
+
+def test_a_priced_booking_page_can_be_submitted_with_a_warning(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals, ctl.priced = "Reserve", [], True
+    assert run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))["approval"]
+    assert "⚠ The page shows prices" in d.approvals.unnotified()[0]["card"]["details"]
 
 
 def test_a_form_that_sends_to_another_site_asks(tmp_path):

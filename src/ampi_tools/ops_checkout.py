@@ -63,7 +63,7 @@ HARMLESS = re.compile(
     r"(search|find|show results|filters?|apply filters?|clear( all| filters?)?|reset|sort( by)?|go|back|"
     r"previous|next|next (page|month|week|step|slide)|log ?in|sign ?in|menu|close|×|more|show more|load more|"
     r"continue|continue shopping|continue as (a )?guest|"
-    r"(confirm|save) (my )?(choices|preferences)|decline( all)?|reject( all)?|accept( all)? cookies|accept all|only necessary|"
+    r"save (my )?preferences|decline( all)?|reject( all)?|accept( all)? cookies|accept all|only necessary|"
     r"add (\d+ )?(items? )?to (my |your |the )?(cart|bag|basket)|view (my |your )?(cart|bag|basket)|update( cart| basket)?|"
     r"jatka|seuraava|hae|lisää (ostoskoriin|koriin)|in den warenkorb|ajouter au panier|añadir (al carrito|a la cesta)|"
     r"aggiungi al carrello|in winkelwagen|lägg i varukorg(en)?|dodaj do koszyka|"
@@ -83,6 +83,11 @@ OPTION = re.compile(
     r"(mon|tue|wed|thu|fri|sat|sun)[a-z]*,? ?\d{0,2}( [a-z]{3,9})?|"
     r"((free|standard|express|next[- ]day|same[- ]day|home|store|parcel|locker|economy|priority) )*(shipping|delivery|pick-?up|collection)|"
     r"choose|select|select this|choose this)", re.I)
+ADD_TO_CART = re.compile(
+    r"add (\d+ )?(items? )?to (my |your |the )?(cart|bag|basket)|lisää (ostoskoriin|koriin)|in den warenkorb|ajouter au panier|"
+    r"añadir (al carrito|a la cesta)|aggiungi al carrello|in winkelwagen|lägg i varukorg(en)?|dodaj do koszyka|"
+    r"в корзину|добавить в корзину|προσθήκη στο καλάθι", re.I)
+CART = re.compile(r"(view (my |your )?(cart|bag|basket)|(secure )?check ?out)", re.I)  # "Checkout · €24": the cart's own button
 DESTRUCTIVE = re.compile(r"delete|cancel|unsubscribe|remove|удалить|отменить|отписаться", re.I)
 GENERIC = re.compile(r"(yes|ok(ay)?|finish|done|save|confirm|agree|i agree|✓|✔|да|готово|ναι|kyllä|ja|oui)", re.I)
 
@@ -108,9 +113,10 @@ def _all(rx: "tuple[re.Pattern, ...]", texts: list[str]) -> bool:
     return bool(texts) and all(any(r.fullmatch(t) for r in rx) for t in texts)
 
 
-def priced_ok(raw: list[str], rules: "tuple[re.Pattern, ...]") -> bool:
-    """Captions that show a price are fine only when the rest is a known harmless one (never a bare price, never a
-    price in the middle of a word)."""
+def priced_ok(raw: list[str]) -> bool:
+    """Captions that show a price are fine only for adding to a cart, or as one of several choices (never a bare price,
+    never a price in the middle of a word)."""
+    rules = (ADD_TO_CART, OPTION, CART)
     return all(not AMOUNT_RE.search(unicodedata.normalize("NFKC", t)) or
                (any(r.fullmatch(caption(t)) for r in rules) and not re.search(r"[^\W\d_](€|\$|£)|(€|\$|£)\s?\d[\d.,]*[^\W\d_]", t))
                for t in raw)
@@ -135,12 +141,11 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
     button = g.get("kind") in ("button", "link")
     if any(mixed_scripts(t) for t in raw):
         return "order"
-    known = (HARMLESS, STEP, MINOR, OPTION)
     origin = str(g.get("frame_origin") or "?")
     dest = str(g.get("dest") or "")
     if g.get("submits") and dest and not dest.startswith((origin + "/", origin + "?")) and dest != origin:
         return "commit"  # sends what is entered to another site
-    money = bool(money_around(side, g.get("totals"), g.get("frames")))
+    money = bool(g.get("priced") or money_around(side, g.get("totals"), g.get("frames")))
     if g.get("filled") and money and button and not _all((HARMLESS,) if g.get("submits") else (HARMLESS, MINOR, OPTION), words):
         # Something is entered and there is something to pay: any other button may be the one that orders.
         bad = any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in words if not STEP.fullmatch(t))
@@ -148,7 +153,7 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
     rest = [t for t in words if not any(r.fullmatch(t) for r in (HARMLESS, STEP))]
     if any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in rest):
         return "order"
-    if button and ((raw and not texts) or not priced_ok(raw, known)):
+    if button and ((raw and not texts) or not priced_ok(raw)):
         return "commit"  # only a price, or a price with something unknown
     if rest:
         here, there = str(g.get("href") or "").split("#")[0], dest.split("#")[0]
@@ -819,7 +824,7 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
     captions = [str(t) for t in [*(press.get("texts") or []), str(button.get("label") or "")] if t]
     plain = [c for c in (caption(t) for t in captions) if c]
     known = (HARMLESS, STEP, MINOR, OPTION)
-    moves_on = _all(known, plain) and priced_ok(captions, known)
+    moves_on = _all(known, plain) and priced_ok(captions)
     if any(mixed_scripts(t) for t in captions):
         raise ToolError("the button's text mixes alphabets (a disguise); refusing")
     if not moves_on and any(PAY_WORDS.search(t) for t in plain):
@@ -842,7 +847,7 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
     return {"resolved": {"session": st["session"], "origin": origin, "url": str(b.get("url") or ""), "button": button,
                          "totals": b.get("totals") or [], "form": _shown_form(side, b.get("form") or []),
                          "digest": b.get("digest"), "gen": b.get("gen"), "press": press, "frames": b.get("frames") or [],
-                         "seen": b.get("seen"), "dest_origin": m.group() if m else "", "around": side.scrub(clean(b.get("around"), 500)),
+                         "seen": b.get("seen"), "priced": bool(b.get("priced")), "dest_origin": m.group() if m else "", "around": side.scrub(clean(b.get("around"), 500)),
                          "what": what, "title": side.scrub(clean(b.get("title"), 100)),
                          "expires": side.clock() + REQUEST_TTL}}
 
@@ -895,6 +900,8 @@ async def describe_submit(s: Services, a: dict) -> str:
     if r.get("totals"):
         lines.append("⚠ Total on the page: " + "; ".join(
             f"{clean(t.get('label'), 30)} {t.get('amount')} {t.get('currency')}" for t in r["totals"][:10]))
+    elif r.get("priced"):
+        lines.append("⚠ The page shows prices")
     if r.get("around"):
         lines.append(f"Page text around the button: “{r['around']}”")
     return side.scrub("\n".join(lines))
