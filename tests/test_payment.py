@@ -574,11 +574,24 @@ def test_any_price_counts_once_something_is_entered(tmp_path, label):
     assert not run(d.run(req("checkout.click", ref="f0:20"), None, origin="private"))["ok"]
 
 
+def test_a_total_in_another_language_makes_submit_refuse(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals = "Reserve", []
+    call = ctl.call
+
+    async def with_gate_total(rq, timeout=None):
+        r = await call(rq, timeout)
+        return {**r, "gate_totals": TOTAL} if rq["cmd"] == "bind_submit" else r
+    ctl.call = with_gate_total
+    with pytest.raises(ToolError, match="total to pay"):
+        run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+
+
 def test_a_priced_booking_page_can_be_submitted_with_a_warning(tmp_path):
     d, _, ctl = make(tmp_path)
     ctl.elements["f0:20"]["label"], ctl.totals, ctl.priced = "Reserve", [], True
     assert run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))["approval"]
-    assert "⚠ The page shows prices" in d.approvals.unnotified()[0]["card"]["details"]
+    assert "⚠ The page shows prices: this may place an order" in d.approvals.unnotified()[0]["card"]["details"]
 
 
 def test_a_form_that_sends_to_another_site_asks(tmp_path):

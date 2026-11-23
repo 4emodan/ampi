@@ -73,8 +73,13 @@ TEXT_TYPES = {"", "text", "email", "tel", "search", "url", "number"}
 RISKY = re.compile(r"subscri|recurring|membership|auto-?renew|save (my )?card|remember (this |my )?card|\blink\b|"
                    r"tilaus|jäsenyys|kestotilaus", re.I)
 TOTAL_WORDS = re.compile(r"\b(grand total|order total|total|subtotal|to pay|amount due|summa|yhteensä|maksettava|"
-                         r"totalt|att betala|gesamt|summe|σύνολο|πληρωτέο|итого|к оплате|razem|do zapłaty|suma|totale|à payer|te betalen|"
-                         r"totaal|kokku|a pagar|zu zahlen)\b", re.I)
+                         r"totalt|att betala|gesamt|summe)\b", re.I)
+# More words, only for deciding whether a button needs the owner. Never for `pay`: some of them also begin a subtotal line,
+# and pay must refuse rather than take that for the amount charged.
+GATE_WORDS = re.compile(r"\b(σύνολο|πληρωτέο|итого|к оплате|razem|do zapłaty|suma|totale|à payer|te betalen|totaal|kokku|"
+                        r"a pagar|zu zahlen)\b", re.I)
+QUANTITY = re.compile(r"\b(qty|quantity|amount of (people|guests|items)|guests?|people|persons?|adults?|children|kids|seats?|"
+                      r"tickets?|nights?|pcs|pieces|count|määrä|anzahl|кол-?во|количество|ποσότητα)\b", re.I)
 PRICE = re.compile(r"(?:€|\$|£|₽|₪|zł)\s?\d|\d\s?(?:€|\$|£|₽|₪|zł|(?:eur|usd|gbp|sek|nok|dkk|pln|chf|kr|руб)\b)", re.I)
 CURRENCY_CODES = {"EUR", "USD", "GBP", "SEK", "NOK", "DKK", "PLN", "CHF", "CZK", "HUF", "ISK", "CAD", "AUD", "NZD",
                   "JPY"}
@@ -149,12 +154,12 @@ def norm_amount(num: str) -> str | None:
     return f"{int(whole)}.{(frac or '0').ljust(2, '0')}"
 
 
-def extract_totals(text: str) -> list[dict]:
+def extract_totals(text: str, words: "re.Pattern | None" = None) -> list[dict]:
     """Amounts on lines that say total/summa/…, with their currency (best effort; for the approval's 'page says')."""
     out: list[dict] = []
     lines = text.splitlines()[:3000]
     for i, line in enumerate(lines):
-        word = TOTAL_WORDS.search(line)
+        word = (words or TOTAL_WORDS).search(line)
         if not word:
             continue
         for candidate in (line[word.end():], lines[i + 1] if i + 1 < len(lines) else ""):
@@ -847,6 +852,7 @@ class Controller:
                     item["selected"] = br.clean(str(e.get("selected") or ""))[:60] or None
                 snap["elements"].append(item)
         snap["totals"] = extract_totals(snap["text"])
+        snap["gate_totals"] = snap["totals"] + extract_totals(snap["text"], GATE_WORDS)
         snap["priced"] = bool(PRICE.search(snap["text"]) or any(PRICE.search(t) for t in texts))
         # Every checked box counts, also hidden ones and role=switch toggles (they're sent with the form too).
         labels = [el["label"] for el in snap["elements"] if el["kind"] == "checkbox" and el["checked"]] + checked_labels
@@ -913,7 +919,8 @@ class Controller:
             raise Refused("that field is disabled right now")
         if any(SECRET_FIELD.search(str(d.get(k) or "")) for k in ("type", "autocomplete", "name", "id")):
             raise Refused("that field is for card, password or code details; those are only filled with approval")
-        if d.get("type") not in ("search", "number"):
+        ident = re.sub(r"[_\-.\[\]]+", " ", " ".join(str(d.get(k) or "") for k in ("name", "label", "id")))
+        if d.get("type") != "search" and not (d.get("type") == "number" and QUANTITY.search(ident)):
             s.filled = True  # something was entered: buttons may send it
         r = self._run(s, frame, {"op": "set", "n": n, "value": text}) or {}
         if not r.get("ok"):
@@ -997,7 +1004,8 @@ class Controller:
         g = self._gate(s, frame, n)
         snap = self.snapshot(s)
         return {"ok": True, "session": s.id, "kind": d.get("kind"), "frame_origin": frame["origin"], "filled": s.filled,
-                "totals": snap["totals"], "priced": snap["priced"], "frames": sorted({f["origin"] for f in self._frames(s)}), **g}
+                "totals": snap["gate_totals"], "priced": snap["priced"],
+                "frames": sorted({f["origin"] for f in self._frames(s)}), **g}
 
     @staticmethod
     def _seen(g: dict, title: str) -> str:
@@ -1022,7 +1030,7 @@ class Controller:
         return {"ok": True, "session": s.id, "origin": b["origin"], "url": frames[0]["url"], "button": b["bindings"][0],
                 "totals": snap["totals"], "risky_checked": snap["risky_checked"], "captcha": snap["captcha"],
                 "title": snap["title"], "form": fields, "digest": digest, "gen": s.gen, "press": self._press(g),
-                "seen": self._seen(g, snap["title"]), "priced": snap["priced"],
+                "seen": self._seen(g, snap["title"]), "priced": snap["priced"], "gate_totals": snap["gate_totals"],
                 "around": g["around"], "frames": sorted({f["origin"] for f in frames})}
 
     def submit(self, req: dict) -> dict:

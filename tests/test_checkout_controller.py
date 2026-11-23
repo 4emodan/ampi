@@ -807,7 +807,31 @@ def test_submit_refuses_any_change_of_the_text_around(env, a, b):
 
 @pytest.mark.parametrize("line", ["Σύνολο 24,00 €", "Итого: 24,00 €", "Razem 24,00 €", "À payer 24,00 €", "Te betalen 24,00 €"])
 def test_totals_in_more_languages(line):
-    assert co.extract_totals(line)
+    assert co.extract_totals(line, co.GATE_WORDS)
+    assert not co.extract_totals(line)  # `pay` keeps its own words
+
+
+@pytest.mark.parametrize("line", ["Suma częściowa 40,00 €", "Totale parziale 40,00 €", "Totaal excl. btw 40,00 €", "Итого без доставки 40,00 €"])
+def test_foreign_subtotals_are_never_the_amount_to_pay(env, line):
+    c, eng, _ = env
+    sid, snap = opened(c)
+    eng.frames[0].text = line
+    b = c.handle({"cmd": "bind", "session": sid, "refs": [ref(snap, "Pay 23,90 €")]})
+    assert b["totals"] == []
+    b = c.handle({"cmd": "bind_submit", "session": sid, "ref": ref(snap, "Pay 23,90 €")})
+    assert b["totals"] == [] and b["gate_totals"]
+
+
+@pytest.mark.parametrize("label,name,entered", [("Quantity", "", False), ("", "qty_1", False), ("Guests", "n", False),
+                                                ("Phone", "phone", True), ("ID number", "", True), ("Donation", "amount", True), ("", "", True)])
+def test_only_quantities_are_not_entered_text(env, label, name, entered):
+    c, eng, _ = env
+    sid, _ = opened(c)
+    eng.frames[0].els[8] = el("input", type="number", label=label, name=name)
+    snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
+    r = next(e["ref"] for e in snap["elements"] if e["type"] == "number")
+    assert c.handle({"cmd": "type", "session": sid, "ref": r, "text": "2"})["ok"]
+    assert c.handle({"cmd": "gate", "session": sid, "ref": r})["filled"] is entered
 
 
 def test_prices_in_frames_count(env):

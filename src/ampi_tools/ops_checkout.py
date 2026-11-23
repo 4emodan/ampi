@@ -837,7 +837,7 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
     if b.get("risky_checked"):
         raise ToolError("untick the boxes that may add a subscription or cost first (or ask the owner): "
                         + "; ".join(side.scrub(clean(x, 60)) for x in b["risky_checked"][:3]))
-    money = money_around(side, b.get("totals"), b.get("frames"))
+    money = money_around(side, b.get("gate_totals") or b.get("totals"), b.get("frames"))
     if money and not moves_on:
         raise ToolError(f"the page {money} and this may be the button that orders: {pay}")
     dest = str(press.get("dest") or "")
@@ -901,7 +901,7 @@ async def describe_submit(s: Services, a: dict) -> str:
         lines.append("⚠ Total on the page: " + "; ".join(
             f"{clean(t.get('label'), 30)} {t.get('amount')} {t.get('currency')}" for t in r["totals"][:10]))
     elif r.get("priced"):
-        lines.append("⚠ The page shows prices")
+        lines.append("⚠ The page shows prices: this may place an order")
     if r.get("around"):
         lines.append(f"Page text around the button: “{r['around']}”")
     return side.scrub("\n".join(lines))
