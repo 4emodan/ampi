@@ -134,6 +134,12 @@ def _int(lo: int, hi: int) -> Callable[[Any], int]:
     return check
 
 
+def _file_number(v: Any) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 100:
+        raise ToolError("the number of a file, as `gmail files` shows it")
+    return v
+
+
 def _priority(v: Any) -> str:
     api_priority(v)  # raises if invalid
     return str(v)
@@ -173,6 +179,7 @@ FIELDS: dict[str, Callable[[Any], Any]] = {
     "due": _text(100, True), "deadline": _date, "priority": _priority, "labels": _strs(60, 30),
     "project": SHORT, "section": SHORT, "name": _text(120, True),
     "query": SHORT, "filter": SHORT, "since": SHORT, "until": SHORT, "limit": _int(1, 1000),
+    "number": _file_number,
     "to": _text(2000, True), "cc": _text(2000, True), "subject": _text(500, True), "body": _text(100_000, False),
     "add": _strs(100, 20), "remove": _strs(100, 20),
     # YouTube: links become plain ids here, so nothing after this ever handles a URL.
@@ -466,6 +473,19 @@ async def gm_search(s: Services, a: dict) -> Result:
 async def gm_read(s: Services, a: dict) -> Result:
     (mid,) = need(a, "id")
     return await s.gmail.read(mid)
+
+
+async def gm_files(s: Services, a: dict) -> Result:
+    from .gmail import file_line
+
+    (mid,) = need(a, "id")
+    found = await s.gmail.files(mid)
+    return "\n".join(file_line(i, f) for i, f in enumerate(found, 1)) or "That email has no files."
+
+
+async def gm_download(s: Services, a: dict) -> Result:
+    mid, number = need(a, "id", "number")
+    return {"text": "", "file": await s.gmail.download(mid, number)}
 
 
 async def gm_thread(s: Services, a: dict) -> Result:
@@ -1184,6 +1204,8 @@ OPS: dict[str, Op] = {op.name: op for op in [
     Op("gmail.search", False, gm_search),
     Op("gmail.read", False, gm_read),
     Op("gmail.thread", False, gm_thread),
+    Op("gmail.files", False, gm_files),
+    Op("gmail.download", False, gm_download),
     Op("gmail.labels", False, gm_labels),
     Op("gmail.drafts", False, gm_drafts),
     Op("gmail.ids", False, gm_ids),

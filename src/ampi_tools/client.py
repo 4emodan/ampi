@@ -8,6 +8,7 @@ as "waiting for the owner's approval" instead of running.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import hashlib
 import json
@@ -17,11 +18,13 @@ import socket
 import sys
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tg_reader.client import deliver
 
 DEFAULT_SOCKET = "/run/ampi-tools/tools.sock"
+MAIL_FILES = Path("inbox/mail")  # files from emails: the owner's private chat only
 
 
 def request(payload: dict, path: str | None = None, timeout: float = 300) -> dict:
@@ -53,6 +56,8 @@ def workspace_file(name: str, max_bytes: int = 200_000) -> str:
     no absolute paths, no `..`, no symlinks, no hidden files, so these commands can't be used to read secrets."""
     root = Path.cwd().resolve()
     p = Path(name)
+    if os.environ.get("AMPI_ORIGIN") and p.parts[:2] == MAIL_FILES.parts:
+        raise SystemExit("files from emails are only for the owner's own chat")
     if p.is_absolute() or ".." in p.parts or any(part.startswith(".") for part in p.parts):
         raise SystemExit(f"{name!r}: use a file in your working directory (relative path, no '..' or hidden files)")
     full = root / p
@@ -83,6 +88,8 @@ def _load_plan(path: str, prefix: str) -> list[dict]:
         name = item.get("op", "")
         if "." not in name:
             name = f"{prefix}.{name.replace('-', '_')}"
+        if name == "gmail.download":
+            raise SystemExit("a plan can't download files; use `gmail download ID N`")
         ops.append({"op": name, "args": item.get("args") or {k: v for k, v in item.items() if k != "op"}})
     return ops
 
@@ -193,6 +200,10 @@ def gmail_parser() -> argparse.ArgumentParser:
     s.add_argument("-n", "--limit", type=int, default=20)
     sub.add_parser("read").add_argument("id")
     sub.add_parser("thread").add_argument("id")
+    sub.add_parser("files", help="the files attached to an email, numbered").add_argument("id")
+    s = sub.add_parser("download", help="save attached files (by number) under inbox/mail/")
+    s.add_argument("id")
+    s.add_argument("numbers", nargs="+", type=int)
     sub.add_parser("labels")
     sub.add_parser("drafts")
     s = sub.add_parser("label", help="add/remove labels (missing labels are created)")
@@ -221,7 +232,7 @@ def gmail_ops(a: argparse.Namespace) -> list[dict]:
     c = a.cmd
     if c == "search":
         return [{"op": "gmail.search", "args": {"query": a.query, "limit": a.limit}}]
-    if c in ("read", "thread", "send-draft"):
+    if c in ("read", "thread", "files", "send-draft"):
         return [{"op": f"gmail.{c.replace('-', '_')}", "args": {"id": a.id}}]
     if c in ("labels", "drafts"):
         return [{"op": f"gmail.{c}", "args": {}}]
@@ -944,8 +955,62 @@ def todoist_main(argv: list[str] | None = None) -> int:
     return _main("todoist", todoist_parser(), todoist_ops, argv)
 
 
+def save_mail_file(number: int, f: dict, now: datetime | None = None) -> Path:
+    """Saves one downloaded file under inbox/mail/: always a new file, always in there, never one that is run or loaded
+    (the name is the sender's)."""
+    now = now or datetime.now(timezone.utc)
+    root = Path.cwd().resolve()
+    folder = MAIL_FILES / now.strftime("%Y-%m-%d")
+    for part in (MAIL_FILES.parent, MAIL_FILES, folder):
+        part.mkdir(exist_ok=True)
+        if part.is_symlink() or not part.resolve().is_relative_to(root):
+            raise SystemExit(f"{part} must be a real folder in the working directory")
+    name = re.sub(r"[^\w.-]+", "_", str(f.get("name") or "file")).strip("._")
+    stem, dot, ext = name.rpartition(".")
+    if not dot or len(ext.encode()) > 12:
+        stem, ext = name, ""
+    stem = stem.encode()[:160].decode("utf-8", "ignore") or "file"  # (a file name has at most 255 bytes)
+    name = stem + (f".{ext}" if ext else "")
+    data = base64.b64decode(f["data"], validate=True)
+    for i in range(100):
+        target = folder / f"{now:%H%M%S}_{number}{f'-{i}' if i else ''}_{name}"
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0), 0o640)
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+        except OSError:  # no half files
+            target.unlink(missing_ok=True)
+            raise
+        return target
+    raise SystemExit(f"too many files called {name} already")
+
+
+def _gmail_download(a: argparse.Namespace) -> int:
+    if len(a.numbers) > 10:
+        raise SystemExit("gmail: at most 10 files at once")
+    for n in dict.fromkeys(a.numbers):
+        r = request({"cmd": "run", "ops": [{"op": "gmail.download", "args": {"id": a.id, "number": n}}], "reason": a.reason,
+                     "origin": os.environ.get("AMPI_ORIGIN") or None})
+        f = r.get("file")
+        if not r.get("ok") or not isinstance(f, dict):
+            print(f"gmail: file {n}: {r.get('error', 'failed')}", file=sys.stderr)
+            return 1
+        try:
+            path = save_mail_file(n, f)
+        except (OSError, ValueError) as e:
+            print(f"gmail: file {n}: couldn't be saved ({e})", file=sys.stderr)
+            return 1
+        print(f"{path.as_posix()} ({f.get('mime')}, {max(1, int(f.get('size') or 0) // 1024)} KB)", flush=True)
+    return 0
+
+
 def gmail_main(argv: list[str] | None = None) -> int:
-    return _main("gmail", gmail_parser(), gmail_ops, argv)
+    args = gmail_parser().parse_args(argv)
+    return _gmail_download(args) if args.cmd == "download" else _main("gmail", gmail_parser(), gmail_ops, argv)
 
 
 def youtube_main(argv: list[str] | None = None) -> int:

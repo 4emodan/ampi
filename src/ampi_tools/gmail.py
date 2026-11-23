@@ -31,6 +31,9 @@ REDIRECT = "http://localhost:8765/"
 MAX_BODY = 20_000
 MAX_HTML = 300_000  # longer HTML is cut before parsing (the regexes would get slow)
 SAFE_PATH = re.compile(r"(/[A-Za-z0-9_-]{1,128})+")
+ATTACHMENT_PATH = re.compile(r"/messages/[A-Za-z0-9_-]{1,128}/attachments/[A-Za-z0-9_-]{1,2000}")  # Google's ids for them are long
+MAX_FILE = 10 * 1024 * 1024  # a file from an email is held in memory a few times over
+MAX_FILES, MAX_NAME = 100, 120
 SYSTEM_LABELS = {
     "INBOX", "UNREAD", "STARRED", "IMPORTANT", "SPAM", "TRASH", "SENT", "DRAFT",
     "CATEGORY_PERSONAL", "CATEGORY_SOCIAL", "CATEGORY_PROMOTIONS", "CATEGORY_UPDATES", "CATEGORY_FORUMS",
@@ -236,6 +239,55 @@ class Gmail:
         # Parsing hostile HTML runs in a thread, so a slow parse never blocks approvals or other requests.
         return await asyncio.wait_for(asyncio.to_thread(format_full, msg, names), 30)
 
+    async def _attachment(self, mid: str, aid: str) -> str:
+        """Its data as Gmail sends it (base64url). Streamed, with a hard limit, whatever size it was said to be; and never
+        kept by the response object (which lives until Python next looks for cycles)."""
+        path = f"/messages/{mid}/attachments/{aid}"
+        if not ATTACHMENT_PATH.fullmatch(path):
+            raise ToolError("Gmail gave an odd id for that file")
+        headers = {"Authorization": f"Bearer {await self.auth.token()}"}
+        buf = bytearray()
+        try:
+            async with self._client.stream("GET", f"{self._base}{path}", headers=headers, timeout=60) as resp:
+                if resp.status_code >= 400:
+                    raise ToolError(f"Gmail error {resp.status_code} for that file")
+                async for chunk in resp.aiter_bytes(65536):
+                    buf += chunk
+                    if len(buf) > MAX_FILE * 4 // 3 + 4096:
+                        raise ToolError("that file is too big")
+        except httpx.TransportError as e:
+            raise ToolError(f"Gmail unreachable: {type(e).__name__}") from e
+        try:
+            data = json.loads(buf)
+        except ValueError:
+            raise ToolError("Gmail sent that file in a form I can't read") from None
+        return str(data.get("data") or "") if isinstance(data, dict) else ""
+
+    async def files(self, mid: str) -> list[dict]:
+        return attachments((await self.message(mid)).get("payload") or {})
+
+    async def download(self, mid: str, number: int) -> dict:
+        """One file of an email: {name, mime, size, data (base64)}. Numbers as `files` and `read` show them."""
+        found = await self.files(mid)
+        if not 1 <= number <= len(found):
+            raise ToolError(f"that email has {len(found)} file(s)")
+        f = found[number - 1]
+        if f["size"] > MAX_FILE:
+            raise ToolError(f"{f['name']}: {f['size'] // 1_000_000} MB is too big (at most {MAX_FILE // 1024 // 1024} MB); "
+                            "the owner can open it in Gmail")
+        data = f["data"]
+        if not data and f["id"]:
+            data = await self._attachment(mid, f["id"])
+        data = data.rstrip("=")
+        if len(data) > MAX_FILE * 4 // 3 + 4:
+            raise ToolError(f"{f['name']} is too big")
+
+        def standard() -> str:
+            if not re.fullmatch(r"[A-Za-z0-9_-]*", data) or len(data) % 4 == 1:
+                raise ToolError("Gmail sent that file in a form I can't read")
+            return data.translate(_STD_B64) + "=" * (-len(data) % 4)
+        return {"name": f["name"], "mime": f["mime"], "size": len(data) * 3 // 4, "data": await asyncio.to_thread(standard)}
+
     async def thread(self, tid: str) -> str:
         names = await self.label_names()
         data = await self._req("GET", f"/threads/{tid}", {"format": "full"})
@@ -413,25 +465,52 @@ def html_to_text(s: str) -> str:
     return re.sub(r"\n\s*\n+", "\n\n", s).strip()
 
 
-def _walk(part: dict, plain: list[str], htmls: list[str], files: list[str]) -> None:
+_STD_B64 = str.maketrans("-_", "+/")
+
+
+def attachments(part: dict) -> list[dict]:
+    """The files of an email, in the order they are numbered. Their names are the sender's words."""
+    return _attachments(part)[:MAX_FILES]
+
+
+def _attachments(part: dict) -> list[dict]:
+    body, out = part.get("body") or {}, []
+    if part.get("filename"):
+        name = re.sub("[“”]", "'", " ".join(normalize_text(str(part["filename"])[:4 * MAX_NAME]).split()))[:MAX_NAME] or "file"
+        size = body.get("size")
+        out.append({"name": name, "mime": re.sub(r"[^\w.+/-]", "", str(part.get("mimeType", ""))[:200])[:80],
+                    "size": size if isinstance(size, int) else 0, "id": str(body.get("attachmentId") or ""),
+                    "data": str(body.get("data") or "")})
+    for sub in part.get("parts", []) or []:
+        out += _attachments(sub)
+        if len(out) > MAX_FILES:
+            break
+    return out
+
+
+def file_line(number: int, f: dict) -> str:
+    return f"{number}) “{f['name']}” ({f['mime']}, {max(1, f['size'] // 1024)} KB)"
+
+
+def _walk(part: dict, plain: list[str], htmls: list[str]) -> None:
     mime = part.get("mimeType", "")
     body = part.get("body") or {}
     if part.get("filename"):
-        files.append(f"{part['filename']} ({mime}, {body.get('size', 0) // 1024} KB)")
+        pass  # a file: see attachments()
     elif mime == "text/plain" and body.get("data"):
         plain.append(_b64(body["data"]))
     elif mime == "text/html" and body.get("data"):
         htmls.append(_b64(body["data"]))
     for sub in part.get("parts", []) or []:
-        _walk(sub, plain, htmls, files)
+        _walk(sub, plain, htmls)
 
 
 def format_full(msg: dict, names: dict[str, str]) -> str:
     h = headers(msg)
     plain: list[str] = []
     htmls: list[str] = []
-    files: list[str] = []
-    _walk(msg.get("payload") or {}, plain, htmls, files)
+    files = [file_line(i, f) for i, f in enumerate(attachments(msg.get("payload") or {}), 1)]
+    _walk(msg.get("payload") or {}, plain, htmls)
     text = "\n".join(plain).strip() or html_to_text("\n".join(htmls))
     if len(text) > MAX_BODY:
         text = text[:MAX_BODY] + f"\n[... cut, {len(text) - MAX_BODY} more characters]"
@@ -444,7 +523,7 @@ def format_full(msg: dict, names: dict[str, str]) -> str:
     if h.get("list-unsubscribe"):
         lines.append(f"List-Unsubscribe: {h['list-unsubscribe'][:300]}")
     if files:
-        lines.append("Attachments: " + "; ".join(files))
+        lines += ["Attached files:", *(f"  {x}" for x in files)]
     lines += ["", text or "(no text)"]
     return "\n".join(lines)
 

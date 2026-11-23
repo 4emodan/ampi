@@ -306,7 +306,7 @@ def test_format_full_prefers_plain_text_and_lists_attachments():
     }
     text = format_full(msg, {"Label_1": "Receipts"})
     assert "### [m1] Hi" in text and "plain body" in text and "html" not in text
-    assert "labels: INBOX, Receipts" in text and "inv.pdf (application/pdf, 2 KB)" in text
+    assert "labels: INBOX, Receipts" in text and "“inv.pdf” (application/pdf, 2 KB)" in text
 
 
 def test_html_to_text_keeps_links_and_survives_hostile_html():

@@ -170,6 +170,7 @@ class Daemon:
         self.runs = runs or RunRegistry()
         self.keeper = keeper
         self._tg_lock = asyncio.Lock()
+        self._files = asyncio.Lock()  # gmail.download (see connection)
         self._paying: set[tuple[str, str]] = set()
         self._limits: dict[str, dict] = {}  # snapshot hash -> its [limits]
 
@@ -289,6 +290,14 @@ class Daemon:
         check_social_origin(ops, origin, "run")
         ops_phone.check_phone(ops, origin)
         ops_signin.check(ops, origin)
+        if any(o["op"] == "gmail.download" for o in ops):
+            # A stranger's file lands in the workspace: only when the owner asked in their own chat.
+            if origin != "private":
+                raise ToolError("files from emails are only for the owner's own chat")
+            if len(ops) > 1:
+                raise ToolError("one file per request")
+            if "gmail.download" in self.policy.require_approval:
+                raise ToolError("the owner switched downloading files from emails off (require_approval can't cover it)")
         parsed = parse_origin(origin)
         if parsed is not None:
             # A Claude run of a watcher's agent step (watchers v2): changes go through the keeper.
@@ -429,7 +438,12 @@ class Daemon:
             level = "places"  # places in the owner's city stay readable: street, full address, email, phone, names
         else:
             level = "light"
-        return self._mask_obj(resp, level)
+        file = resp.pop("file", None) if any(o["op"] == "gmail.download" for o in ops) else None
+        masked = self._mask_obj(resp, level)
+        if file is None:
+            return masked
+        # What is in it can't be masked; what is said about it is.
+        return {**masked, "file": {**self._mask_obj({k: v for k, v in file.items() if k != "data"}, level), "data": file.get("data")}}
 
     def _locations(self) -> list[tuple[float, float]]:
         vault = getattr(self.services.checkout_side, "vault", None)
@@ -1096,6 +1110,10 @@ class Daemon:
             for t in (work, gone):
                 t.cancel()
 
+    def _brings_file(self, request: Any) -> bool:
+        ops = request.get("ops") if isinstance(request, dict) else None
+        return isinstance(ops, list) and any(isinstance(o, dict) and o.get("op") == "gmail.download" for o in ops)
+
     async def connection(self, rd: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
         try:
             try:
@@ -1105,7 +1123,19 @@ class Daemon:
             except (ValueError, asyncio.TimeoutError):
                 response = {"ok": False, "error": "bad request"}
             else:
-                response = await self._while_there(request, peer_pid(wr), rd)
+                pid = peer_pid(wr)
+                if self._brings_file(request) and self.runs.origin_of(pid) == "private":  # (anyone else is refused at once)
+                    # One at a time from fetching it until it has been taken: each needs several times its size in memory.
+                    async with self._files:
+                        response = await self.handle(request, pid)
+                        wr.write(json.dumps(response).encode() + b"\n")
+                        response = None
+                        try:
+                            await asyncio.wait_for(wr.drain(), 60)
+                        except asyncio.TimeoutError:
+                            wr.transport.abort()
+                    return
+                response = await self._while_there(request, pid, rd)
                 if response is None:
                     return
             wr.write(json.dumps(response).encode() + b"\n")

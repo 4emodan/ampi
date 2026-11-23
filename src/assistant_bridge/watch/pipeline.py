@@ -331,6 +331,7 @@ class Pipeline:
             result = await self.svc.claude(
                 "Input:\n" + untrusted(text_in), cwd=self.svc.workspace, session_id=_uuid(), started=False,
                 model=s["model"], allowed_tools=tuple(s["tools"]), append_system_prompt=system,
+                extra_denied=("Read(./inbox/mail/**)",),  # files from emails: the owner's private chat only
                 origin=f"{w.origin}#{s['id']}")
         if not result.ok:
             raise StepError(f"the agent failed: {result.error}")

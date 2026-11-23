@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import chatlog
+from . import chatlog, persona
 from .chatlog import CHATS_DIR
 from .claude_runner import ClaudeRunner, RunResult
 from .config import Group, Profile, Watcher
@@ -29,6 +29,8 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 SEND_FILE_RE = re.compile(r"^\s*SEND_FILE:\s*(.+?)\s*$", re.M)
+MAIL_FILES = "inbox/mail"  # files from emails (gmail download): the owner's private chat only
+PROTECT_SECONDS = 3.0  # in a protected private chat: what comes within this time belongs together (an album, a forward + words)
 NO_REPLY = "NO_REPLY"  # in groups, Claude answers this when there is nothing to say
 SOCIAL_ORIGIN = "forwarded:social"  # ampi_tools serves Instagram/Threads reads only to runs with exactly this origin
 SOCIAL_PROMPT = (
@@ -47,6 +49,8 @@ COMMANDS = [
     {"command": "reset", "description": "Forget this conversation's context"},
     {"command": "cancel", "description": "Stop the current task"},
     {"command": "model", "description": "Show or set the model for this conversation"},
+    {"command": "persona", "description": "Tone and character of my replies"},
+    {"command": "protect", "description": "Answer here only when you tag me"},
     {"command": "status", "description": "Show this conversation's status"},
     {"command": "watchers", "description": "List watchers (automations)"},
     {"command": "info", "description": "Personal info (masked) and site permissions"},
@@ -61,6 +65,8 @@ HELP_TEXT = (
     "/reset – forget this conversation's context\n"
     "/cancel – stop the current task\n"
     "/model [name|default] – show or change the model here\n"
+    "/persona – tone and character of my replies\n"
+    "/protect – in this chat or topic I act only when you tag me (/protect chat: with all its topics; /protect off)\n"
     "/status – session info and usage\n"
     "/watchers – your watchers; /watcher NAME – details and buttons\n"
     "/info – your personal info (masked) and which sites may fill it\n"
@@ -174,11 +180,13 @@ class ProfileBot:
         self.runner = runner
         self.system_prompt = bridge_system_prompt(profile)
         prefix = profile.bot_token.split(":", 1)[0]
+        self.bot_id = int(prefix) if prefix.isdigit() else None
         self.own_bot_ids: set[int] = {int(prefix)} if prefix.isdigit() else set()  # main adds the other profiles' bots
         self._locks: dict[Key, asyncio.Lock] = {}
         self._running: dict[Key, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
-        self._pending: dict[Key, list[dict]] = {}  # group messages waiting to be handled as one batch
+        # Messages waiting to be handled as one batch, each with: protected then, tagged.
+        self._pending: dict[Key, list[tuple[dict, bool, bool]]] = {}
         self._flush_timers: dict[Key, asyncio.Task] = {}
         self.username: str | None = None
         self.approvals: Any = None  # ApprovalRelay, set by main when [tools] approvals = true
@@ -226,7 +234,19 @@ class ProfileBot:
         task.add_done_callback(done)
         return task
 
+    def _drop_waiting(self, key: Key) -> int:
+        """Forgets the messages that wait to be handled; how many of them were for Ampi."""
+        timer = self._flush_timers.pop(key, None)
+        if timer is not None:
+            timer.cancel()
+        return len(self._for_ampi(self._pending.pop(key, [])))
+
     async def shutdown(self) -> None:
+        for key in list(self._pending):
+            if self._drop_waiting(key):
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self._send_text(*key, "⏹ I'm being restarted: your last message wasn't handled; please "
+                                                           "send it again.", markdown=False), 5)
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -246,6 +266,7 @@ class ProfileBot:
                     "[%s] group %s was upgraded to a supergroup with chat_id=%s; update chat_id in config.toml",
                     self.profile.name, chat.get("id"), msg["migrate_to_chat_id"],
                 )
+                self.store.move_settings(self.profile.name, f"protected:{chat.get('id')}:", f"protected:{msg['migrate_to_chat_id']}:")
                 return
             group = self.profile.group(chat.get("id"))
             if group is None:
@@ -275,6 +296,9 @@ class ProfileBot:
 
         if text.startswith("/") and "forward_origin" not in msg:
             command, _, args = text[1:].partition(" ")
+            if (text[1:].split(None, 1) or [""])[0].lower().split("@", 1)[0] == "persona":  # the one command that takes several lines
+                command, *rest = text[1:].split(None, 1)
+                args = rest[0] if rest else ""
             command, _, target = command.partition("@")
             if target and self.username and target.lower() != self.username.lower():
                 return  # a command for another bot in the same group
@@ -284,24 +308,70 @@ class ProfileBot:
                 return
 
         if group is not None:
-            self._queue_group_message(key, group, msg, chat.get("title") or group.name)
-            return
-        await self._process(key, [msg], None, "")
+            self._queue_message(key, group, msg, chat.get("title") or group.name)
+        elif self._protected(*key) or key in self._pending:  # (the second: after what waits there)
+            self._queue_message(key, None, msg, "")
+        else:
+            await self._process(key, [msg], None, "")
 
-    def _queue_group_message(self, key: Key, group: Group, msg: dict, title: str) -> None:
-        """Collect group messages; handle them together once none has arrived for batch_seconds."""
-        self._pending.setdefault(key, []).append(msg)
+    # --- protected chats and topics (/protect): nothing there is for Ampi unless the owner tags it ---------------
+
+    def _protected(self, chat_id: int, thread_id: int) -> bool:
+        return any(self.store.get_setting(self.profile.name, f"protected:{chat_id}:{where}") for where in (thread_id, "*"))
+
+    def _tagged(self, msg: dict) -> bool:
+        """The owner's own message names this bot (@name) or answers one of its messages. Not a forwarded one: what
+        someone else wrote tags nobody."""
+        if "forward_origin" in msg:
+            return False
+        reply = msg.get("reply_to_message") or {}
+        # (In a topic every message "replies" to the one that created the topic.)
+        root = reply.get("forum_topic_created") or (
+            msg.get("is_topic_message") and reply.get("message_id") == msg.get("message_thread_id"))
+        if self.bot_id is not None and (reply.get("from") or {}).get("id") == self.bot_id and not root:
+            return True
+        for field, entities in (("text", "entities"), ("caption", "caption_entities")):
+            raw = (msg.get(field) or "").encode("utf-16-le")  # offsets count UTF-16 units
+            for e in msg.get(entities) or []:
+                if e.get("type") == "text_mention" and self.bot_id is not None \
+                        and (e.get("user") or {}).get("id") == self.bot_id:
+                    return True
+                if e.get("type") == "mention" and self.username:
+                    at = 2 * int(e.get("offset") or 0)
+                    name = raw[at:at + 2 * int(e.get("length") or 0)].decode("utf-16-le", "replace")
+                    if name.lower() == f"@{self.username.lower()}":
+                        return True
+        return False
+
+    @staticmethod
+    def _for_ampi(batch: list[tuple[dict, bool, bool]]) -> list[dict]:
+        """(message, protected and tagged when it came) of one batch: what came unprotected, what is tagged, and what plainly
+        goes with a tag: the rest of its album, and posts forwarded together with it. Not the owner's other words."""
+        tags = [m for m, protected, tagged in batch if protected and tagged]
+        albums = {m["media_group_id"] for m in tags if m.get("media_group_id")}
+        return [m for m, protected, tagged in batch
+                if not protected or tagged or (tags and ("forward_origin" in m or m.get("media_group_id") in albums))]
+
+    def _queue_message(self, key: Key, group: Group | None, msg: dict, title: str) -> None:
+        """Collect messages (of groups, and of protected chats); handle them together once none has arrived for a while."""
+        protected = self._protected(*key)  # now: what is changed before they are handled doesn't count
+        tagged = protected and self._tagged(msg)
+        if protected and not tagged and "forward_origin" not in msg and not msg.get("media_group_id"):
+            return  # not for Ampi, and it makes nothing wait longer
+        if protected:
+            msg = {**msg, "_protected": True}
+        self._pending.setdefault(key, []).append((msg, protected, tagged))
         timer = self._flush_timers.pop(key, None)
         if timer is not None:
             timer.cancel()
         self._flush_timers[key] = self._spawn(self._flush_after(key, group, title))
 
-    async def _flush_after(self, key: Key, group: Group, title: str) -> None:
-        await asyncio.sleep(group.batch_seconds)
+    async def _flush_after(self, key: Key, group: Group | None, title: str) -> None:
+        await asyncio.sleep(group.batch_seconds if group is not None else PROTECT_SECONDS)
         # From here on this task is no longer a timer: new messages start a new batch instead of cancelling it.
         if self._flush_timers.get(key) is asyncio.current_task():
             del self._flush_timers[key]
-        msgs = self._pending.pop(key, [])
+        msgs = self._for_ampi(self._pending.pop(key, []))
         if msgs:
             await self._process(key, msgs, group, title)
 
@@ -353,7 +423,7 @@ class ProfileBot:
                 return
             for m, body in bodies if not social else ():
                 chatlog.append(log_dir, "Owner", body, chatlog.message_time(m))
-            system_prompt = self.system_prompt
+            system_prompt = self._system_prompt()
             if group is not None:
                 system_prompt += "\n\n" + self._group_prompt(group, title)
             # Every social turn until /new is kept apart, because the context holds text written by strangers (feeds,
@@ -376,11 +446,14 @@ class ProfileBot:
                         # two commands, as MCP tools without a shell (see social_mcp.py).
                         allowed, extra_args, extra_env = social_setup(allowed)
                         denied, tools, sources = SOCIAL_DENIED, "", ""
+                    outside = any(_from_others(m) for m, _ in bodies)
+                    if (group is not None or outside) and not social:
+                        denied = (*denied, f"Read(./{MAIL_FILES}/**)")
                     if self.permissions is not None and not social:
                         label = (f'group "{group.name}"' if group is not None
                                  else "private chat (social mode)" if social else "private chat")
                         token = stack.enter_context(self.permissions.run(
-                            label, outside_content=group is not None or social))
+                            label, outside_content=group is not None or social or outside))
                         mcp_args, extra_env = self.permissions.mcp_setup(token, sys.executable)
                         extra_args = (*extra_args, *mcp_args)
                         allowed = (*allowed, "mcp__ampi__install_system_packages")
@@ -396,7 +469,7 @@ class ProfileBot:
                         # A forwarded message in the private chat is someone else's text: treat that run
                         # like outside content (e.g. no Telegram writes without asking).
                         origin=f"group:{group.name}" if group is not None else SOCIAL_ORIGIN if social else (
-                            "forwarded:private" if any("forward_origin" in m for m, _ in bodies) else None),
+                            "forwarded:private" if outside else None),
                         extra_env=extra_env,
                         extra_denied=denied,
                         tools=tools,
@@ -406,7 +479,7 @@ class ProfileBot:
                         # Social runs: only ("social", profile), which the watchers socket accepts for `instagram dms`
                         # alone (never as the owner's words).
                         tag=("social", self.profile.name) if social else None
-                        if group is not None or any("forward_origin" in m for m, _ in bodies)
+                        if group is not None or outside
                         else ("chat", self.profile.name, chat_id, thread_id, prompt[:4000]),
                     )
             except asyncio.CancelledError:
@@ -476,8 +549,9 @@ class ProfileBot:
                     started=False,
                     model=self.profile.model,
                     allowed_tools=watcher_tools(watcher, self.profile),
-                    append_system_prompt=self.system_prompt + "\n\n" + self._watcher_prompt(watcher),
+                    append_system_prompt=self._system_prompt() + "\n\n" + self._watcher_prompt(watcher),
                     extra_args=self.profile.extra_args,
+                    extra_denied=(f"Read(./{MAIL_FILES}/**)",),
                     origin=f"watcher:{watcher.name}",
                 )
             except asyncio.CancelledError:
@@ -510,6 +584,15 @@ class ProfileBot:
             prefixed = replace(result, text=f"🔔 **{watcher.name}**\n\n{reply}")
             await self._deliver(chat_id, 0, prefixed)
             return result
+
+    def _system_prompt(self) -> str:
+        chosen = self.store.get_setting(self.profile.name, persona.KEY)
+        text = self.system_prompt + ("\n\n" + persona.prompt(chosen) if chosen else "")
+        if self.store.settings(self.profile.name, "protected:"):
+            text += ("\n\nSome of these chats or topics are protected by the owner (/protect): what they write there without "
+                     "tagging you isn't in the logs and isn't for you. Don't look for it in other ways (such as tg-read) unless "
+                     "they ask for exactly that.")
+        return text
 
     def _watcher_prompt(self, watcher: Watcher) -> str:
         path = watcher.instructions_path(self.profile.workspace)
@@ -622,6 +705,9 @@ class ProfileBot:
             parts.append(f"[Shared contact: {name}, {contact.get('phone_number')}]")
 
         notes = await self._save_attachments(msg)
+        if not social and reply and msg.get("_protected") and not self._withheld_forward(reply) \
+                and (reply.get("from") or {}).get("id") not in self.own_bot_ids:  # (its own files are in the workspace already)
+            notes += await self._save_attachments(reply)  # not fetched when it came: it wasn't for Ampi then
         if notes:
             parts.append("[Attachments saved in your working directory:]\n" + "\n".join(notes))
         if parts == [forwarded]:
@@ -706,6 +792,9 @@ class ProfileBot:
     async def _send_workspace_file(self, chat_id: int, thread_id: int, name: str) -> None:
         root = self.profile.workspace.resolve()
         path = (root / name).resolve()
+        if chat_id != self.profile.owner_chat_id and path.is_relative_to((root / MAIL_FILES).resolve()):
+            await self._send_text(chat_id, thread_id, "⚠️ Files from emails are sent only in the private chat.", False)
+            return
         if not path.is_relative_to(root):
             await self._send_text(chat_id, thread_id, f"⚠️ Not sending {name}: it is outside the workspace.", False)
             return
@@ -759,7 +848,7 @@ class ProfileBot:
         await self._send_text(chat_id, new_thread, f"New conversation: {title}", markdown=False)
 
     async def _cmd_reset(self, chat_id: int, thread_id: int, args: str) -> None:
-        if (chat_id, thread_id) in self._running:
+        if (chat_id, thread_id) in self._running or (chat_id > 0 and (chat_id, thread_id) in self._pending):
             await self._send_text(chat_id, thread_id, "A task is still running here. Use /cancel first.", False)
             return
         self.store.reset_session(self.profile.name, chat_id, thread_id)
@@ -776,10 +865,13 @@ class ProfileBot:
             if watchers:
                 await self._send_text(chat_id, thread_id, f"⏹ Stopped {len(watchers)} watcher run(s).", False)
                 return
-        if task is None:
+        waiting = self._drop_waiting((chat_id, thread_id))
+        if waiting:
+            await self._send_text(chat_id, thread_id, f"⏹ Dropped {waiting} message(s) that were waiting.", markdown=False)
+        elif task is None:
             await self._send_text(chat_id, thread_id, "Nothing is running here.", markdown=False)
-            return
-        task.cancel()
+        if task is not None:
+            task.cancel()
 
     async def _cmd_model(self, chat_id: int, thread_id: int, args: str) -> None:
         name = self.profile.name
@@ -795,6 +887,58 @@ class ProfileBot:
         self.store.set_model(name, chat_id, thread_id, model)
         shown = model or self.profile.model or "Claude Code default"
         await self._send_text(chat_id, thread_id, f"Model for this conversation: {shown}", markdown=False)
+
+    async def _cmd_persona(self, chat_id: int, thread_id: int, args: str) -> None:
+        """Only the owner's own command sets it (nothing a run says or does can)."""
+        if chat_id != self.profile.owner_chat_id:
+            await self._send_text(chat_id, thread_id, "My persona is set in the private chat.", markdown=False)
+            return
+        name, text = self.profile.name, persona.clean(args)
+        if not text:
+            current = self.store.get_setting(name, persona.KEY)
+            await self._send_text(chat_id, thread_id, persona.describe(current), markdown=False)
+            return
+        if text.lower() in persona.OFF:
+            self.store.set_setting(name, persona.KEY, None)
+            await self._send_text(chat_id, thread_id, "Back to my default tone.", markdown=False)
+            return
+        text = persona.PRESETS.get(text.lower(), text)
+        if len(text) > persona.MAX:
+            await self._send_text(chat_id, thread_id, f"That's {len(text)} characters; at most {persona.MAX} fit. "
+                                  "Nothing changed.", markdown=False)
+            return
+        self.store.set_setting(name, persona.KEY, text)
+        await self._send_text(chat_id, thread_id, f"From the next message on: {persona.label(text)}.\n“{text}”\n"
+                              "/persona off – back to the default.", markdown=False)
+
+    async def _cmd_protect(self, chat_id: int, thread_id: int, args: str) -> None:
+        words = args.lower().split()
+        whole = "chat" in words
+        off = "off" in words
+        if set(words) - {"chat", "on", "off"} or {"on", "off"} <= set(words):
+            await self._send_text(chat_id, thread_id, "/protect – this chat or topic\n/protect chat – this chat with all its "
+                                  "topics\n/protect off, /protect chat off – end it", markdown=False)
+            return
+        where = "this chat and all its topics" if whole else "this topic" if thread_id else "this chat (not its topics)"
+        prefix = f"protected:{chat_id}:"
+        self.store.set_setting(self.profile.name, f"{prefix}{'*' if whole else thread_id}", None if off else "on")
+        left = [k.removeprefix(prefix) for k in self.store.settings(self.profile.name, prefix)]
+        if not off:
+            name = f"@{self.username}" if self.username else "me"
+            text = (f"Protected: in {where} I act only on messages that tag {name} or reply to one of mine, and on the rest of "
+                    "their album or posts forwarded together with them. I don't open, log or answer anything else there. "
+                    "Commands, approval requests and watcher reports still work. "
+                    f"/protect{' chat' if whole else ''} off ends it.")
+        elif "*" in left:
+            text = "Still protected here: the whole chat is (/protect chat off)."
+        else:
+            text = f"No longer protected: {where}."
+            topics = [k for k in left if k != "0"]
+            if whole and left:
+                text += " Still protected one by one: " + ", ".join(
+                    (["this chat itself"] if "0" in left else []) + ([f"{len(topics)} topic(s)"] if topics else [])) + \
+                    " (/protect off in each)."
+        await self._send_text(chat_id, thread_id, text, markdown=False)
 
     async def _cmd_info(self, chat_id: int, thread_id: int, args: str) -> None:
         if self.info_ui is None or chat_id != self.profile.owner_chat_id:
@@ -819,7 +963,7 @@ class ProfileBot:
         if chat_id != self.profile.owner_chat_id:
             await self._send_text(chat_id, thread_id, "Social mode is only for your private chat with me.", False)
             return
-        if (chat_id, thread_id) in self._running:
+        if (chat_id, thread_id) in self._running or (chat_id, thread_id) in self._pending:
             await self._send_text(chat_id, thread_id, "A task is still running here. Use /cancel first.", False)
             return
         conv = self.store.get_or_create(self.profile.name, chat_id, thread_id)
@@ -842,6 +986,8 @@ class ProfileBot:
             f"Conversation: {conv.title or ('main chat' if thread_id == 0 else f'topic {thread_id}')}",
             f"Session: {conv.session_id[:8]}… ({'active' if conv.started else 'not started'})",
             f"Model: {conv.model or self.profile.model or 'Claude Code default'}",
+            f"Persona: {persona.label(self.store.get_setting(self.profile.name, persona.KEY))}",
+            f"Protected: {'yes, I answer only when tagged' if self._protected(chat_id, thread_id) else 'no'}",
             f"Social mode: {'on (Instagram/Threads, no web) until /new' if conv.social else 'off'}",
             f"Running now: {'yes' if (chat_id, thread_id) in self._running else 'no'}",
             f"Runs: {stats.runs} ({stats.failed} failed)",
@@ -915,6 +1061,11 @@ def without_browse(tools) -> tuple[str, ...]:
 def watcher_thread_id(name: str) -> int:
     """A stable negative pseudo-topic id for a watcher's conversation (real topic ids are positive)."""
     return -1 - zlib.crc32(name.encode()) % 1_000_000_000
+
+
+def _from_others(msg: dict) -> bool:
+    """Forwarded, or an answer to something forwarded (its words are quoted to Claude): someone else's text."""
+    return "forward_origin" in msg or "forward_origin" in (msg.get("reply_to_message") or {})
 
 
 def _join_items(items: list[str]) -> str:

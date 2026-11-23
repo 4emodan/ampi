@@ -52,7 +52,9 @@ sudo systemctl start claude-assistant
 journalctl -u claude-assistant -f
 ```
 
-Send your bot a message. Commands: `/new [title]`, `/reset`, `/cancel`, `/model [name|default]`, `/status`, `/help`.
+Send your bot a message. Commands: `/new [title]`, `/reset`, `/cancel`, `/model [name|default]`, `/persona`, `/protect`, `/status`, `/help`.
+
+`/persona butler` (or your own words, e.g. `/persona dry humour, in Russian, at most five sentences`) sets the tone and character of the replies; `/persona` shows what is set and the ready-made ones, `/persona off` goes back. Only your own command in the private chat changes it, and it changes only how Ampi talks.
 
 ## 6. Groups (optional)
 
@@ -71,6 +73,8 @@ The bot can act on every message you post or forward in a group, e.g. a "Clipboa
 6. `sudo systemctl restart claude-assistant`.
 
 Only your own messages are handled; anyone else in the group is ignored. Messages forwarded together are handled in one run (`batch_seconds`, default 5). If there's nothing worth saying, the bot stays silent.
+
+`/protect` in a chat or topic (private or group): Ampi acts there only on messages that tag it (`@your_bot`) or reply to one of its messages, with the rest of their album and posts forwarded together with them; it doesn't open, log or answer anything else. (Its access to your Telegram account through `tg-read`, if you set that up, is separate.) `/protect` in the main chat doesn't cover its topics. `/protect chat` covers a chat with all its topics; `/protect off` / `/protect chat off` end it.
 
 ## 7. Reading all your Telegram chats (optional)
 
@@ -158,6 +162,8 @@ Setup (after sections 7 and 8, with `[tools] approvals = true`): re-run `deploy/
 4. `systemctl restart ampi-tools`, then check:
    `sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools check'`
 5. In `config.toml`, add `"Bash(todoist:*)"` and `"Bash(gmail:*)"` to `allowed_tools`, add a `[tools]` section with `approvals = true` (see `config.example.toml`), and `systemctl restart claude-assistant`.
+
+Ampi can save files attached to emails when you ask in the private chat (gmail files, gmail download, 10 MB each): they land in its workspace under `inbox/mail/` and it can send them to you. Only runs of your own messages there can (any of them: the check is where the request comes from, not what you wrote); groups, watchers and forwarded messages can neither download nor read them. Old files stay until you or Ampi delete them.
 
 ## 8b. YouTube (optional)
 
