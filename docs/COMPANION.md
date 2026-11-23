@@ -163,7 +163,7 @@ Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-si
 - **ampi-signin** (`src/ampi_phone/signin.py`, standard library): socket-activated, only ampi-tools may call it (uid checked), one
   request at a time (others are told "busy" at once, never queued), ends when the command that asked is gone or after 100 s,
   exits when idle. Its own
-  key proves who is asking; it opens nothing. Sandbox as the gateway's, plus: of /run it sees only the vault socket.
+  key proves who is asking; it opens nothing. Sandbox as the gateway's, plus: of /run it sees only the vault socket and the checkout controller's.
   Journal: outcomes, never sites.
 - **ampi-tools** (`ops_signin.py`): the private chat only. Outcomes become words from its own list (and the controller's own
   sentences about a form).
@@ -179,22 +179,28 @@ without it:
 
 1. ampi-signin asks the checkout controller (`bind_login`; the controller lets this user ask for nothing else): which site is it?
    The answer comes from the page itself: https, the main frame's real host, and the form must be one that signs in there: a real
-   password field (exactly one, not `new-password`), a user name field that looks like one, all in the same form, visible, the
-   form and its button send to the same host, and never with GET. No captcha on the page.
-2. ampi-signin asks the phone for exactly that host. The caller can't name one.
+   password field (exactly one, not `new-password`) with a user name field that looks like one, in the same form, visible, and
+   no other fields to fill in (that would be a registration, or a change of the account). A lone password field ("is it really
+   you?") counts only as the second page of a sign-in. Never GET (a form that names no method is made POST). Nothing typed into
+   that page by Ampi, no captcha, and one sign-in per session.
+   The button is pressed only if it is the submit button of that form, says that it signs in and nothing else (a list of whole
+   captions), and there is no price, total or payment frame on the page. Any other button is for `checkout submit`, which asks.
+2. ampi-signin asks the phone for exactly that host. The caller can't name one. Then it compares what the login is for with where
+   the form sends it, and with every site this browser session was on (a page of some other site could still have a hand in it).
 3. The login goes ampi-signin -> controller (`fill_login`) only. The controller checks everything again (same document, same
-   elements, nothing done in between), fills, presses the button if one was given.
-4. From then on the password is cut out of everything the controller answers (as it is, URL- or HTML-written; a field it was put
-   into stays secret even when the page shows it as text), every button that sends something asks the owner as before, and the
-   engine is thrown away when the session closes.
+   elements, nothing done in between) and fills in one go; the page's own scripts get no chance in between.
+4. From then on user name and password are cut out of everything of the page that the controller answers (as they are, URL- or
+   HTML-written; a field the password was put into stays secret even when the page shows it as text). In the owner's account
+   almost every button, switch and link that could do something asks them (`checkout submit`); only a list of captions that look
+   around doesn't, and other addresses can't be opened. With sign-ins installed, an engine is never used for a second session.
 
-ampi-signin keeps a login only until it was filled in, or 3 minutes for the second page of the same browser session, on a host of
-the same login; then its process ends (Python can't wipe a string, the end of a process does). What the engine and the site's
+ampi-signin keeps a login only until it was filled in, or 3 minutes from the fingerprint for the second page of the same browser
+session, on a host of the same login; then its process ends (Python can't wipe a string, the end of a process does). What the engine and the site's
 scripts see can't be limited: it is the site's own page. The site is as honest as the engine that reports it.
 
 Who could do what: the gateway (reached from the internet): delay. ampi-tools, or a tricked Ampi: make the phone ask (limited,
-it shows the site), learn whether a login was unlocked, and, when the owner approves, use the signed-in page like any other (what
-commits to something still asks). ampi-signin or root: get the one login the owner approves, at that moment. Someone with the unlocked phone but not the finger: see sites and labels, delete.
+it shows the site), learn whether a login was unlocked, and, when the owner approves, use the signed-in page: a tricked Ampi within
+the rules above; ampi-tools itself applies the rules, so a compromised one could do in that account what the session can. ampi-signin or root: get the one login the owner approves, at that moment. Someone with the unlocked phone but not the finger: see sites and labels, delete.
 
 ### Not yet
 

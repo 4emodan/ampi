@@ -690,7 +690,8 @@ def test_only_known_words_reach_ampi(tmp_path, reply):
 
 
 def test_every_code_has_words():
-    assert (signin.PHONE_CODES | signin.GATEWAY_CODES | {"not_paired", "untrusted", "lost", "no_browser", "unknown"}) - {"failed", "bad_request"} \
+    assert (signin.PHONE_CODES | signin.GATEWAY_CODES | {"not_paired", "untrusted", "lost", "no_browser", "unknown", "browser_busy",
+                                                          "other_sites", "other_target"}) - {"failed", "bad_request"} \
         == set(ops_signin.WORDS)
     assert signin.HOST_RE.pattern == ops_signin.HOST_RE.pattern
 

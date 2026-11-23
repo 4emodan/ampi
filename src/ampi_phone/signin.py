@@ -42,6 +42,7 @@ WAIT = 75  # seconds the owner has on the phone
 TOTAL = 100.0  # for everything (Ampi's commands end after two minutes)
 IDLE = 30.0
 HOLD = 180.0  # an unlocked login waits this long for the second page of a sign-in (or a page that changed)
+FILL_TOTAL = 175.0  # a whole sign-in: the browser, the phone, the browser
 CHECKOUT = "/run/ampi-checkout.sock"
 SESSION_RE = re.compile(r"[0-9a-f]{16}")
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
@@ -114,18 +115,20 @@ class Watch(threading.Thread):
     def run(self) -> None:
         while not self.done.wait(0.2):
             self.late = time.monotonic() >= self.deadline
-            if self.late or self._gone():
+            if self.late or gone(self.caller):
                 try:
                     self.stop.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
                 return
 
-    def _gone(self) -> bool:
-        try:
-            return bool(select.select([self.caller], [], [], 0)[0])  # it has nothing more to say: the end, or noise
-        except (OSError, ValueError):
-            return True
+
+def gone(conn: socket.socket | None) -> bool:
+    """The caller has left (or says something more, which it never does)."""
+    try:
+        return conn is not None and bool(select.select([conn], [], [], 0)[0])
+    except (OSError, ValueError):
+        return True
 
 
 def open_vault() -> socket.socket:
@@ -150,7 +153,7 @@ class Login:
 def login_of(r: dict, host: str) -> Login | None:
     user, secret, hosts = r.get("user"), r.get("secret"), r.get("hosts")
     for v in (user, secret):
-        if not isinstance(v, str) or not 0 < len(v) <= 200 or any(ord(c) < 32 for c in v):
+        if not isinstance(v, str) or not 0 < len(v) <= 200 or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in v):
             return None
     if not isinstance(hosts, list) or len(hosts) > 10 or any(not isinstance(h, str) or not HOST_RE.fullmatch(h) for h in hosts) \
             or host not in hosts:
@@ -214,16 +217,25 @@ def _ask(host: str, sock: socket.socket, ctx: ssl.SSLContext, devices: list[trus
         return ("ok", login) if login is not None or purpose == "test" else ("failed", None)
 
 
+class Busy(Exception):
+    """The controller didn't answer in time."""
+
+
 def controller(req: dict, timeout: float = 60) -> dict:
     """One request to the checkout browser's controller (which lets this user ask for nothing but bind_login and
     fill_login)."""
     with socket.socket(socket.AF_UNIX) as s:
+        deadline = time.monotonic() + timeout
         s.settimeout(timeout)
         s.connect(CHECKOUT)
         s.sendall(json.dumps(req).encode() + b"\n")
         out = b""
         while not out.endswith(b"\n"):
-            part = s.recv(65536)
+            s.settimeout(max(0.1, deadline - time.monotonic()))
+            try:
+                part = s.recv(65536)
+            except TimeoutError:
+                raise Busy from None
             if not part or len(out) > 262_144:
                 raise Lost
             out += part
@@ -243,15 +255,19 @@ def words(error: Any) -> str:
 
 @dataclass(repr=False)
 class Held:
-    """An unlocked login that isn't used up yet: for one browser session, a few minutes."""
+    """An unlocked login that isn't used up yet: for one browser session, a few minutes from the fingerprint on."""
     session: str
     login: Login
     until: float
 
 
+def related(a: str, b: str) -> bool:
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
+
+
 class Service:
     def __init__(self, allowed: frozenset[int], ask: Callable[..., tuple[str, Login | None]] = ask,
-                 controller: Callable[[dict], dict] = controller):
+                 controller: Callable[..., dict] = controller):
         self.allowed, self.ask, self.controller = allowed, ask, controller
         self.asking = threading.Lock()
         self.calls = 0
@@ -306,42 +322,62 @@ class Service:
 
     def _fill(self, req: dict, conn: socket.socket) -> dict:
         refs = {k: req[k] for k in ("user", "password", "press") if req.get(k) is not None}
+        end = time.monotonic() + FILL_TOTAL
         try:
             # Which site it is: what the browser is really on, never what the caller says.
-            b = self.controller({"cmd": "bind_login", "session": req["session"], **refs})
+            b = self.controller({"cmd": "bind_login", "session": req["session"], **refs}, timeout=40)
+        except Busy:
+            return {"ok": False, "code": "browser_busy"}
         except (Lost, OSError, ValueError):
             return {"ok": False, "code": "no_browser"}
         host = b.get("host")
         if b.get("ok") is not True or not isinstance(host, str) or not HOST_RE.fullmatch(host) or not isinstance(b.get("bound"), dict):
             return {"ok": False, "code": "page", "error": words(b.get("error"))}
-        login = self._held_for(req["session"], host)
-        if login is None:
+        held = self._held_for(req["session"], host)
+        if held is None:
             code, login = self.ask(host, conn, purpose="fill")
             if login is None:
                 return {"ok": False, "code": code if code != "ok" else "failed"}
+            held = Held(req["session"], login, time.monotonic() + HOLD)  # from here on, whatever happens
+        login = held.login
+        # A session that was on some other site is not one to put a login into: that site's page may still have a hand in it.
+        visited, targets = b.get("visited"), b.get("targets")
+        if not isinstance(visited, list) or any(not isinstance(v, str) or not any(related(v, h) for h in login.hosts) for v in visited):
+            self._forget()
+            return {"ok": False, "code": "other_sites"}
+        # The form may send it to the page's own site, or to another address the owner saved with this login.
+        if not isinstance(targets, list) or any(t not in login.hosts and t != host for t in targets):
+            self._forget()
+            return {"ok": False, "code": "other_target"}
+        if end - time.monotonic() < 45 or gone(conn):  # nobody is waiting for it any more
+            self._forget()
+            return {"ok": False, "code": "lost"}
         values = {"user": login.user} if "user" in refs else {}
         if "password" in refs:
             values["password"] = login.secret
         try:
-            r = self.controller({"cmd": "fill_login", "session": req["session"], "host": host, "bound": b["bound"], **values})
-        except (Lost, OSError, ValueError):
+            r = self.controller({"cmd": "fill_login", "session": req["session"], "host": host, "bound": b["bound"], "name": login.user,
+                                 **values}, timeout=max(45, end - time.monotonic()))
+        except (Busy, Lost, OSError, ValueError):
             self._forget()
             return {"ok": False, "code": "unknown"}
-        if "password" in refs and (r.get("ok") is True or r.get("phase") != "verify"):
-            self._forget()  # it is in the page now
+        if r.get("phase") == "verify" or (r.get("ok") is True and "password" not in refs):
+            self.held = held  # not used yet, or only its first half
         else:
-            self.held = Held(req["session"], login, time.monotonic() + HOLD)
+            self._forget()  # it is in the page now, or there is no page any more
         if r.get("ok") is not True:
-            return {"ok": False, "code": "page", "error": words(r.get("error"))}
-        return {"ok": True, "code": "ok", "pressed": r.get("pressed") is True, "password": "password" in refs}
+            phase = r.get("phase")
+            return {"ok": False, "code": "page", "error": words(r.get("error")), "phase": phase if phase in ("filled", "sent") else ""}
+        return {"ok": True, "code": "ok", "pressed": r.get("pressed") is True, "moved": r.get("moved") is not False,
+                "password": "password" in refs}
 
-    def _held_for(self, session: str, host: str) -> Login | None:
+    def _held_for(self, session: str, host: str) -> Held | None:
         h = self.held
         if h is None or h.until <= time.monotonic() or h.session != session or host not in h.login.hosts:
             if h is not None:
                 self._forget()
             return None
-        return h.login
+        return h
 
     def _forget(self) -> None:
         self.held = None

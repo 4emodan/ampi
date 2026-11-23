@@ -17,6 +17,7 @@ import json
 import re
 import time
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -92,6 +93,47 @@ DESTRUCTIVE = re.compile(r"delete|cancel|unsubscribe|remove|удалить|от�
 GENERIC = re.compile(r"(yes|ok(ay)?|finish|done|save|confirm|agree|i agree|✓|✔|да|готово|ναι|kyllä|ja|oui)", re.I)
 
 
+# In a session that is signed in to the owner's account almost any button can do something there (renew, transfer, cancel,
+# switch something off). Pressed without asking: only these whole captions, which look around, close something or put into a
+# cart, and dates and times.
+ACCOUNT_SAFE = re.compile(
+    r"(search|find|show results|filters?|apply filters?|clear( all)? filters?|sort( by)?|go back|back|previous|next|"
+    r"(previous|next) (page|month|week|day|slide)|[‹›<>«»←→]|menu|open menu|close( menu)?|×|show more|load more|more|see more|"
+    r"decline( all)?|reject( all)?|accept( all)? cookies|only necessary( cookies)?|necessary cookies only|"
+    r"add (\d+ )?(items? )?to (my |your |the )?(cart|bag|basket)|view (my |your )?(cart|bag|basket)|"
+    r"hae|lisää (ostoskoriin|koriin)|seuraava|edellinen|sulje|valikko|поиск|найти|назад|вперёд|закрыть|меню|αναζήτηση|πίσω|κλείσιμο)", re.I)
+ACCOUNT_DATE = re.compile(
+    r"(\d{1,2}([:.]\d{2})?( ?[ap]\.?m\.?)?( ?[-–] ?\d{1,2}([:.]\d{2})?( ?[ap]\.?m\.?)?)?|"
+    r"(mon|tue|wed|thu|fri|sat|sun)[a-z]*,? ?\d{0,2}( [a-z]{3,9})?|\d{1,2} [a-z]{3,9}( \d{4})?)", re.I)
+# Links there are followed unless their words or address sound like doing something.
+ACCOUNT_ACTION = re.compile(
+    r"delete|remove|cancel|unsubscribe|subscribe|renew|upgrade|downgrade|confirm|approve|accept|activate|deactivate|disable|enable|"
+    r"turn (on|off)|switch (on|off)|transfer|withdraw|top ?up|deposit|redeem|\bpay|\bbuy|purchase|\border\b|checkout|\bbook\b|reserve|"
+    r"\bsend|submit|logout|log out|sign out|close account|reset|revoke|generate|create|download data|export|add card|payment method|"
+    r"удалить|отмен|оплат|купить|подтверд|διαγραφή|ακύρωση|πληρωμή|poista|peru|maksa|tilaa|vahvista", re.I)
+
+
+def account_acts(g: dict, texts: list[str], raw: list[str], money: bool) -> bool:
+    """In a signed-in session: could pressing this do something in the owner's account?"""
+    kind, words = g.get("kind"), " ".join([*raw, str(g.get("ident") or "")])
+    if kind == "link" and g.get("tag") == "a":
+        here = str(g.get("frame_origin") or "?")
+        path = urllib.parse.unquote(str(g.get("dest") or "")).split("#")[0]
+        return not path.startswith(here + "/") or bool(ACCOUNT_ACTION.search(words) or ACCOUNT_ACTION.search(path[len(here):]))
+    if kind in ("checkbox", "radio"):
+        # A box of a form is sent with it, and shown to the owner then; a switch acts at once.
+        native = g.get("tag") == "input" and not g.get("role") and g.get("in_form")
+        return not native or bool(ACCOUNT_ACTION.search(words) or re.search(r"renew|2-?step|two.?factor|recurring", words, re.I))
+    if kind == "input":
+        return False  # (a click into a text field)
+    if not texts:
+        return True
+    ok = (ACCOUNT_SAFE,) if g.get("submits") and not g.get("search") else (ACCOUNT_SAFE, ACCOUNT_DATE)
+    if not _all(ok, texts) or (g.get("submits") and not g.get("search") and not _all((re.compile(r"search|find|hae|поиск|найти|αναζήτηση", re.I),), texts)):
+        return True
+    return money and not _all((ACCOUNT_DATE, re.compile(r"(close|×|back|menu|previous|next (month|week|day)|[‹›<>«»←→])", re.I), ADD_TO_CART), texts)
+
+
 def caption(text: str) -> str:
     """A caption without prices, counts in brackets and decoration."""
     t = unicodedata.normalize("NFKC", text)
@@ -146,6 +188,9 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
     if g.get("submits") and dest and not dest.startswith((origin + "/", origin + "?")) and dest != origin:
         return "commit"  # sends what is entered to another site
     money = bool(g.get("priced") or money_around(side, g.get("totals"), g.get("frames")))
+    if g.get("signed_in") and account_acts(g, texts, raw, money):
+        bad = any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in words)
+        return "order" if bad else "commit"
     if g.get("filled") and money and button and not _all((HARMLESS,) if g.get("submits") else (HARMLESS, MINOR, OPTION), words):
         # Something is entered and there is something to pay: any other button may be the one that orders.
         bad = any(ORDER_BUTTON.search(t) or PAY_WORDS.search(t) for t in words if not STEP.fullmatch(t))

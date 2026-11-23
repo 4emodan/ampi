@@ -70,6 +70,7 @@ systemctl enable ampi-checkout-net.service ampi-checkout.socket >/dev/null 2>&1
 systemctl stop ampi-checkout.service ampi-checkout-engine.service 2>/dev/null || true
 systemctl restart ampi-checkout-net.service
 systemctl restart ampi-checkout.socket
+systemctl stop ampi-signin.service 2>/dev/null || true  # (it sees the socket as it was when it started)
 
 echo "==> Check"
 # As ampitools, through the real socket: starts the controller, and with it the engine.

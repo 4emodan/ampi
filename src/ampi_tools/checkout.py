@@ -45,6 +45,7 @@ import socket
 import struct
 import sys
 import time
+import unicodedata
 import urllib.parse
 from collections.abc import Callable
 from typing import Any
@@ -64,6 +65,7 @@ HARD_MAX = 30 * 60
 MIN_MEM_MB = 900
 NAV_TIMEOUT = 25
 PAY_SETTLE = 30
+SIGNIN_SETTLE = 12
 PAY_FILL_SETTLE = 1.5  # seconds between filling the card and pressing Pay
 MAX_REQUEST = 262_144
 MAX_TEXT = 60_000
@@ -96,9 +98,21 @@ CONFIRMATION = re.compile(r"order|confirm|thank|kiitos|tilaus|vahvist", re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 # The same as HOST_RE in ampi_phone/signin.py: the sites a login can be saved for.
 LOGIN_HOST = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])")
-USER_FIELD = re.compile(r"user|login|e-?mail|phone|mobile|account|member|customer|\bid\b|käyttäjä|sähköposti|benutzer|"
-                        r"utilisateur|usuario|пользовател|логин|почт|телефон", re.I)
-MIN_HIDE = 4  # a shorter password would cut pieces out of ordinary words
+USER_FIELD = re.compile(r"user|login|e-?mail|phone|mobile|account|member|customer|\bid\b|käyttäjä|tunnus|sähköposti|benutzer|"
+                        r"utilisateur|usuario|utente|użytkownik|användar|bruker|bruger|gebruiker|kasutaja|"
+                        r"пользовател|логин|почт|телефон|χρήστη|ηλεκτρονικ", re.I)
+MIN_HIDE = 4  # a shorter one would cut pieces out of ordinary words
+# What a sign-in button says, whole (login_caption): nothing that could also order, pay, confirm or delete something.
+LOGIN_CAPTION = re.compile(
+    r"((log|sign) ?(in|on)( (now|securely))?|(log ?in|sign ?in|continue|next) with (your )?(e-?mail|password)|continue|next|"
+    r"kirjaudu( sisään)?|jatka|seuraava|logga in|fortsätt|nästa|logg inn|log ind|fortsæt|anmelden|einloggen|weiter|inloggen|aanmelden|"
+    r"verder|volgende|(se )?connecter|connexion|continuer|suivant|iniciar sesión|entrar|acceder|continuar|siguiente|accedi|continua|"
+    r"avanti|zaloguj( się)?|dalej|войти|вход|далее|продолжить|σύνδεση|είσοδος|συνέχεια|επόμενο|εισοδος|συνδεση|logi sisse|edasi)", re.I)
+PAY_HOST = re.compile(r"(^|[./])(stripe|adyen|braintreegateway|paypal|paypalobjects|klarna|klarnaservices|shopifycs|squareup|squarecdn|"
+                      r"paytrail|mollie|worldpay|jccsmart|vivapayments|revolut)\.(com|net|app|io|fi|eu)$")
+# The parts of a reply that are the page's words (the rest are this controller's own, and must not be touched).
+PAGE_WORDS = frozenset({"title", "text", "label", "texts", "around", "options", "selected", "risky_checked", "checked", "url", "href",
+                        "dest", "name", "id", "ident", "value", "confirmation", "error"})
 AMOUNT = re.compile(
     rf"(?P<pre>{_CUR}|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr)\b)?\s?"
     r"(?P<num>\d{1,3}(?:[  .,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
@@ -208,26 +222,52 @@ def login_host(url: str) -> str:
     return host if ok else ""
 
 
-def hidden(value: Any, secrets_: list[str]) -> Any:
-    """Everything a reply says, without the passwords that were filled in (as they are, or as a URL or HTML writes them)."""
+def fillable(v: Any) -> bool:
+    """A user name or password that can be filled in (and cut out again): ordinary characters."""
+    return isinstance(v, str) and 0 < len(v) <= 200 and not any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in v)
+
+
+def login_caption(text: Any) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(text or ""))).strip(" →›»>:.!")
+
+
+def hider(secrets_: list[str]) -> "re.Pattern | None":
+    """Finds the login that was filled in: as it is, or as a URL (once or twice), HTML or JSON writes it."""
     forms: set[str] = set()
     for s in secrets_:
-        if len(s) >= MIN_HIDE:
-            forms |= {s, urllib.parse.quote(s, safe=""), urllib.parse.quote(s), urllib.parse.quote_plus(s), html.escape(s),
-                      html.escape(s, quote=False), json.dumps(s)[1:-1], " ".join(s.split())}
+        for v in {s, unicodedata.normalize("NFC", s), unicodedata.normalize("NFD", s), " ".join(s.split())}:
+            once = {urllib.parse.quote(v, safe=""), urllib.parse.quote(v), urllib.parse.quote_plus(v)}
+            forms |= {v, *once, *(urllib.parse.quote(o, safe="") for o in once), html.escape(v), html.escape(v, quote=False),
+                      json.dumps(v)[1:-1], json.dumps(v, ensure_ascii=False)[1:-1]}
     order = sorted((f for f in forms if len(f) >= MIN_HIDE), key=len, reverse=True)
+    return re.compile("|".join(map(re.escape, order)), re.I) if order else None
 
-    def walk(x: Any) -> Any:
+
+def hidden(value: Any, secrets_: list[str]) -> Any:
+    """What comes from the page, without the login that was filled in. (A site that wants to can always write it in some
+    other way: it has it. This keeps ordinary pages from showing it.)"""
+    rx = hider(secrets_)
+
+    def cut(x: str) -> str:
+        m = re.match(r"https?://[^/?#\s]*", x)  # a site's name isn't a password, even when one is spelled the same
+        start = m.end() if m else 0
+        head, rest = x[:start], rx.sub("•••", x[start:])
+        if any(c in rest for c in "%&+"):  # written in a way not in the list: decode, and then leave nothing of it
+            for decoded in (urllib.parse.unquote(rest), urllib.parse.unquote_plus(rest), html.unescape(rest),
+                            urllib.parse.unquote(urllib.parse.unquote(rest))):
+                if rx.search(decoded):
+                    rest = "•••"
+        return head + rest
+
+    def walk(x: Any, words: bool) -> Any:
         if isinstance(x, str):
-            for f in order:
-                x = x.replace(f, "•••")
-            return x
+            return cut(x) if words else x
         if isinstance(x, list):
-            return [walk(v) for v in x]
+            return [walk(v, words) for v in x]
         if isinstance(x, dict):
-            return {k: walk(v) for k, v in x.items()}
+            return {k: walk(v, words if k not in PAGE_WORDS else True) for k, v in x.items()}
         return x
-    return walk(value) if order else value
+    return walk(value, False) if rx else value
 
 
 def origin_of(url: str, security_origin: str | None = None) -> str:
@@ -456,7 +496,7 @@ PAGE_JS = r"""
       const d = { n: idOf(el), kind: kind, tag: el.tagName.toLowerCase(), type: (el.type || '').toLowerCase(),
         autocomplete: txt(el.getAttribute('autocomplete'), 60), name: txt(el.getAttribute('name'), 80),
         id: txt(el.id, 80), label: labelOf(el, kind), required: !!el.required, checked: null, filled: false,
-        disabled: disabledOf(el),
+        disabled: disabledOf(el), visible: visible(el),
         role: txt(el.getAttribute('role'), 30) };
       for (const k of ['aria-selected', 'aria-pressed', 'aria-checked'])
         if (kind === 'button' && el.hasAttribute(k)) d.checked = el.getAttribute(k) === 'true' || !!d.checked;
@@ -466,6 +506,36 @@ PAGE_JS = r"""
         const o = el.options[el.selectedIndex]; d.selected = o ? txt(o.text, 60) : null; }
       return d;
     };
+    const formOf = (e) => e.form instanceof HTMLFormElement ? e.form : (e.closest ? e.closest('form') : null);
+    const resolve = (u) => { try { return String(new URL(u || '', document.baseURI || location.href)); } catch (e) { return 'unreadable'; } };
+    const loginFacts = (U, S) => {
+      const F = formOf(S || U);
+      let box = F;
+      if (!F) { box = S || U; while (box && !(box.contains(S || U) && box.contains(U || S))) box = box.parentElement; box = box || document; }
+      // Every control of the form, also those that belong to it from elsewhere on the page (form="…").
+      const all = Array.from(box.querySelectorAll ? box.querySelectorAll('input,select,textarea,[contenteditable=""],[contenteditable=true]') : []);
+      if (S && !all.includes(S)) all.push(S);
+      if (F && F.id) for (const e of document.querySelectorAll('input[form],select[form],textarea[form]')) if (formOf(e) === F && !all.includes(e)) all.push(e);
+      let extra = false, boxes = 0, passwords = 0;
+      for (const e of all) {
+        if (F && formOf(e) !== F && e.form !== undefined) continue;
+        const ty = e.tagName === 'INPUT' ? (e.type || '').toLowerCase() : '';
+        const trap = ty === 'password' && e !== S && !e.value && (e.getAttribute('tabindex') === '-1' || !!(e.closest && e.closest('[aria-hidden=true]')));
+        if (ty === 'password' && visible(e) && !trap) passwords++;
+        if (e === U || e === S || ['hidden', 'submit', 'button', 'image', 'reset'].includes(ty)) continue;
+        if (ty === 'password') { if ((!visible(e) || trap) && !e.value) continue; }
+        else if (ty === 'checkbox') { boxes++; continue; }
+        else if (e.tagName === 'INPUT' && !visible(e) && ['text', 'email', 'tel', ''].includes(ty)) continue;  // a trap for robots, or a copy of the name
+        else if (e.tagName === 'INPUT' && (e.readOnly || e.disabled) && ['text', 'email', 'tel', ''].includes(ty)) continue;  // who is signing in
+        else if (e.tagName === 'SELECT' || e.tagName === 'TEXTAREA') { if (!visible(e)) continue; }
+        extra = true;
+      }
+      return { connected: true, hasForm: !!F, sameForm: [U, S].every(e => !e || formOf(e) === F), passwords: passwords, extra: extra, boxes: boxes,
+        shown: [U, S].every(e => !e || visible(e)), method: F ? (F.getAttribute('method') || '').toLowerCase().trim() : '',
+        action: F ? actionOf(F) : '' };
+    };
+    // Where a form goes: '' = nowhere or the page itself (an empty action means the page, whatever its <base> says).
+    const actionOf = (F) => { const raw = (F.getAttribute('action') || '').trim(); return !raw || /^javascript:/i.test(raw) ? '' : resolve(raw).slice(0, 1000); };
     const setValue = (el, v) => {
       const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
@@ -474,6 +544,36 @@ PAGE_JS = r"""
       el.dispatchEvent(new InputEvent('input', { bubbles: true, data: v, inputType: 'insertText' }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       try { el.dispatchEvent(new FocusEvent('blur')); } catch (e) {}
+    };
+    const gateOf = (el, other) => {
+        const lab = el.closest('label');
+        const c = el.closest('button,input,a[href],[role=button]') || (lab && lab.control) || el;
+        const texts = [];
+        for (const n of (c === el ? [el] : [el, c])) {
+          const by = (n.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).map(i => { const x = document.getElementById(i); return x ? x.textContent : ''; }).join(' ');
+          for (const s of [n.getAttribute('aria-label'), by, n.tagName === 'INPUT' ? (['submit', 'button', 'image', 'reset'].includes((n.type || '').toLowerCase()) ? n.value : '') : n.textContent, n.getAttribute('title'), n.getAttribute('alt')]) {
+            const t = txt(s, 200); if (t && !texts.includes(t)) texts.push(t);
+          }
+          n.querySelectorAll && n.querySelectorAll('img[alt]').forEach(i => { const t = txt(i.getAttribute('alt'), 100); if (t && texts.length < 12 && !texts.includes(t)) texts.push(t); });
+        }
+        const owner = c.form instanceof HTMLFormElement ? c.form : (c.closest ? c.closest('form') : null);
+        const cty = c.tagName === 'BUTTON' ? (c.getAttribute('type') || 'submit').toLowerCase() : (c.type || '').toLowerCase();
+        const presses = (c.tagName === 'BUTTON' || c.tagName === 'INPUT') && ['submit', 'image'].includes(cty);
+        const submits = !!owner && presses;
+        let search = false;
+        if (owner) {
+          const fs = Array.from(owner.querySelectorAll('input,textarea,select')).filter(i => !['hidden', 'submit', 'button', 'image', 'reset'].includes((i.type || '').toLowerCase()));
+          search = fs.length <= 1 && ((owner.getAttribute('role') || '') === 'search' || !!owner.closest('[role=search]') || (fs.length === 1 && (fs[0].type === 'search' || /^(q|s|query|search|keyword)$/i.test(fs[0].getAttribute('name') || ''))));
+        }
+        let dest = '', method = '';
+        if (c.tagName === 'A') { dest = resolve(c.getAttribute('href')); method = 'link'; }
+        else if (owner) { dest = resolve(c.getAttribute('formaction') || owner.getAttribute('action'));
+          method = (c.getAttribute('formmethod') || owner.getAttribute('method') || 'get').toLowerCase(); }
+        let box = owner || c.closest('[role=dialog],dialog,section,article,main') || c.parentElement;
+        const own = owner && (c.getAttribute('formmethod') || owner.getAttribute('method'));
+        return { connected: true, inForm: !!owner, ownMethod: !!own, to: c.hasAttribute('formaction') ? resolve(c.getAttribute('formaction')) : owner ? actionOf(owner) : '', withForm: !!(other && owner && formOf(other) === owner), tag: c.tagName.toLowerCase(), texts: texts.slice(0, 12), ident: txt((c.getAttribute('name') || '') + ' ' + c.id, 120),
+          submits: submits, search: search, dest: dest.slice(0, 1000), method: method, href: String(location.href),
+          around: txt(box ? (box.innerText || box.textContent) : '', 600) };
     };
     G.__ampi = { run: function (a) {
       const get = (n) => { const el = els.get(n); return el && el.isConnected ? el : null; };
@@ -535,53 +635,36 @@ PAGE_JS = r"""
       }
       if (a.op === 'gate') {  // what a press on this element would really press
         const el = get(a.n); if (!el) return { connected: false };
-        const lab = el.closest('label');
-        const c = el.closest('button,input,a[href],[role=button]') || (lab && lab.control) || el;
-        const texts = [];
-        for (const n of (c === el ? [el] : [el, c])) {
-          const by = (n.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).map(i => { const x = document.getElementById(i); return x ? x.textContent : ''; }).join(' ');
-          for (const s of [n.getAttribute('aria-label'), by, n.tagName === 'INPUT' ? (['submit', 'button', 'image', 'reset'].includes((n.type || '').toLowerCase()) ? n.value : '') : n.textContent, n.getAttribute('title'), n.getAttribute('alt')]) {
-            const t = txt(s, 200); if (t && !texts.includes(t)) texts.push(t);
-          }
-          n.querySelectorAll && n.querySelectorAll('img[alt]').forEach(i => { const t = txt(i.getAttribute('alt'), 100); if (t && texts.length < 12 && !texts.includes(t)) texts.push(t); });
-        }
-        const owner = c.form instanceof HTMLFormElement ? c.form : (c.closest ? c.closest('form') : null);
-        const cty = c.tagName === 'BUTTON' ? (c.getAttribute('type') || 'submit').toLowerCase() : (c.type || '').toLowerCase();
-        const presses = (c.tagName === 'BUTTON' || c.tagName === 'INPUT') && ['submit', 'image'].includes(cty);
-        const submits = !!owner && presses;
-        let search = false;
-        if (owner) {
-          const fs = Array.from(owner.querySelectorAll('input,textarea,select')).filter(i => !['hidden', 'submit', 'button', 'image', 'reset'].includes((i.type || '').toLowerCase()));
-          search = fs.length <= 1 && ((owner.getAttribute('role') || '') === 'search' || !!owner.closest('[role=search]') || (fs.length === 1 && (fs[0].type === 'search' || /^(q|s|query|search|keyword)$/i.test(fs[0].getAttribute('name') || ''))));
-        }
-        const resolve = (u) => { try { return String(new URL(u || '', document.baseURI || location.href)); } catch (e) { return 'unreadable'; } };
-        let dest = '', method = '';
-        if (c.tagName === 'A') { dest = resolve(c.getAttribute('href')); method = 'link'; }
-        else if (owner) { dest = resolve(c.getAttribute('formaction') || owner.getAttribute('action'));
-          method = (c.getAttribute('formmethod') || owner.getAttribute('method') || 'get').toLowerCase(); }
-        let box = owner || c.closest('[role=dialog],dialog,section,article,main') || c.parentElement;
-        return { connected: true, tag: c.tagName.toLowerCase(), texts: texts.slice(0, 12), ident: txt((c.getAttribute('name') || '') + ' ' + c.id, 120),
-          submits: submits, search: search, dest: dest.slice(0, 1000), method: method, href: String(location.href),
-          around: txt(box ? (box.innerText || box.textContent) : '', 600) };
-      }
-      if (a.op === 'login') {  // what the fields of a sign-in form belong to
-        const U = a.user ? get(a.user) : null, S = a.secret ? get(a.secret) : null, P = a.press ? get(a.press) : null;
-        if ((a.user && !U) || (a.secret && !S) || (a.press && !P)) return { connected: false };
-        const formOf = (e) => e.form instanceof HTMLFormElement ? e.form : (e.closest ? e.closest('form') : null);
-        const F = formOf(S || U);
-        const resolve = (u) => { try { return String(new URL(u || '', document.baseURI || location.href)); } catch (e) { return 'unreadable'; } };
-        const B = P ? (P.closest('button,input,a[href],[role=button]') || P) : null;
-        return { connected: true, hasForm: !!F,
-          sameForm: [U, S].every(e => !e || formOf(e) === F) && (!B || (F ? formOf(B) === F : true)),
-          passwords: Array.from((F || document).querySelectorAll('input[type=password]')).filter(visible).length,
-          shown: [U, S, P].every(e => !e || visible(e)),
-          method: F ? (F.getAttribute('method') || '').toLowerCase() : '',
-          action: F ? resolve(F.getAttribute('action')).slice(0, 1000) : '',
-          pressTag: B ? B.tagName.toLowerCase() : '', pressMethod: B ? (B.getAttribute('formmethod') || '').toLowerCase() : '',
-          pressAction: B && B.hasAttribute('formaction') ? resolve(B.getAttribute('formaction')).slice(0, 1000) : '',
-          href: String(location.href).slice(0, 2000) };
+        return gateOf(el, a.with ? get(a.with) : null);
       }
       if (a.op === 'inspect') { const el = get(a.n); return el ? Object.assign({ connected: true }, describe(el)) : { connected: false }; }
+      if (a.op === 'login' || a.op === 'signin') {  // what the fields of a sign-in form belong to; signin: and fill them
+        const U = a.user ? get(a.user) : null, S = a.secret ? get(a.secret) : null;
+        if ((a.user && !U) || (a.secret && !S)) return { connected: false };
+        const facts = loginFacts(U, S);
+        if (a.op === 'login') return facts;
+        const same = () => JSON.stringify(Object.keys(a.expect).map(k => loginFacts(U, S)[k])) === JSON.stringify(Object.values(a.expect));
+        if (!same()) return { ok: false };
+        if (U) setValue(U, a.values.user);  // the page's own scripts run here
+        if (S) {
+          if (!S.isConnected || S.type !== 'password' || !same()) return { ok: false };
+          kept.add(S);
+          setValue(S, a.values.password);
+        }
+        // A form that names no method would be sent with GET, the login in its address, should its script not run here.
+        const F = formOf(S || U);
+        if (F && !F.getAttribute('method')) F.setAttribute('method', 'post');
+        return { ok: true };
+      }
+      if (a.op === 'clickif') {  // press it only if it still is what was decided about
+        const el = get(a.n); if (!el) return { ok: false };
+        const g = gateOf(el, null);
+        for (const k of Object.keys(a.expect)) if (k !== 'method' && JSON.stringify(g[k]) !== JSON.stringify(a.expect[k])) return { ok: false };
+        const b = el.closest('button,input') || el, F = formOf(b), m = F ? (b.getAttribute('formmethod') || F.getAttribute('method') || '').trim().toLowerCase() : 'post';
+        if (m && m !== 'post') return { ok: false };
+        if (!m) F.setAttribute('method', 'post');  // (never with GET: the login would be in the address)
+        el.click(); return { ok: true };
+      }
       if (a.op === 'set') { const el = get(a.n); if (!el) return { ok: false }; if (a.keep) kept.add(el); setValue(el, a.value); return { ok: true }; }
       if (a.op === 'click') { const el = get(a.n); if (!el) return { ok: false };
         try { el.scrollIntoView && el.scrollIntoView({ block: 'center' }); } catch (e) {} el.click(); return { ok: true }; }
@@ -616,7 +699,11 @@ class Session:
         self.readonly = False
         self.gen = 0         # counts everything done in the session: an approved press needs it unchanged
         self.filled = False  # the owner's details were filled in
-        self.secrets: list[str] = []  # passwords filled in: cut out of every reply
+        self.secrets: list[str] = []  # the login filled in: cut out of every reply
+        self.user_step = False  # the first page of a sign-in was filled in (its user name)
+        self.signed_in = False  # a password was filled in
+        self.typed: set[str] = set()    # documents (loader ids) something else was typed into
+        self.visited: set[str] = set()  # sites the page was on
         self.frame_names: dict[str, str] = {}      # CDP frameId -> "f0", "f1", …
         self.worlds: dict[str, tuple[str, int]] = {}  # CDP frameId -> (loaderId, isolated world context id)
 
@@ -632,7 +719,9 @@ class Session:
 class Controller:
     def __init__(self, connect: Callable[[], Cdp] | None = None, clock: Callable[[], float] = time.time,
                  mem_mb: Callable[[], int] = mem_available_mb, check_url: Callable[[str], str] | None = None,
-                 sleep: Callable[[float], None] = time.sleep, engine_uid: int | None = None):
+                 sleep: Callable[[float], None] = time.sleep, engine_uid: int | None = None, signin: bool = False):
+        # With sign-ins, an engine is never used for a second session: what a page did to it must not see a login later.
+        self.fresh = signin
         self._connect = connect or (lambda: connect_engine(engine_uid))
         self.clock, self.mem_mb, self.sleep = clock, mem_mb, sleep
         self.check_url = check_url or br.check_url
@@ -661,7 +750,12 @@ class Controller:
         s = self.session
         out = self._handle(req, signin)
         secrets_ = [x for session in {s, self.session} if session is not None for x in session.secrets]
-        return hidden(out, secrets_) if secrets_ else out
+        try:
+            return hidden(out, secrets_) if secrets_ else out
+        except Exception:
+            self.retire = True
+            self.drop()
+            return {"ok": False, "error": "internal error in the checkout browser; the session was closed"}
 
     def _handle(self, req: Any, signin: bool) -> dict:
         self._phase = None
@@ -710,7 +804,7 @@ class Controller:
         s, self.session = self.session, None
         if s is None:
             return
-        if s.readonly or s.secrets:
+        if s.readonly or s.secrets or self.fresh:
             self.retire = True  # it paid, or signed in: start over with a fresh engine
         try:
             s.cdp.call("Target.disposeBrowserContext", {"browserContextId": s.context}, timeout=5)
@@ -751,6 +845,8 @@ class Controller:
         return {"ok": True}
 
     def _new_session(self) -> Session:
+        if self.retire:  # this engine is on its way out
+            raise Refused("the checkout browser is starting afresh; try again in a few seconds")
         if self.mem_mb() < MIN_MEM_MB:
             raise Refused("the server is short of memory right now; try again later")
         cdp = self._connect()
@@ -778,6 +874,8 @@ class Controller:
         url = self.check_url(url)
         if req.get("session") is not None:
             s = self._session(req)
+            if s.signed_in:  # any address can be an action there
+                raise Refused("signed in here: go on with the page's own links, or close the session")
         elif self.session is not None:
             raise Refused("another checkout session is open; close it first")
         else:
@@ -834,6 +932,9 @@ class Controller:
         walk(tree, None)
         if not out:
             raise CdpError("no frames")
+        site = (urllib.parse.urlsplit(out[0]["url"]).hostname or "").lower().removeprefix("www.")
+        if site and len(s.visited) < 50:
+            s.visited.add(site)
         return out
 
     def _world(self, s: Session, frame: dict) -> int:
@@ -858,7 +959,8 @@ class Controller:
             data = json.loads(value) if isinstance(value, str) else None
         except ValueError:
             return None
-        return data if isinstance(data, dict) else None
+        # (Before anything is cut to a length, or a half of it could be left.)
+        return hidden(data, s.secrets) if isinstance(data, dict) else None
 
     def _run(self, s: Session, frame: dict, op: dict, quiet: bool = False) -> dict | None:
         """One page op in the frame's isolated world. An engine error (the context went away while the page
@@ -885,13 +987,13 @@ class Controller:
     def snapshot(self, s: Session) -> dict:
         frames = self._frames(s)
         top = frames[0]
-        snap: dict[str, Any] = {"url": top["url"][:500], "origin": top["origin"], "title": "", "text": "",
+        snap: dict[str, Any] = {"url": hidden({"url": top["url"]}, s.secrets)["url"][:500], "origin": top["origin"], "title": "", "text": "",
                                 "frames": [], "elements": [], "readonly": s.readonly}
         frame_urls = []
         texts = []
         checked_labels: list[str] = []
         for f in frames:
-            snap["frames"].append({"id": f["name"], "origin": f["origin"], "url": f["url"][:200]})
+            snap["frames"].append({"id": f["name"], "origin": f["origin"], "url": hidden({"url": f["url"]}, s.secrets)["url"][:200]})
             frame_urls.append(f["url"])
             if f["origin"] == "opaque" and f is not top:
                 continue  # never actionable
@@ -994,6 +1096,7 @@ class Controller:
         ident = re.sub(r"[_\-.\[\]]+", " ", " ".join(str(d.get(k) or "") for k in ("name", "label", "id")))
         if d.get("type") != "search" and not (d.get("type") == "number" and QUANTITY.search(ident)):
             s.filled = True  # something was entered: buttons may send it
+        s.typed.add(frame["loader"])
         r = self._run(s, frame, {"op": "set", "n": n, "value": text}) or {}
         if not r.get("ok"):
             raise Refused("that element is gone (the page changed); take a new snapshot")
@@ -1065,6 +1168,7 @@ class Controller:
             raise Refused(PAGE_CHANGED)
         return {"tag": str(g.get("tag") or "")[:20], "texts": [br.MARKERS.sub("", br.clean(str(t)))[:200] for t in (g.get("texts") or [])[:12]],
                 "ident": br.clean(str(g.get("ident") or ""))[:120], "submits": bool(g.get("submits")), "search": bool(g.get("search")),
+                "in_form": bool(g.get("inForm")),
                 "dest": br.clean(str(g.get("dest") or ""))[:1000], "method": str(g.get("method") or "")[:10],
                 "href": br.clean(str(g.get("href") or ""))[:1000],
                 "around": br.MARKERS.sub("", br.clean(str(g.get("around") or "")))[:600]}
@@ -1077,7 +1181,8 @@ class Controller:
         snap = self.snapshot(s)
         return {"ok": True, "session": s.id, "kind": d.get("kind"), "frame_origin": frame["origin"], "filled": s.filled,
                 "totals": snap["gate_totals"], "priced": snap["priced"],
-                "frames": sorted({f["origin"] for f in self._frames(s)}), **g}
+                "frames": sorted({f["origin"] for f in self._frames(s)}), "signed_in": s.signed_in, "type": d.get("type"),
+                "role": str(d.get("role") or "")[:30], **g}
 
     @staticmethod
     def _seen(g: dict, title: str) -> str:
@@ -1113,7 +1218,8 @@ class Controller:
         if not isinstance(b, dict):
             raise Refused("bad button")
         frames = self._frames(s)
-        if frames[0]["origin"] != req.get("origin") or frames[0]["origin"] == "opaque" or frames[0]["url"] != req.get("url"):
+        if frames[0]["origin"] != req.get("origin") or frames[0]["origin"] == "opaque" \
+                or hidden({"url": frames[0]["url"]}, s.secrets)["url"] != req.get("url"):
             raise changed
         try:
             bframe, d, n = self._element(s, b.get("ref"), frames)
@@ -1194,22 +1300,28 @@ class Controller:
         _, plan = self._verify(s, req, req.get("fields"), allow_card=False)
         self._phase = "filled"
         s.filled = True
+        s.typed |= {frame["loader"] for frame, _, _ in plan}
         self._set_all(s, plan)
         self._phase = None  # done: later problems (settling, the snapshot) are ordinary errors
         return self._after_action(s)
 
     # --- signing in (only ampi-signin) ---------------------------------------------------------
 
-    LOGIN_FACTS = ("hasForm", "sameForm", "passwords", "shown", "method", "action", "pressTag", "pressMethod", "pressAction")
+    LOGIN_FACTS = ("hasForm", "sameForm", "passwords", "extra", "boxes", "shown", "method", "action")
 
-    def _login(self, s: Session, req: dict) -> tuple[dict, dict, dict]:
-        """(top frame, {"user"/"password"/"press": (description, number)}, facts): a sign-in form of the page's own site,
-        or a refusal. What it is comes from the page, never from the caller."""
+    def _login(self, s: Session, req: dict) -> tuple[dict, dict, dict, dict | None]:
+        """(top frame, {"user"/"password"/"press": (description, number)}, facts of the form, what the press would press): a
+        form that signs in, or a refusal. What it is comes from the page, never from the caller. Where it sends the login is
+        in the facts ("targets"): ampi-signin compares them with the sites the login is for."""
+        if s.signed_in:
+            raise Refused("a login was filled in here already; close the session to sign in again")
         frames = self._frames(s)
         top = frames[0]
         host = login_host(top["url"])
         if not host or top["origin"] != f"https://{urllib.parse.urlsplit(top['url']).netloc.lower().removesuffix(':443')}":
             raise Refused("this isn't an https page a login can be used on")
+        if top["loader"] in s.typed:
+            raise Refused("something was typed into this page; open it again and leave the filling to the sign-in")
         els: dict[str, tuple[dict, int]] = {}
         for k in ("user", "password", "press"):
             if req.get(k) is None:
@@ -1222,6 +1334,12 @@ class Controller:
             els[k] = (d, n)
         if not els or set(els) == {"press"}:
             raise Refused("give the user field, the password field, or both")
+        # A lone password field is how sites ask "is it really you?" before something important. It is a sign-in only as the
+        # second page of one.
+        if "user" not in els and not s.user_step:
+            raise Refused("a password field alone isn't a sign-in (it may confirm something in an account); give the user field too")
+        if "password" not in els and s.user_step:
+            raise Refused("the user name was filled in already; now the password")
         if "password" in els:
             d = els["password"][0]
             if d.get("tag") != "input" or d.get("type") != "password":
@@ -1235,10 +1353,8 @@ class Controller:
                 raise Refused("that isn't a field for a user name")
             if d.get("type") not in ("email", "tel") and not USER_FIELD.search(words):
                 raise Refused("that doesn't look like the field for a user name or email")
-        if "press" in els and els["press"][0].get("kind") != "button":
-            raise Refused("give the sign-in button")
-        facts = self._run(s, top, {"op": "login", **{k2: els[k][1] if k in els else None for k, k2 in (
-            ("user", "user"), ("password", "secret"), ("press", "press"))}}) or {}
+        facts = self._run(s, top, {"op": "login", "user": els["user"][1] if "user" in els else None,
+                                   "secret": els["password"][1] if "password" in els else None}) or {}
         if not facts.get("connected"):
             raise Refused(PAGE_CHANGED)
         facts = {k: facts.get(k) for k in self.LOGIN_FACTS}
@@ -1247,25 +1363,50 @@ class Controller:
         if not facts["shown"]:
             raise Refused("one of those fields isn't visible on the page")
         if "password" in els and facts["passwords"] != 1:
-            raise Refused("that form has several password fields: it registers or changes a password, it doesn't sign in")
-        if "get" in (facts["method"], facts["pressMethod"]):
+            raise Refused("that password field isn't usable here" if not facts["passwords"] else
+                          "that form has several password fields: it registers or changes a password, it doesn't sign in")
+        if facts["extra"] or not isinstance(facts["boxes"], int) or facts["boxes"] > 2:
+            raise Refused("that form asks for more than a sign-in does (other fields); the owner does that")
+        if facts["method"] not in ("", "post"):
             raise Refused("that form would put the login into the address of a page; refusing")
-        for where in (facts["action"], facts["pressAction"]):
-            if where and login_host(where) != host:
-                raise Refused("that form sends the login to another site; refusing")
-        if facts["pressTag"] == "a":
-            raise Refused("give the sign-in button, not a link")
-        return top, els, facts
+        press = self._login_press(s, frames, els) if "press" in els else None
+        facts["targets"] = sorted({host, *(login_host(u) for u in (facts["action"], press["to"] if press else "") if u)})
+        if "" in facts["targets"]:
+            raise Refused("that form sends the login to something that isn't an https site; refusing")
+        return top, els, facts, press
+
+    def _login_press(self, s: Session, frames: list[dict], els: dict) -> dict:
+        """The sign-in button: it submits the form of the fields, to the same site, says so and nothing else, on a page with
+        nothing to pay. Anything else is for `checkout submit`, where the owner sees what is pressed."""
+        instead = "; fill in without --press and use `checkout submit` for the button, which asks the owner"
+        d, n = els["press"]
+        field = next(els[k][1] for k in ("password", "user") if k in els)
+        if d.get("kind") != "button":
+            raise Refused("that isn't a button" + instead)
+        g = self._run(s, frames[0], {"op": "gate", "n": n, "with": field}) or {}
+        if not g.get("connected") or g.get("tag") not in ("button", "input") or not g.get("submits") or not g.get("withForm"):
+            raise Refused("that isn't the button of that form" + instead)
+        texts = [login_caption(t) for t in g.get("texts") or []]
+        if not texts or not all(LOGIN_CAPTION.fullmatch(t) for t in texts):
+            raise Refused("that button doesn't say it signs in" + instead)
+        if str(g.get("method") or "") not in ("", "post", "get" if not g.get("ownMethod") else "post"):
+            raise Refused("that button would put the login into the address of a page; refusing")
+        snap = self.snapshot(s)
+        if snap["gate_totals"] or snap["priced"] or snap["risky_checked"] or any(PAY_HOST.search(f["origin"]) for f in frames):
+            raise Refused("there are prices or a payment form on this page" + instead)
+        return {k: g.get(k) for k in ("tag", "texts", "to", "submits", "ident")}
 
     def bind_login(self, req: dict) -> dict:
-        """Which site the form is on (the owner is asked for exactly that one), and what it is, to check it again."""
+        """Which site the form is on (the owner is asked for exactly that one), which sites this session was on, and what
+        the form is, to check it again."""
         s = self._session(req)
-        top, els, facts = self._login(s, req)
+        top, els, facts, press = self._login(s, req)
         snap = self.snapshot(s)
         if snap["captcha"]:
             raise Refused("the page has a captcha; signing in there is for the owner")
-        return {"ok": True, "session": s.id, "host": login_host(top["url"]), "bound": {
-            "gen": s.gen, "frame_id": top["frame_id"], "origin": top["origin"], "loader": top["loader"], "facts": facts,
+        return {"ok": True, "session": s.id, "host": login_host(top["url"]), "visited": sorted(s.visited),
+                "targets": facts["targets"], "bound": {
+            "gen": s.gen, "frame_id": top["frame_id"], "origin": top["origin"], "loader": top["loader"], "facts": facts, "press": press,
             "elements": {k: {"ref": req[k], **{b: str(d.get(b) or "")[:120] for b in self.BOUND}} for k, (d, _) in els.items()}}}
 
     def fill_login(self, req: dict) -> dict:
@@ -1279,44 +1420,66 @@ class Controller:
         if bound.get("gen") != s.gen:
             raise changed
         try:
-            top, els, facts = self._login(s, {k: v.get("ref") for k, v in bound["elements"].items() if isinstance(v, dict)})
+            top, els, facts, press = self._login(s, {k: v.get("ref") for k, v in bound["elements"].items() if isinstance(v, dict)})
         except Refused:
             raise changed from None
         if (top["frame_id"] != bound.get("frame_id") or top["origin"] != bound.get("origin")
-                or top["loader"] != bound.get("loader") or facts != bound.get("facts") or login_host(top["url"]) != req.get("host")
+                or top["loader"] != bound.get("loader") or facts != bound.get("facts") or press != bound.get("press")
+                or login_host(top["url"]) != req.get("host")
                 or {k: {"ref": bound["elements"][k].get("ref"), **{b: str(d.get(b) or "")[:120] for b in self.BOUND}}
                     for k, (d, _) in els.items()} != bound["elements"]):
             raise changed
         values = {k: req.get(k) for k in ("user", "password") if k in els}
-        if any(not isinstance(v, str) or not 0 < len(v) <= 200 or any(ord(c) < 32 for c in v) for v in values.values()):
+        if any(not fillable(v) for v in values.values()) or not fillable(req.get("name")):
             raise Refused("bad request")
         s.gen += 1
         s.filled = True
-        # From the first value on the engine is never used for another session (it may keep the password in memory).
+        s.secrets += [req["name"], *([values["password"]] if "password" in values else [])]
         if "password" in values:
-            s.secrets.append(values["password"])
+            s.signed_in = True
         else:
-            s.secrets.append("")
+            s.user_step = True
         self._phase = "filled"
-        for k, v in values.items():
-            r = self._run(s, top, {"op": "set", "n": els[k][1], "value": v, "keep": k == "password"}) or {}
-            if not r.get("ok"):
-                raise Refused("a field disappeared while filling; check the page before trying again")
-        if "press" not in els:
+        # Checked and set in one go: page scripts run while the first field is set, and nothing else gets in between.
+        r = self._run(s, top, {"op": "signin", "user": els["user"][1] if "user" in els else None,
+                               "secret": els["password"][1] if "password" in els else None, "values": values,
+                               "expect": {k: v for k, v in facts.items() if k != "targets"}}) or {}
+        if not r.get("ok"):
+            raise Refused("the page changed while it was being filled in; look at it before trying again")
+        if press is None:
             return {"ok": True, "session": s.id, "pressed": False}
-        self.sleep(0.5)  # forms enable their button when the fields are filled
-        cur = self._run(s, top, {"op": "inspect", "n": els["press"][1]}) or {}
+        for _ in range(6):  # forms enable their button when the fields are filled, some after a moment
+            self.sleep(0.5)
+            cur = self._run(s, top, {"op": "inspect", "n": els["press"][1]}) or {}
+            if not cur.get("connected") or not cur.get("disabled"):
+                break
         if not cur.get("connected") or cur.get("disabled"):
             raise Refused("the login was filled in, but the sign-in button is gone or disabled; it was not pressed")
         self._phase = "sent"
         try:
-            r = self._run(s, top, {"op": "click", "n": els["press"][1]}) or {}
-            if r.get("ok"):
-                self._settle(s, NAV_TIMEOUT)
-            return {"ok": True, "session": s.id, "pressed": bool(r.get("ok"))}
+            r = self._run(s, top, {"op": "clickif", "n": els["press"][1], "expect": press}) or {}
+            if not r.get("ok"):
+                return {"ok": True, "session": s.id, "pressed": False}
+            return {"ok": True, "session": s.id, "pressed": True, "moved": self._after_signin(s, top, els)}
         except (Refused, CdpProtocolError):
             return self._error("after the sign-in button was pressed, the page changed or went somewhere this browser doesn't "
                                "open; look at it before trying again")
+
+    def _after_signin(self, s: Session, top: dict, els: dict) -> bool:
+        """Waits until the page reacts (another address or document, or the field is gone); False when it hasn't in time."""
+        start = self.clock()
+        while self.clock() - start < SIGNIN_SETTLE:
+            self.sleep(0.5)
+            now = self._frames(s)[0]
+            if now["url"] != top["url"] or now["loader"] != top["loader"]:
+                self._settle(s, NAV_TIMEOUT)
+                return True
+            d = self._run(s, now, {"op": "inspect", "n": els.get("password", els.get("user"))[1]}, quiet=True) or {}
+            if not d.get("connected") or not d.get("visible", True):
+                self._settle(s, NAV_TIMEOUT)
+                return True
+        self._check_top(s)
+        return False
 
     def _set_all(self, s: Session, plan: list[tuple]) -> None:
         for frame, n, value in plan:
@@ -1400,9 +1563,13 @@ def peer_uid(conn: socket.socket) -> int:
 
 
 def read_line(conn: socket.socket) -> bytes:
-    conn.settimeout(10)
+    deadline = time.monotonic() + 10  # for all of it: this serves one caller at a time
     buf = b""
     while b"\n" not in buf:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise Refused("too slow")
+        conn.settimeout(left)
         chunk = conn.recv(65536)
         if not chunk:
             break
@@ -1464,13 +1631,13 @@ def main() -> int:
     if not allowed or len(engine) != 1:
         print("AMPI_CHECKOUT_CLIENT_UIDS and AMPI_CHECKOUT_ENGINE_UID must be set", file=sys.stderr)
         return 2
-    controller = Controller(engine_uid=engine.pop())
+    controller = Controller(engine_uid=engine.pop(), signin=bool(signin))
     srv = listening_socket()
     print("ampi-checkout controller ready", file=sys.stderr)
     while True:
         ready, _, _ = select.select([srv], [], [], 5)
         controller.expire()
-        if ready:
+        if ready and not should_exit(controller):
             conn, _ = srv.accept()
             serve_one(controller, conn, allowed, signin_uids=signin)
         if should_exit(controller):

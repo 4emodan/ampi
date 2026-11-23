@@ -46,6 +46,10 @@ WORDS = {
     "untrusted": "the phone and the sign-in service don't trust each other: the phone has to be paired again",
     "lost": "the connection to the phone broke",
     "no_browser": "the checkout browser isn't running",
+    "browser_busy": "the checkout browser is busy; " + AGAIN,
+    "other_target": "that page sends the login to another site than the ones the owner saved it for",
+    "other_sites": "this browser session was on a site that isn't part of that login: close it, and open the sign-in page in a new "
+                   "one (a sign-in over two sites: the owner saves both addresses with the login)",
     "unknown": "the browser stopped answering while the login was being filled in: it MAY have been sent. Look at the page (`checkout "
                "snapshot`) before trying again",
 }
@@ -126,7 +130,9 @@ def _client(s: Services) -> Any:
 def _why(r: dict) -> str:
     code = r.get("code")
     if code == "page":  # the controller's own words about the form
-        return clean(r.get("error"), 200) or "the page isn't as expected"
+        said = clean(r.get("error"), 200) or "the page isn't as expected"
+        return said + {"sent": ". The login WAS sent, and it may have worked: look with `checkout snapshot`, don't just try again",
+                       "filled": ". Something was filled in already"}.get(r.get("phase"), "")
     return WORDS.get(code, "something went wrong") if isinstance(code, str) else "something went wrong"
 
 
@@ -143,15 +149,21 @@ async def si_fill(s: Services, a: dict) -> Result:
         raise ToolError("no checkout session; open the site's sign-in page with `checkout open URL`")
     r = await client.call({"cmd": "fill", "session": st["session"], **{k: v for k, v in refs.items() if v}}, timeout=FILL_TIMEOUT)
     if r.get("ok") is not True:
-        raise ToolError("not signed in: " + _why(r))
+        raise ToolError(("unclear: " if r.get("phase") == "sent" or r.get("code") == "unknown" else "not signed in: ") + _why(r))
     if not r.get("pressed"):
         done = "The login was filled in; its button was not pressed."
     elif r.get("password"):
         done = "The login was filled in and sent. Check below whether the site accepted it."
     else:
         done = "The user name was filled in and sent. For the password page, run `signin fill` again within 3 minutes."
-    page = await side.client.call({"cmd": "snapshot", "session": st["session"]}, timeout=60)
-    return done + "\n\n" + await _show(s, page)
+    if r.get("pressed") and not r.get("moved", True):
+        done += " The page hasn't changed yet: take a snapshot in a few seconds, and don't sign in again before that."
+    try:
+        page = await side.client.call({"cmd": "snapshot", "session": st["session"]}, timeout=60)
+        shown = await _show(s, page)
+    except ToolError as e:
+        shown = f"(The page can't be read right now: {e}. Don't sign in again; look with `checkout snapshot`.)"
+    return done + "\n\n" + shown
 
 
 OPS["signin.test"] = Op("signin.test", False, si_test)
