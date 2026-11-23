@@ -1,7 +1,9 @@
 """ampi-checkout: the checkout browser's controller (standard library only; user `ampicheckoutctl`).
 
 It drives the Obscura engine (user `ampicheckout`, `obscura serve` on 127.0.0.1:19333, see
-deploy/ampi-checkout-engine.service) over the Chrome DevTools Protocol, and answers the ampi-tools daemon on
+deploy/ampi-checkout-engine.service) over the Chrome DevTools Protocol, or for one session, when it was opened so, the second
+engine (Lightpanda, user `ampicheckoutlp`, 127.0.0.1:19334, deploy/ampi-checkout-lp.service): for sites the first can't run.
+Card details never go into the second one, and it is thrown away after every session. It answers the ampi-tools daemon on
 /run/ampi-checkout.sock (one JSON line in, one JSON line out). Only the daemon may connect (SO_PEERCRED).
 
 What the assistant gets from here is a *snapshot*: the page's text and a numbered list of the things it can
@@ -59,6 +61,7 @@ except ImportError:  # pragma: no cover - deployed layout
 
 CDP_HOST = "127.0.0.1"   # literal: never "localhost", which could resolve to ::1
 CDP_PORT = 19333
+ENGINES = {"obscura": 19333, "lightpanda": 19334}  # name -> its port on CDP_HOST
 SOCKET_PATH = os.environ.get("AMPI_CHECKOUT_SOCKET", "/run/ampi-checkout.sock")
 IDLE = 10 * 60
 HARD_MAX = 30 * 60
@@ -414,21 +417,21 @@ ENGINE_WAIT = 15  # seconds for the engine's listener to appear after (re)start
 
 
 def connect_engine(engine_uid: int | None, proc_paths: tuple[str, ...] = ("/proc/net/tcp",),
-                   wait: float = ENGINE_WAIT, sleep: Callable[[float], None] = time.sleep) -> Cdp:
+                   wait: float = ENGINE_WAIT, sleep: Callable[[float], None] = time.sleep, port: int = CDP_PORT) -> Cdp:
     """Only to the engine's own listener: refuse at once if anything else owns the port (a squatter); while
     nothing listens yet (the engine is starting with the controller), wait a little."""
     if engine_uid is None:
         raise Refused("the checkout browser isn't set up (no engine user)")
     waited = 0.0
     while True:
-        owner = listener_uid(CDP_PORT, proc_paths)
+        owner = listener_uid(port, proc_paths)
         if owner == engine_uid:
             break
         if owner is not None or waited >= wait:
             raise Refused("the checkout browser isn't running right now; try again in a minute")
         sleep(0.5)
         waited += 0.5
-    conn = http.client.HTTPConnection(CDP_HOST, CDP_PORT, timeout=5)
+    conn = http.client.HTTPConnection(CDP_HOST, port, timeout=5)
     try:
         conn.request("GET", "/json/version")
         info = json.loads(conn.getresponse().read(65536) or b"{}")
@@ -437,7 +440,7 @@ def connect_engine(engine_uid: int | None, proc_paths: tuple[str, ...] = ("/proc
     finally:
         conn.close()
     path = urllib.parse.urlsplit(str(info.get("webSocketDebuggerUrl", ""))).path or "/"
-    return Cdp(WebSocket(CDP_HOST, CDP_PORT, path))
+    return Cdp(WebSocket(CDP_HOST, port, path))
 
 
 # --- the page-side script (runs in each frame's isolated world) ------------------------------------
@@ -695,6 +698,7 @@ class Session:
     def __init__(self, sid: str, cdp: Cdp, context: str, target: str, cdp_session: str, now: float):
         self.id, self.cdp, self.context, self.target, self.cdp_session = sid, cdp, context, target, cdp_session
         self.started = self.last = now
+        self.engine = "obscura"
         self.hold_until = 0.0
         self.readonly = False
         self.gen = 0         # counts everything done in the session: an approved press needs it unchanged
@@ -719,10 +723,14 @@ class Session:
 class Controller:
     def __init__(self, connect: Callable[[], Cdp] | None = None, clock: Callable[[], float] = time.time,
                  mem_mb: Callable[[], int] = mem_available_mb, check_url: Callable[[str], str] | None = None,
-                 sleep: Callable[[float], None] = time.sleep, engine_uid: int | None = None, signin: bool = False):
+                 sleep: Callable[[float], None] = time.sleep, engine_uid: int | None = None, signin: bool = False,
+                 lp_uid: int | None = None):
         # With sign-ins, an engine is never used for a second session: what a page did to it must not see a login later.
         self.fresh = signin
-        self._connect = connect or (lambda: connect_engine(engine_uid))
+        uids = {"obscura": engine_uid, "lightpanda": lp_uid}
+        self._connect = (lambda engine: connect()) if connect else (
+            lambda engine: connect_engine(uids[engine], port=ENGINES[engine]))
+        self.engines = {"obscura"} | ({"lightpanda"} if lp_uid is not None else set())
         self.clock, self.mem_mb, self.sleep = clock, mem_mb, sleep
         self.check_url = check_url or br.check_url
         self.session: Session | None = None
@@ -804,8 +812,8 @@ class Controller:
         s, self.session = self.session, None
         if s is None:
             return
-        if s.readonly or s.secrets or self.fresh:
-            self.retire = True  # it paid, or signed in: start over with a fresh engine
+        if s.readonly or s.secrets or self.fresh or s.engine != "obscura":
+            self.retire = True  # it paid, or signed in, or is the second engine: start over with a fresh one
         try:
             s.cdp.call("Target.disposeBrowserContext", {"browserContextId": s.context}, timeout=5)
         except Exception:
@@ -828,7 +836,7 @@ class Controller:
         s = self.session
         if s is None:
             return {"ok": True, "session": None, "state": "idle"}
-        return {"ok": True, "session": s.id, "state": "readonly" if s.readonly else "active",
+        return {"ok": True, "session": s.id, "state": "readonly" if s.readonly else "active", "engine": s.engine,
                 "started": s.started, "idle_for": round(self.clock() - s.last)}
 
     def hold(self, req: dict) -> dict:
@@ -844,12 +852,14 @@ class Controller:
         self.drop()
         return {"ok": True}
 
-    def _new_session(self) -> Session:
+    def _new_session(self, engine: str) -> Session:
         if self.retire:  # this engine is on its way out
             raise Refused("the checkout browser is starting afresh; try again in a few seconds")
+        if engine not in self.engines:
+            raise Refused("the second browser engine isn't installed")
         if self.mem_mb() < MIN_MEM_MB:
             raise Refused("the server is short of memory right now; try again later")
-        cdp = self._connect()
+        cdp = self._connect(engine)
         try:
             ctx = cdp.call("Target.createBrowserContext", {"disposeOnDetach": True}).get("browserContextId")
             target = cdp.call("Target.createTarget", {"url": "about:blank", "browserContextId": ctx}).get("targetId")
@@ -862,6 +872,7 @@ class Controller:
             cdp.close()
             raise
         s = Session(secrets.token_hex(8), cdp, ctx, target, sess, self.clock())
+        s.engine = engine
         self.session = s
         return s
 
@@ -872,14 +883,19 @@ class Controller:
         if not isinstance(url, str):
             raise Refused("give a link (https://…)")
         url = self.check_url(url)
+        engine = req.get("engine")
+        if engine is not None and (not isinstance(engine, str) or engine not in ENGINES):
+            raise Refused("unknown browser engine")
         if req.get("session") is not None:
             s = self._session(req)
             if s.signed_in:  # any address can be an action there
                 raise Refused("signed in here: go on with the page's own links, or close the session")
+            if engine is not None and engine != s.engine:
+                raise Refused("this session runs in the other engine; close it first")
         elif self.session is not None:
             raise Refused("another checkout session is open; close it first")
         else:
-            s = self._new_session()
+            s = self._new_session(engine or "obscura")
         s.cdp.call("Page.navigate", {"url": url}, s.cdp_session)
         self._settle(s, NAV_TIMEOUT)
         return self._reply(s)
@@ -1506,6 +1522,8 @@ class Controller:
         s = self._session(req)
         # 1. verify: nothing has been written; any refusal here is definite.
         self._phase = "verify"
+        if s.engine != "obscura":
+            raise Refused("card details don't go into this browser engine; nothing was filled or paid")
         frames, plan = self._verify(s, req, req.get("fields"), allow_card=True)
         bframe, bn = self._pay_button(s, req.get("button"), frames)
         snap = self.snapshot(s)
@@ -1631,7 +1649,8 @@ def main() -> int:
     if not allowed or len(engine) != 1:
         print("AMPI_CHECKOUT_CLIENT_UIDS and AMPI_CHECKOUT_ENGINE_UID must be set", file=sys.stderr)
         return 2
-    controller = Controller(engine_uid=engine.pop(), signin=bool(signin))
+    lp = _uids("AMPI_CHECKOUT_LP_UID")  # the second engine's user; none when it isn't installed
+    controller = Controller(engine_uid=engine.pop(), signin=bool(signin), lp_uid=lp.pop() if len(lp) == 1 else None)
     srv = listening_socket()
     print("ampi-checkout controller ready", file=sys.stderr)
     while True:

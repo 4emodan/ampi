@@ -4,6 +4,9 @@ Description=Claude Assistant checkout browser: the controller (answers ampi-tool
 # that the listener there belongs to the engine's user) and to ampi-tools on the socket systemd hands it.
 Requires=ampi-checkout-net.service ampi-checkout-engine.service ampi-checkout.socket
 After=ampi-checkout-net.service ampi-checkout-engine.service ampi-checkout.socket
+# The second engine, where it is installed; the checkout browser works without it.
+Wants=ampi-checkout-lp.service
+After=ampi-checkout-lp.service
 
 [Service]
 Type=simple

@@ -457,6 +457,12 @@ final check.
    ```bash
    sudo bash deploy/install-checkout.sh
    ```
+   Optional, for sites the first engine can't run (some booking calendars): the second engine
+   ([Lightpanda](https://github.com/lightpanda-io/browser), one file, its own user `ampicheckoutlp`). Ampi picks it per
+   session; card details never go into it, and it is thrown away after every session.
+   ```bash
+   sudo bash deploy/install-lightpanda.sh        # removing it again: --uninstall
+   ```
 2. Enter your details on the server, as a **personal info directory** of named entries: `me` (person), places
    (`home`, `work`, …), cards (`card-main`, …) and notes. Secret card values aren't shown as you type.
    ```bash

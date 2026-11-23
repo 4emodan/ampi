@@ -654,7 +654,10 @@ def checkout_parser() -> argparse.ArgumentParser:
     p.add_argument("-m", "--reason", help="why (shown to the owner)")
     p.add_argument("--wait", type=int, default=WAIT_DEFAULT)
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("open", help="start a session at a URL (or go to another URL)").add_argument("url")
+    s = sub.add_parser("open", help="start a session at a URL (or go to another URL)")
+    s.add_argument("url")
+    s.add_argument("--engine", choices=("obscura", "lightpanda"), help="another browser engine for this session: for a site that "
+                   "doesn't run in the default one (no card payments there)")
     sub.add_parser("snapshot", help="the page: text and numbered elements")
     sub.add_parser("click", help="click an element").add_argument("ref")
     s = sub.add_parser("type", help="type your own text into a field (never personal data or card details)")
@@ -693,7 +696,7 @@ def checkout_main(argv: list[str] | None = None) -> int:
                             a.reason, a.wait)
     if c == "submit":
         return _run_waiting("checkout", _op("checkout.submit", ref=a.ref, what=a.what), a.reason, a.wait)
-    args = {"open": {"url": getattr(a, "url", None)}, "click": {"ref": getattr(a, "ref", None)},
+    args = {"open": {"url": getattr(a, "url", None), "engine": getattr(a, "engine", None)}, "click": {"ref": getattr(a, "ref", None)},
             "type": {"ref": getattr(a, "ref", None), "text": getattr(a, "text", None)},
             "choose": {"ref": getattr(a, "ref", None), "option": getattr(a, "option", None)}}.get(c, {})
     return _run_waiting("checkout", _op(f"checkout.{c}", **args), a.reason, 0)

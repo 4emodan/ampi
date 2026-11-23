@@ -74,7 +74,8 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
                         provider frames, daemon presses Pay; private chat only; [payment] limits
   checkout.py           stdlib; the checkout controller (user `ampicheckoutctl`) driving `obscura serve` (user
                         `ampicheckout`) over CDP; elements tracked in isolated worlds; never returns input values
-  checkout_net.py       root: nft table for the engine's egress and the loopback control port
+                        (and, per session, the second engine: Lightpanda, user `ampicheckoutlp`, install-lightpanda.sh)
+  checkout_net.py       root: nft table for the engines' egress and the loopback control ports
   client.py             `todoist` / `gmail` / `youtube` / `threads` / `instagram` / `maps` / `wolt` / `browse` /
                         `info` / `checkout` / `payment` / `phone` / `signin` commands the assistant runs (skills: templates/skills/)
   browser.py            stdlib-only; one sandboxed `ampi-browser@` instance per page (socket-activated, user

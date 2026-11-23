@@ -837,6 +837,8 @@ class Daemon:
         if side is None:
             raise ToolError("the checkout browser isn't set up")
         if o["op"] == "checkout.open":
+            if o["args"].get("engine"):
+                raise ToolError("a watcher uses the default browser engine")
             from urllib.parse import urlsplit
             u = urlsplit(o["args"].get("url", ""))
             site = f"{u.scheme}://{u.hostname or ''}" + (f":{u.port}" if u.port else "")

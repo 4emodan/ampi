@@ -721,6 +721,75 @@ def test_checkout_net_ruleset():
                                       ["185.12.64.1", "2a01:4ff:ff00::add:1"])
     files = checkout_net.files(991, 991, ["185.12.64.1"])
     assert "ampicheckout:x:991" in files["passwd"] and "0.0.0.0 www.youtube.com" in files["hosts"]
+    assert "passwd-lp" not in files and "19334" not in rs
+
+
+def test_checkout_net_ruleset_with_the_second_engine():
+    own = (["203.0.113.5/32"], ["2a01:4f8::/64"], ["185.12.64.1"])
+    one, two = checkout_net.ruleset(991, 992, *own), checkout_net.ruleset(991, 992, *own, lp_uid=993)
+    both = two.splitlines()
+    assert [ln for ln in one.splitlines() if ln not in both] == []  # the first engine's rules are untouched
+    added = [ln for ln in both if ln not in one.splitlines()]
+    assert "\t\ttcp dport 19334 meta skuid != { 0, 992 } reject with tcp reset" in added
+    assert "\t\ttcp sport 19334 meta skuid != 993 drop" in added
+    same = [ln.replace("991", "993").replace("19333", "19334") for ln in one.splitlines() if "991" in ln or "19333" in ln]
+    assert [ln for ln in added if "993" in ln or "19334" in ln] == same  # exactly the same rules, for its user and port
+    files = checkout_net.files(991, 994, ["185.12.64.1"], (993, 995))
+    assert "ampicheckoutlp:x:993:995:" in files["passwd-lp"] and "991" not in files["passwd-lp"] + files["group-lp"]
+    assert "ampicheckout:x:991:994:" in files["passwd"]
+
+
+# --- the second engine ----------------------------------------------------------------------------
+
+
+@pytest.fixture
+def two(env):
+    c, eng, clock = env
+    asked = []
+    inner = c._connect
+    c._connect = lambda engine: asked.append(engine) or inner(engine)
+    c.engines = {"obscura", "lightpanda"}
+    return c, eng, asked
+
+
+def test_the_engine_is_chosen_when_a_session_opens(two):
+    c, eng, asked = two
+    r = c.handle({"cmd": "open", "url": f"{SHOP}/checkout", "engine": "lightpanda"})
+    assert r["ok"] and asked == ["lightpanda"] and c.handle({"cmd": "status"})["engine"] == "lightpanda"
+    sid = r["session"]
+    assert c.handle({"cmd": "open", "url": f"{SHOP}/thanks", "session": sid})["ok"]
+    assert "other engine" in c.handle({"cmd": "open", "url": f"{SHOP}/thanks", "session": sid, "engine": "obscura"})["error"]
+    c.handle({"cmd": "close", "session": sid})
+    assert c.retire  # thrown away after every session
+    c.retire = False
+    assert c.handle({"cmd": "open", "url": f"{SHOP}/checkout"})["ok"] and asked == ["lightpanda", "obscura"]
+    assert c.handle({"cmd": "status"})["engine"] == "obscura"
+    c.handle({"cmd": "close", "session": c.session.id})
+    assert not c.retire
+
+
+def test_unknown_or_missing_engines(env):
+    c, _, _ = env
+    for engine in ("chrome", "", 5, ["lightpanda"]):
+        r = c.handle({"cmd": "open", "url": f"{SHOP}/checkout", "engine": engine})
+        assert not r["ok"] and c.session is None
+    assert "isn't installed" in c.handle({"cmd": "open", "url": f"{SHOP}/checkout", "engine": "lightpanda"})["error"]
+
+
+def test_no_card_goes_into_the_second_engine(two):
+    c, eng, _ = two
+    r = c.handle({"cmd": "open", "url": f"{SHOP}/checkout", "engine": "lightpanda"})
+    r2 = c.handle(pay_request(c, r["session"], r["snapshot"]))
+    assert not r2["ok"] and r2["phase"] == "verify" and "card details" in r2["error"] and not eng.sets and not eng.clicks
+
+
+def test_each_engine_has_its_own_user_and_port(monkeypatch):
+    seen = []
+    monkeypatch.setattr(co, "connect_engine", lambda uid, **kw: seen.append((uid, kw["port"])))
+    c = co.Controller(engine_uid=11, lp_uid=12)
+    c._connect("obscura")
+    c._connect("lightpanda")
+    assert seen == [(11, 19333), (12, 19334)] and co.Controller(engine_uid=11).engines == {"obscura"}
 
 
 def submit_request(c, sid, snap, label="Pay 23,90 €"):

@@ -1,0 +1,85 @@
+[Unit]
+Description=Claude Assistant checkout browser: the second engine (Lightpanda, CDP on 127.0.0.1:19334)
+# For sites the first engine (ampi-checkout-engine.service) can't run. The same rules: its own user (ampicheckoutlp), almost
+# nothing of the filesystem, no Unix sockets, and the nft table (inet ampi_checkout, checked before start): DNS to public
+# resolvers, TCP 80/443 to public addresses, every local address rejected, its port only for the controller.
+# No card details ever go into it, and after every session in it the controller exits: systemd then stops this engine
+# too, and the next request starts everything fresh.
+BindsTo=ampi-checkout.service
+Requires=ampi-checkout-net.service
+After=ampi-checkout-net.service
+
+[Service]
+Type=simple
+User=ampicheckoutlp
+Group=ampicheckoutlp
+Environment=HOME=/tmp/h
+Environment=LIGHTPANDA_DISABLE_TELEMETRY=true
+ExecStartPre=+/usr/bin/python3 -I /usr/local/lib/ampi-checkout/checkout_net.py check
+ExecStart=/usr/local/lib/lightpanda/current/lightpanda serve --host 127.0.0.1 --port 19334 --load-resources worker --load-resources iframe --load-resources stylesheet --user-agent-suffix AmpiBrowser/1.0 --v8-flags-unsafe "--jitless --max-old-space-size=512" --log-level error
+# Nothing from pages (console output, errors) reaches the journal.
+StandardOutput=null
+StandardError=null
+Restart=always
+RestartSec=2
+RuntimeMaxSec=1d
+KillMode=control-group
+TimeoutStopSec=5
+
+MemoryHigh=550M
+MemoryMax=700M
+MemorySwapMax=0
+OOMPolicy=stop
+OOMScoreAdjust=800
+CPUQuota=100%
+CPUWeight=20
+IOWeight=20
+Nice=10
+TasksMax=128
+LimitFSIZE=64M
+LimitCORE=0
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+KeyringMode=private
+RemoveIPC=true
+UMask=0077
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources io_uring_setup io_uring_enter io_uring_register
+SystemCallErrorNumber=EPERM
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=true
+PrivateIPC=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+TemporaryFileSystem=/etc:ro /var:ro /srv:ro /opt:ro /mnt:ro /media:ro /usr/local:ro /run:ro /boot:ro /snap:ro
+TemporaryFileSystem=/tmp:size=128M,mode=1777
+BindReadOnlyPaths=/etc/ld.so.cache -/etc/ssl -/etc/ca-certificates /etc/nsswitch.conf -/etc/localtime
+BindReadOnlyPaths=/etc/ampi-checkout/resolv.conf:/etc/resolv.conf /etc/ampi-checkout/hosts:/etc/hosts
+BindReadOnlyPaths=/etc/ampi-checkout/passwd-lp:/etc/passwd /etc/ampi-checkout/group-lp:/etc/group
+BindReadOnlyPaths=/usr/local/lib/lightpanda /usr/local/lib/ampi-checkout
+BindReadOnlyPaths=/run/ampi-checkout-net.sha256
+InaccessiblePaths=-/sys/firmware
+
+# No Unix sockets. AF_NETLINK only for the root ExecStartPre firewall check (nft speaks netlink).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+# Not "localhost": the engine listens on 127.0.0.1 for the controller. Its own connections to local addresses
+# are rejected by the nft table (only replies on accepted connections pass).
+IPAddressDeny=link-local multicast 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 172.16.0.0/12 192.168.0.0/16 198.18.0.0/15 240.0.0.0/4 fc00::/7 fec0::/10 64:ff9b::/96 2002::/16 2001::/32
+
+# No [Install]: it runs only while the controller does.

@@ -407,10 +407,16 @@ def _url(v: Any) -> str:
     return v
 
 
+def _engine(v: Any) -> str:
+    if v not in ("obscura", "lightpanda"):
+        raise ToolError("the browser engine is obscura or lightpanda")
+    return v
+
+
 FIELDS.update({
     "fields": _profile_fields, "ref": _ref, "fills": _fills, "button": _ref, "amount": _amount, "currency": _currency,
     "what": _text(200, True), "url": _url, "option": _text(200, True), "approval": lambda v: _int_id(v),
-    "site": _text(300, True), "card": _card_name,
+    "site": _text(300, True), "card": _card_name, "engine": _engine,
     # info.save_place: a place Ampi saves for the owner (each save asks them)
     "entry": _card_name, "street": _text(120, True), "line2": _text(120, True), "postal": _text(12, True),
     "city": _text(80, True), "region": _text(80, True), "country": _text(2, True), "company": _text(120, True),
@@ -584,7 +590,8 @@ def _simple(cmd: str, *keys: str):
         elif cmd != "open":
             raise ToolError("no checkout session; start one with `checkout open URL`")
         for k in keys:
-            req[{"field_text": "text"}.get(k, k)] = a.get(k)
+            if k != "engine" or a.get(k):
+                req[{"field_text": "text"}.get(k, k)] = a.get(k)
         if cmd == "click":
             # A plain click must not place an order (invoice, pay later, a saved card at the shop...): those buttons
             # go through `checkout pay`, or the owner presses them.
@@ -796,6 +803,8 @@ async def _resolve_pay(s: Services, a: dict) -> dict:
         raise ToolError(f"the card is set up for {side.rules.currency} payments ([payment] currency)")
     if side.vault.purchases_today() >= side.rules.max_per_day:
         raise ToolError(f"today's purchase limit ({side.rules.max_per_day}) is reached")
+    if (await side.client.call({"cmd": "status"})).get("engine", "obscura") != "obscura":
+        raise ToolError("card payments only work in the default engine: close this session and open the shop without --engine")
     r = await _bind(s, a, pay=True)
     if r["risky"]:
         raise ToolError("checked boxes may add a subscription or cost: "
@@ -1054,7 +1063,7 @@ CHECKOUT_OPS = [
     Op("info.revoke", False, info_revoke),
     Op("info.save_place", True, info_save_place, describe_save_place, "SAVE a place in personal info"),
     Op("payment.log", False, payment_log),
-    Op("checkout.open", False, _simple("open", "url")),
+    Op("checkout.open", False, _simple("open", "url", "engine")),
     Op("checkout.snapshot", False, _simple("snapshot")),
     Op("checkout.click", False, _simple("click", "ref")),
     Op("checkout.type", False, _simple("type", "ref", "text")),
