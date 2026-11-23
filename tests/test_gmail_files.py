@@ -188,6 +188,13 @@ def test_other_runs_cannot_pass_them_on(tmp_path, monkeypatch, name):
     monkeypatch.setenv("AMPI_ORIGIN", "group:family")
     with pytest.raises(SystemExit, match="own chat"):
         cli.workspace_file(name)
+    for inside in ("inbox", "inbox/mail"):  # (also from inside it)
+        monkeypatch.chdir(tmp_path / inside)
+        with pytest.raises(SystemExit, match="own chat"):
+            cli.workspace_file(str(f.relative_to(tmp_path / inside)))
+    (tmp_path / "plan.json").write_text("{}")
+    monkeypatch.chdir(tmp_path)
+    assert cli.workspace_file("plan.json") == "{}"
 
 
 def test_never_through_a_link(tmp_path, monkeypatch):

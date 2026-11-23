@@ -254,6 +254,24 @@ def test_cancel_drops_what_waits(bot4, monkeypatch):
     assert "Nothing is running" in api.sent[-1]["text"]
 
 
+def test_cancel_drops_what_waits_also_when_a_watcher_runs(bot4, monkeypatch):
+    monkeypatch.setattr(bot_mod, "PROTECT_SECONDS", 0.3)
+    bot, api, runner, _ = bot4
+    send(bot, msg("/protect"))
+
+    async def go():
+        watcher = asyncio.ensure_future(asyncio.sleep(60))
+        bot._running[(CHAT, -3)] = watcher
+        await bot.handle_message(tag("@test_bot delete everything"))
+        await bot.handle_message(msg("/cancel"))
+        del bot._running[(CHAT, -3)]
+        await settle(bot)
+        await asyncio.sleep(0.5)
+        assert watcher.cancelled()
+    asyncio.run(go())
+    assert not runner.calls and "Stopped 1 watcher" in api.sent[-1]["text"] and "Dropped 1 message" in api.sent[-1]["text"]
+
+
 def test_other_words_make_nothing_wait(bot4, monkeypatch):
     monkeypatch.setattr(bot_mod, "PROTECT_SECONDS", 0.3)
     bot, api, runner, _ = bot4

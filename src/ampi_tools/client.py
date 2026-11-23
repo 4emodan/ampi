@@ -56,7 +56,8 @@ def workspace_file(name: str, max_bytes: int = 200_000) -> str:
     no absolute paths, no `..`, no symlinks, no hidden files, so these commands can't be used to read secrets."""
     root = Path.cwd().resolve()
     p = Path(name)
-    if os.environ.get("AMPI_ORIGIN") and p.parts[:2] == MAIL_FILES.parts:
+    where = (root / p).resolve().parts  # (whatever directory it is called from)
+    if os.environ.get("AMPI_ORIGIN") and any(where[i:i + 2] == MAIL_FILES.parts for i in range(len(where))):
         raise SystemExit("files from emails are only for the owner's own chat")
     if p.is_absolute() or ".." in p.parts or any(part.startswith(".") for part in p.parts):
         raise SystemExit(f"{name!r}: use a file in your working directory (relative path, no '..' or hidden files)")
