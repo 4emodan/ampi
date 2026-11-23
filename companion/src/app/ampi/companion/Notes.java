@@ -16,7 +16,6 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -27,7 +26,7 @@ import java.util.List;
 /** Notifications and the list of messages. Tapping one only ever opens the app. */
 final class Notes {
     private static final int MESSAGE = 10, CHANGE = 11, BACKUP = 12, SUMMARY = 13;
-    private static final int KEEP_SHOWN = 20, KEEP = 50, PER_HOUR = 30;
+    private static final int KEEP_SHOWN = 15, KEEP_CHANGES = 25, KEEP = 50, PER_HOUR = 30;
 
     private Notes() {}
 
@@ -39,18 +38,25 @@ final class Notes {
         synchronized (Notes.class) {
             List<Message> all = messages(c);
             for (Message m : all) if (m.id.equals(id)) return;
-            if (!nm.areNotificationsEnabled() || off(c, App.AMPI)) throw new AlarmStore.Refused("notifications are switched off on the phone");
+            if (!nm.areNotificationsEnabled() || off(c, App.AMPI)) throw new AlarmStore.Refused("notifications_off");
             long now = System.currentTimeMillis();
             if (all.stream().filter(m -> m.ts > now - 3600_000L && m.ts <= now).count() >= PER_HOUR) {
-                throw new AlarmStore.Refused(PER_HOUR + " notifications an hour is the limit");
+                throw new AlarmStore.Refused("limit_hour");
             }
-            trim(nm);
-            post(c, App.AMPI, id, MESSAGE, title, text, null, null, R.drawable.ic_ampi);
-            if (!appeared(nm, id)) throw new AlarmStore.Refused("Android didn't show it");
             all.add(new Message(id, now, title, text));
             while (all.size() > KEEP) all.remove(0);
             save(c, all);
+            trim(nm, MESSAGE, KEEP_SHOWN);
+            post(c, App.AMPI, id, MESSAGE, title, text, null, null, R.drawable.ic_ampi);
         }
+        if (appeared(nm, id)) return;  // not under the lock: the app's screen also needs it
+        synchronized (Notes.class) {
+            List<Message> all = messages(c);
+            all.removeIf(m -> m.id.equals(id));
+            save(c, all);
+        }
+        nm.cancel(id, MESSAGE);
+        throw new AlarmStore.Refused("not_shown");
     }
 
     /** Android shows it a moment later, or (too many, switched off meanwhile) not at all. Not on the main thread. */
@@ -64,8 +70,12 @@ final class Notes {
 
     /** Something about alarms the owner should see (what Ampi changed, what was missed). */
     static void change(Context c, String id, String title, String text, String actionName, PendingIntent action) {
-        trim(c.getSystemService(NotificationManager.class));
-        post(c, App.CHANGES, id, CHANGE, title, text, actionName, action, R.drawable.ic_alarm);
+        try {
+            trim(c.getSystemService(NotificationManager.class), CHANGE, KEEP_CHANGES);
+            post(c, App.CHANGES, id, CHANGE, title, text, actionName, action, R.drawable.ic_alarm);
+        } catch (RuntimeException e) {
+            Log.e("Ampi", "notice", e);  // what it is about has happened anyway
+        }
     }
 
     static void clearChange(Context c, String id) {
@@ -92,7 +102,7 @@ final class Notes {
                 .setAllowSystemGeneratedContextualActions(false);
         if (channel.equals(App.AMPI)) b.setSubText("from Ampi");
         if (!channel.equals(App.BACKUP)) grouped(c, channel, b, icon);
-        if (action != null) b.addAction(new Notification.Action.Builder(null, actionName, action).build());
+        if (action != null) b.addAction(new Notification.Action.Builder(null, actionName, action).setAuthenticationRequired(true).build());
         c.getSystemService(NotificationManager.class).notify(tag, id, b.build());
     }
 
@@ -116,14 +126,14 @@ final class Notes {
         if (!left) nm.cancel(gone == MESSAGE ? App.AMPI : App.CHANGES, SUMMARY);
     }
 
-    /** Android drops new notifications silently above 50 per app. */
-    private static void trim(NotificationManager nm) {
+    /** Android drops new notifications silently above 50 per app. Messages never push out notices about alarms. */
+    private static void trim(NotificationManager nm, int kind, int keep) {
         List<StatusBarNotification> ours = new ArrayList<>();
         for (StatusBarNotification n : nm.getActiveNotifications()) {
-            if (n.getId() == MESSAGE || n.getId() == CHANGE) ours.add(n);
+            if (n.getId() == kind) ours.add(n);
         }
         ours.sort(Comparator.comparingLong(StatusBarNotification::getPostTime));
-        while (ours.size() >= KEEP_SHOWN) {
+        while (ours.size() >= keep) {
             StatusBarNotification old = ours.remove(0);
             nm.cancel(old.getTag(), old.getId());
         }
@@ -145,7 +155,7 @@ final class Notes {
                 JSONObject o = a.getJSONObject(i);
                 out.add(new Message(o.getString("id"), o.getLong("ts"), o.getString("title"), o.getString("text")));
             }
-        } catch (IOException | JSONException e) {
+        } catch (IOException | JSONException | RuntimeException e) {
             Log.w("Ampi", "messages", e);
         }
         return out;
@@ -154,15 +164,7 @@ final class Notes {
     private static void save(Context c, List<Message> all) throws IOException, JSONException {
         JSONArray a = new JSONArray();
         for (Message m : all) a.put(new JSONObject().put("id", m.id).put("ts", m.ts).put("title", m.title).put("text", m.text));
-        AtomicFile f = file(c);
-        FileOutputStream out = f.startWrite();
-        try {
-            out.write(a.toString().getBytes(StandardCharsets.UTF_8));
-            f.finishWrite(out);
-        } catch (IOException e) {
-            f.failWrite(out);
-            throw e;
-        }
+        AlarmStore.save(file(c), a.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     static synchronized void clear(Context c) {

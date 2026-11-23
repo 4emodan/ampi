@@ -48,6 +48,22 @@ final class LogicTest {
         eq("other zone", "2026-11-25T07:00+09:00", next("07:00", null, null, "Asia/Tokyo", "2026-11-24T23:30:00+02:00"));
     }
 
+    static String again(String time, String date, Set<DayOfWeek> days, String day, String zone, String now) {
+        long n = AlarmTimes.again(LocalTime.parse(time), date == null ? null : LocalDate.parse(date), days, LocalDate.parse(day),
+                ZoneId.of(zone), t(now));
+        return n < 0 ? "none" : Instant.ofEpochMilli(n).atZone(ZoneId.of(zone)).toOffsetDateTime().toString();
+    }
+
+    static void clockChanges() {
+        Set<DayOfWeek> all = EnumSet.allOf(DayOfWeek.class);
+        String z = "Europe/Helsinki";
+        eq("nothing changed", "2026-11-25T07:00+02:00", again("07:00", null, all, "2026-11-25", z, "2026-11-24T12:00:00+02:00"));
+        eq("jumped over: that one, in the past", "2026-11-24T07:00+09:00", again("07:00", null, all, "2026-11-24", "Asia/Tokyo", "2026-11-24T06:00:00+02:00"));
+        eq("one-off jumped over", "2026-11-24T07:00+09:00", again("07:00", "2026-11-24", Set.of(), "2026-11-24", "Asia/Tokyo", "2026-11-24T06:00:00+02:00"));
+        eq("clock went back two days", "2026-11-23T07:00+02:00", again("07:00", null, all, "2026-11-25", z, "2026-11-22T12:00:00+02:00"));
+        eq("zone moved west", "2026-11-25T07:00Z", again("07:00", null, all, "2026-11-25", "UTC", "2026-11-24T22:30:00+02:00"));
+    }
+
     static String frame(int... b) {
         byte[] bytes = new byte[b.length];
         for (int i = 0; i < b.length; i++) bytes[i] = (byte) b[i];
@@ -97,6 +113,7 @@ final class LogicTest {
             return;
         }
         alarmTimes();
+        clockChanges();
         frames();
         texts();
         System.out.println(failed == 0 ? "ok" : failed + " failed");

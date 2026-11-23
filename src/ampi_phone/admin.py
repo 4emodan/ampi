@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import socket
@@ -22,7 +23,6 @@ from pathlib import Path
 from . import trust
 
 SOCKET = "/run/ampi-phone.sock"
-UNITS = ("ampi-phone.socket", "ampi-phone.service")
 
 
 def run(*cmd: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -59,26 +59,39 @@ def add(conf: Path, name: str, der: bytes, code: str) -> None:
     if any(d.der == der for d in devices):
         raise ValueError("that phone is already paired")
     write_device(conf, name, der)
-    trust.make_context(trust.load_devices(conf), conf)  # it must be usable, or say so now
+    try:
+        trust.make_context(trust.load_devices(conf), conf)  # it must be usable, or say so now
+        apply(conf)
+    except BaseException:
+        # Either paired and running, or not paired at all.
+        (conf / "devices" / f"{name}.json").unlink(missing_ok=True)
+        with contextlib.suppress(Exception):
+            apply(conf)
+        raise
 
 
 def remove(conf: Path, name: str) -> None:
     if not trust.NAME_RE.fullmatch(name) or not (conf / "devices" / f"{name}.json").exists():
         raise ValueError(f"no phone {name}")
+    # First the connection: whatever goes wrong after this, a lost phone isn't connected any more.
+    run("systemctl", "stop", "ampi-phone.service")
     (conf / "devices" / f"{name}.json").unlink()
+    apply(conf)
 
 
 def apply(conf: Path) -> None:
-    """Restarting drops every connection and reads the list again; without a phone the port closes."""
+    """Restarting the service drops every connection and reads the list again (the socket stays, so nobody else can take
+    the port meanwhile); without a phone the port closes."""
     if trust.load_devices(conf):
-        run("systemctl", "enable", "ampi-phone.socket")
-        run("systemctl", "stop", *UNITS[::-1], check=False)
-        run("systemctl", "start", "ampi-phone.socket")
-        run("systemctl", "start", "ampi-phone.service")
+        run("systemctl", "enable", "--now", "ampi-phone.socket")
+        run("systemctl", "restart", "ampi-phone.service")
+        time.sleep(1)
+        run("systemctl", "is-active", "ampi-phone.service")
         firewall(conf, True)
     else:
-        run("systemctl", "disable", "--now", *UNITS, check=False)
         firewall(conf, False)
+        run("systemctl", "disable", "--now", "ampi-phone.socket")
+        run("systemctl", "stop", "ampi-phone.service")
 
 
 def firewall(conf: Path, opened: bool) -> None:
@@ -124,7 +137,6 @@ def main(argv: list[str] | None = None, conf: Path = trust.CONF) -> int:
             print(trust.pair_code(trust.server_der(conf), read_cert()))
         elif a.cmd == "add":
             add(conf, a.name, read_cert(), a.code)
-            apply(conf)
             print(f"{a.name} is paired")
         elif a.cmd == "devices":
             for f in sorted((conf / "devices").glob("*.json")):
@@ -132,7 +144,6 @@ def main(argv: list[str] | None = None, conf: Path = trust.CONF) -> int:
                 print(f"{d['name']}  added {d['added']}  {trust.pair_code(trust.server_der(conf), trust.parse_cert(d['cert']))}")
         elif a.cmd == "remove":
             remove(conf, a.name)
-            apply(conf)
             print(f"{a.name} was removed and disconnected")
         elif a.cmd == "status":
             print(json.dumps(status(), indent=2))
@@ -140,6 +151,6 @@ def main(argv: list[str] | None = None, conf: Path = trust.CONF) -> int:
         print(f"ampi-phone: {e}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as e:
-        print(f"ampi-phone: {' '.join(e.cmd)}: {e.stderr.strip()[:300]}", file=sys.stderr)
+        print(f"ampi-phone: {' '.join(e.cmd)} failed: {(e.stderr or e.stdout or '').strip()[:300]}", file=sys.stderr)
         return 1
     return 0

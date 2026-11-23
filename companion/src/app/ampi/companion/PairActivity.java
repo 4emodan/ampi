@@ -29,6 +29,7 @@ public final class PairActivity extends Activity {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         getWindow().setHideOverlayWindows(true);
+        drop();  // a key left over from a screen Android closed
         ask(getIntent());
     }
 

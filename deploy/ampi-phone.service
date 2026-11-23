@@ -21,7 +21,9 @@ CPUQuota=30%
 LimitNOFILE=512
 LimitCORE=0
 
-# The listening sockets come from systemd, so the gateway needs no network at all.
+# The listening sockets come from systemd, so the gateway needs no network of its own. The inherited listener still
+# belongs to the host's network: without connect() and shutdown() it can't be turned into an outgoing connection
+# (see also the second SystemCallFilter line below; tested with connect(AF_UNSPEC) and MSG_FASTOPEN).
 PrivateNetwork=true
 RestrictAddressFamilies=AF_UNIX
 
@@ -39,6 +41,7 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+SystemCallFilter=~connect shutdown
 SystemCallErrorNumber=EPERM
 
 ProtectSystem=strict

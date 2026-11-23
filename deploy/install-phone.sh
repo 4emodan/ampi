@@ -53,9 +53,12 @@ install -o root -g root -m 644 "$SRC_DIR/deploy/ampi-phone-run.py" "$LIB_DIR/run
 install -o root -g root -m 755 "$SRC_DIR/deploy/ampi-phone" /usr/local/sbin/ampi-phone
 # Only root writes here: the gateway can't change who is paired.
 install -d -o root -g "$GW_USER" -m 750 "$CONF_DIR" "$CONF_DIR/devices"
-if [[ ! -f $CONF_DIR/server.key ]]; then
+if [[ ! -f $CONF_DIR/server.key || ! -f $CONF_DIR/server.crt ]]; then
+  if compgen -G "$CONF_DIR/devices/*.json" >/dev/null; then
+    echo "the server key or certificate is missing but phones are paired: restore it, or remove them first" >&2; exit 1
+  fi
   (umask 077; openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 9000 -sha256 \
-    -subj /CN=ampi-phone -keyout "$CONF_DIR/server.key" -out "$CONF_DIR/server.crt" 2>/dev/null)
+    -subj /CN=ampi-phone -keyout "$CONF_DIR/server.key" -out "$CONF_DIR/server.crt")
 fi
 chown root:"$GW_USER" "$CONF_DIR/server.key" "$CONF_DIR/server.crt"
 chmod 640 "$CONF_DIR/server.key" "$CONF_DIR/server.crt"
@@ -68,14 +71,19 @@ chmod 644 "$CONF_DIR/config.json"
 printf 'AMPI_PHONE_CLIENT_UIDS=%s\n' "$(id -u "$TOOLS_USER")" > "$CONF_DIR/gateway.env"
 
 echo "==> systemd units"
+# The socket is only restarted when its unit changed: while it listens, nobody else can take the port.
+socket_changed=0
+cmp -s "$SRC_DIR/deploy/ampi-phone.socket" /etc/systemd/system/ampi-phone.socket || socket_changed=1
 install -m 644 "$SRC_DIR/deploy/ampi-phone.socket" /etc/systemd/system/ampi-phone.socket
 install -m 644 "$SRC_DIR/deploy/ampi-phone.service" /etc/systemd/system/ampi-phone.service
 systemctl daemon-reload
 if compgen -G "$CONF_DIR/devices/*.json" >/dev/null; then
   systemctl enable ampi-phone.socket >/dev/null 2>&1
-  systemctl stop ampi-phone.service ampi-phone.socket 2>/dev/null || true
+  if [[ $socket_changed == 1 ]]; then
+    systemctl stop ampi-phone.service ampi-phone.socket 2>/dev/null || true
+  fi
   systemctl start ampi-phone.socket
-  systemctl start ampi-phone.service
+  systemctl restart ampi-phone.service
   sleep 1
   systemctl is-active --quiet ampi-phone.service || { echo "the gateway didn't start: journalctl -u ampi-phone -n 30" >&2; exit 1; }
   echo "    running: $(ls "$CONF_DIR/devices" | wc -l) paired phone(s)"

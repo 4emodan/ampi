@@ -309,6 +309,10 @@ class Daemon:
                 raise ToolError("a payment is already waiting for the owner's answer")
             if ops[0]["op"] == "checkout.submit" and self._pending_pay("checkout.submit"):
                 raise ToolError("a button press is already waiting for the owner's answer")
+        if any(o["op"] in ops_phone.WRITES for o in ops) and origin != "private":
+            if self.approvals.pending_count() >= MAX_PENDING:  # (again below: nothing is even looked at before this)
+                raise ToolError(f"{MAX_PENDING} requests are already waiting for the owner; wait for their answer")
+            ops_phone.defer(ops, origin)
         self._add_places(ops, origin)
         ops = await pre_resolve(self.services, ops)
         for o in ops:
@@ -1054,7 +1058,10 @@ class Daemon:
 
     @staticmethod
     def _may_see(row: dict, origin: str) -> bool:
-        """Social requests only for social runs (exactly), and social runs see nothing else."""
+        """Social requests only for social runs (exactly), and social runs see nothing else; requests to the phone only
+        for the owner's own chat (their texts say what is set there)."""
+        if origin != "private" and '"op": "phone.' in (row.get("ops") or ""):
+            return False
         return is_social_request(row) == (origin == SOCIAL_ORIGIN)
 
     def list_text(self, origin: str = "unknown") -> str:

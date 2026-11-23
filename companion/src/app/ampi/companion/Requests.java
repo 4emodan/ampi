@@ -8,7 +8,8 @@ import org.json.JSONObject;
 
 import java.io.IOException;
 
-/** What Ampi may ask of this phone. Anything else is refused here, whatever the server says. */
+/** What Ampi may ask of this phone. Anything else is refused here, whatever the server says. Answers are codes: no free
+ *  text goes back, except the labels Ampi gave and what the owner reads here. */
 final class Requests {
     private static final double MAX_TIMER_S = 24 * 3600 + 30;
 
@@ -19,9 +20,9 @@ final class Requests {
         String id = msg.optString("id");
         JSONObject res = new JSONObject().put("t", "res").put("id", id);
         try {
-            if (!id.matches("[0-9a-f]{16}")) throw new AlarmStore.Refused("bad id");
+            if (!id.matches("[0-9a-f]{16}")) throw new AlarmStore.Refused("bad_request");
             double exp = msg.optDouble("exp", 0);
-            if (!(exp > now)) throw new AlarmStore.Refused("too late: it was asked a while ago");
+            if (!(exp > now)) throw new AlarmStore.Refused("too_late");
             JSONObject body = msg.optJSONObject("body");
             JSONObject data = run(c, id, msg.optString("kind"), body == null ? new JSONObject() : body, now);
             return res.put("ok", true).put("data", data);
@@ -29,7 +30,7 @@ final class Requests {
             return res.put("ok", false).put("error", e.getMessage());
         } catch (IOException | RuntimeException e) {
             Log.e("Ampi", "request", e);
-            return res.put("ok", false).put("error", "the phone couldn't do it (" + e.getClass().getSimpleName() + ")");
+            return res.put("ok", false).put("error", "failed");
         }
     }
 
@@ -40,7 +41,7 @@ final class Requests {
                 return new JSONObject().put("zone", java.time.ZoneId.systemDefault().getId()).put("warn", Alarms.warnings(c));
             case "notify": {
                 String title = Texts.line(body.optString("title"), 80), text = Texts.lines(body.optString("text"), 1000);
-                if (title.isEmpty()) throw new AlarmStore.Refused("no title");
+                if (title.isEmpty()) throw new AlarmStore.Refused("bad_request");
                 Notes.message(c, id, title, text);
                 return new JSONObject();
             }
@@ -48,12 +49,12 @@ final class Requests {
                 return Alarms.set(c, id, Alarms.parse(body));
             case "timer.set": {
                 double left = body.optDouble("end", 0) - now;
-                if (!(left > 0)) throw new AlarmStore.Refused("that timer would already be over");
-                if (left > MAX_TIMER_S) throw new AlarmStore.Refused("a timer is at most 24 hours");
+                if (!(left > 0)) throw new AlarmStore.Refused("past");
+                if (left > MAX_TIMER_S) throw new AlarmStore.Refused("too_long");
                 Alarm a = new Alarm();
                 a.kind = "timer";
                 a.label = Texts.line(body.optString("label"), 60);
-                a.at = System.currentTimeMillis() + Math.round(left * 1000);
+                a.in(c, System.currentTimeMillis(), Math.round(left * 1000));
                 return Alarms.set(c, id, a);
             }
             case "alarm.list":
@@ -62,7 +63,7 @@ final class Requests {
                 Alarms.cancel(c, id, body.optString("id"));
                 return new JSONObject();
             default:
-                throw new AlarmStore.Refused("this version of the app doesn't know that");
+                throw new AlarmStore.Refused("unknown_kind");
         }
     }
 }

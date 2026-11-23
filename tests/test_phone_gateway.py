@@ -46,6 +46,14 @@ def conf(certs, tmp_path):
     return c, ders
 
 
+@pytest.fixture(autouse=True)
+def no_systemctl(monkeypatch):
+    calls = []
+    monkeypatch.setattr(admin, "run", lambda *cmd, check=True: calls.append(cmd))
+    monkeypatch.setattr(admin.time, "sleep", lambda s: None)
+    return calls
+
+
 def pair(c, name, der):
     (c / "devices" / f"{name}.json").write_text(json.dumps({"name": name, "cert": base64.b64encode(der).decode(), "added": "x"}))
 
@@ -311,6 +319,7 @@ def test_gate_limits_handshakes():
     for k in ("1.2.3.4", "1.2.3.4", "5.6.7.8"):
         g.leave(k)
     assert g.total == 0 and not g.running
+    assert g.key("127.0.0.1") == g.key("127.0.9.9") == g.key("::1") == g.key("::ffff:127.0.0.1") == "local"
     for _ in range(gateway.ADDR_PER_MINUTE):
         if g.enter("9.9.9.9"):
             g.leave("9.9.9.9")
@@ -319,6 +328,35 @@ def test_gate_limits_handshakes():
     assert g.enter("9.9.9.9")
     assert g.key("2001:db8:1:2:3::4") == g.key("2001:db8:1:2:ffff::1") != g.key("2001:db8:1:3::1")
     assert g.key("::ffff:1.2.3.4") == g.key("1.2.3.4") and g.key("nonsense") == "?"
+
+
+def test_strangers_cannot_take_every_slot():
+    t = [0.0]
+    g = gateway.Gate(lambda: t[0])
+    g.authenticated("7.7.7.7")
+    taken = sum(g.enter(f"10.0.{i}.1") for i in range(200))
+    assert taken == gateway.HANDSHAKES - gateway.RESERVED
+    assert not g.enter("8.8.8.8") and sum(g.enter("7.7.7.7") for _ in range(20)) == gateway.KNOWN_PER_ADDR
+    t[0] = gateway.KNOWN_S + 1
+    assert not g.enter("7.7.7.7")  # a day later it is a stranger again
+    for i in range(500):
+        g.authenticated(f"1.1.{i % 250}.{i}")
+    assert len(g.known) == gateway.KNOWN_MAX
+    g.authenticated("local")
+    assert not g._is_known("local")
+
+
+def test_a_paired_phones_address_is_remembered(conf, certs):
+    c, ders = conf
+    pair(c, "a", ders["a"])
+
+    async def go():
+        async with Running(c) as r:
+            p = Phone(certs[0], "a", ders["server"])
+            await p.connect(r.port)
+            await r.ready()
+            assert "local" in r.gw.gate.known and r.gw.gate.total == 0
+    run(go())
 
 
 def test_hello_is_cut_to_a_known_shape():
@@ -347,6 +385,30 @@ def test_pairing_needs_the_matching_code(conf):
             admin.add(c, name, ders["b"], trust.pair_code(ders["server"], ders["b"]))
         with pytest.raises(ValueError):
             admin.remove(c, name)
+
+
+def test_pairing_that_does_not_start_is_undone(conf, monkeypatch):
+    c, ders = conf
+
+    def fails(*cmd, check=True):
+        if cmd[:2] == ("systemctl", "restart"):
+            raise subprocess.CalledProcessError(1, cmd, stderr="no")
+    monkeypatch.setattr(admin, "run", fails)
+    with pytest.raises(subprocess.CalledProcessError):
+        admin.add(c, "phone", ders["a"], trust.pair_code(ders["server"], ders["a"]))
+    assert not trust.load_devices(c)
+
+
+def test_removing_disconnects_first(conf, no_systemctl):
+    c, ders = conf
+    pair(c, "a", ders["a"])
+    (c / "devices" / "bad.json").write_text("{")
+    with pytest.raises(ValueError):  # another broken file: reported, but the lost phone is already disconnected and gone
+        admin.remove(c, "a")
+    assert no_systemctl[0] == ("systemctl", "stop", "ampi-phone.service") and not (c / "devices" / "a.json").exists()
+    (c / "devices" / "bad.json").unlink()
+    admin.apply(c)
+    assert ("systemctl", "disable", "--now", "ampi-phone.socket") in no_systemctl
 
 
 def test_the_code_covers_both_certificates_and_the_signer_slot():

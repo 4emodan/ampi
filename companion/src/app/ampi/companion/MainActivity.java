@@ -3,6 +3,7 @@ package app.ampi.companion;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.KeyguardManager;
+import android.content.Intent;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
 import android.os.Bundle;
@@ -22,12 +23,14 @@ public final class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        Alarms.rearmAll(this);
         LinkService.start(this, false);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        if (!RingService.texts().isEmpty()) startActivity(new Intent(this, RingActivity.class));  // also when its notification is off
         shown = "";
         refresh();
     }
@@ -82,7 +85,7 @@ public final class MainActivity extends Activity {
             Ui.body(card, a.text());
             Ui.small(card, a.kind.equals("timer") ? "Timer" : "Alarm");
             Ui.button(card, "Delete", false, v -> {
-                Alarms.delete(this, a.id, "deleted by the owner");
+                Alarms.delete(this, a.id, "deleted");
                 refresh();
             });
         }

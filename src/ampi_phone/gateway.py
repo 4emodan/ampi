@@ -40,6 +40,9 @@ WAIT = 10.0  # how long a request waits for the phone's answer
 PER_MINUTE, PER_HOUR = 20, 120  # requests to the phone
 FRAMES_PER_MINUTE = 120  # from the phone
 HANDSHAKE_S, HANDSHAKES, HANDSHAKES_PER_ADDR, ADDR_PER_MINUTE = 5.0, 64, 2, 30
+# For addresses a paired phone connected from in the last day: slots nobody else can take, and wider limits.
+RESERVED, KNOWN_PER_ADDR, KNOWN_PER_MINUTE, KNOWN_S, KNOWN_MAX = 16, 8, 120, 24 * 3600, 200
+CONTROLS = 16  # connections to the control socket at once
 MAX_CONTROL = 64 * 1024
 
 
@@ -71,7 +74,17 @@ class Gate:
         self.clock = clock
         self.running: dict[str, int] = {}
         self.recent: dict[str, Window] = {}
+        self.known: dict[str, float] = {}  # where a paired phone connected from, and when
         self.total = 0
+
+    def authenticated(self, key: str) -> None:
+        self.known.pop(key, None)
+        self.known[key] = self.clock()
+        while len(self.known) > KNOWN_MAX:
+            del self.known[next(iter(self.known))]
+
+    def _is_known(self, key: str) -> bool:
+        return key != "local" and self.clock() - self.known.get(key, -1e12) < KNOWN_S
 
     @staticmethod
     def key(address: str) -> str:
@@ -81,12 +94,17 @@ class Gate:
             return "?"
         if isinstance(ip, ipaddress.IPv6Address):
             if ip.ipv4_mapped:
-                return str(ip.ipv4_mapped)
+                return Gate.key(str(ip.ipv4_mapped))
+            if ip.is_loopback:
+                return "local"
             return str(ipaddress.ip_network((ip, 64), strict=False))
-        return str(ip)
+        return "local" if ip.is_loopback else str(ip)  # every 127.x.y.z is the same someone
 
     def enter(self, key: str) -> bool:
-        if self.total >= HANDSHAKES or self.running.get(key, 0) >= HANDSHAKES_PER_ADDR:
+        known = self._is_known(key)
+        if self.total >= HANDSHAKES - (0 if known else RESERVED):
+            return False
+        if self.running.get(key, 0) >= (KNOWN_PER_ADDR if known else HANDSHAKES_PER_ADDR):
             return False
         w = self.recent.get(key)
         if w is None:
@@ -95,6 +113,7 @@ class Gate:
                 if len(self.recent) > 5000:
                     return False
             w = self.recent[key] = Window(ADDR_PER_MINUTE, 60, self.clock)
+        w.n = KNOWN_PER_MINUTE if known else ADDR_PER_MINUTE
         if w.full():
             return False
         w.add()
@@ -141,7 +160,7 @@ def clean_hello(h: dict) -> dict:
 
     warn = h.get("warn")
     return {"app": text("app", 20), "sdk": text("sdk", 20), "model": text("model", 60), "zone": text("zone", 60),
-            "warn": [w[:200] for w in warn if isinstance(w, str)][:10] if isinstance(warn, list) else []}
+            "warn": [w[:40] for w in warn if isinstance(w, str)][:10] if isinstance(warn, list) else []}
 
 
 @dataclass
@@ -156,7 +175,7 @@ class Link:
     def send(self, msg: dict) -> None:
         if self.writer.is_closing():
             raise Closed("closed")
-        # Small frames to one peer: if it stops reading, TCP_USER_TIMEOUT or the silence limit ends it.
+        # Small frames to one peer: if it stops reading, the answer wait, TCP_USER_TIMEOUT or the silence limit ends it.
         if self.writer.transport.get_write_buffer_size() > 4 * MAX_FRAME:
             self.abort()
             raise Closed("the phone doesn't read")
@@ -176,6 +195,7 @@ class Gateway:
         self.minute, self.hour = Window(PER_MINUTE, 60), Window(PER_HOUR, 3600)
         self.gate = Gate()
         self._tasks: set[asyncio.Task] = set()
+        self._controls = 0
 
     # --- phones ------------------------------------------------------------------------------------
 
@@ -205,8 +225,8 @@ class Gateway:
                 conn.setblocking(False)
                 with contextlib.suppress(OSError):
                     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    if hasattr(socket, "TCP_USER_TIMEOUT"):
-                        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 30_000)
+                    if hasattr(socket, "TCP_USER_TIMEOUT"):  # longer than a short outage, which the phone sleeps through
+                        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 150_000)
                 reader = asyncio.StreamReader(limit=MAX_FRAME + 4)
                 protocol = asyncio.StreamReaderProtocol(reader)
                 transport, _ = await loop.connect_accepted_socket(
@@ -222,6 +242,7 @@ class Gateway:
             if device is None:
                 log.warning("a certificate that isn't a paired phone's got through the handshake")
                 return
+            self.gate.authenticated(key)
             await self.session(device.name, reader, writer)
         except Exception:
             log.exception("connection failed")
@@ -282,7 +303,7 @@ class Gateway:
             return
         ok, data, error = msg.get("ok") is True, msg.get("data"), msg.get("error")
         waiting[0].set_result({"ok": ok, "data": data if isinstance(data, dict) else {},
-                               "error": str(error)[:300] if error is not None else None})
+                               "error": str(error)[:60] if error is not None else None})
 
     # --- ampi-tools --------------------------------------------------------------------------------
 
@@ -340,9 +361,9 @@ class Gateway:
 
     async def control_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                                  allowed: frozenset[int]) -> None:
+        self._controls += 1
         try:
-            if peer_uid(writer) not in allowed:
-                log.warning("control: refused")
+            if peer_uid(writer) not in allowed or self._controls > CONTROLS:
                 return
             line = await asyncio.wait_for(reader.readline(), 10)
             try:
@@ -359,6 +380,7 @@ class Gateway:
         except (OSError, asyncio.TimeoutError, ValueError):
             pass
         finally:
+            self._controls -= 1
             writer.close()
 
 

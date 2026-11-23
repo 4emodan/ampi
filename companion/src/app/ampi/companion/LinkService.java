@@ -36,13 +36,14 @@ import javax.net.ssl.SSLSocket;
 public final class LinkService extends Service {
     private static final int NOTE = 2;
     private static final String CHECK = "check";
-    private static final long WATCHDOG = 15 * 60_000L, SILENT = 8 * 60_000L, BACKOFF_MIN = 5_000, BACKOFF_MAX = 15 * 60_000L;
+    private static final long WATCHDOG = 15 * 60_000L, SILENT = 4 * 60_000L, BACKOFF_MIN = 5_000, BACKOFF_MAX = 15 * 60_000L;
 
     /** For the status screen. */
     static volatile long connectedSince, lastContact;  // wall clock, 0 = not connected / never
     static volatile String problem = "";
 
-    private static LinkService running;
+    private static volatile LinkService running;
+    private static PowerManager.WakeLock awake;
 
     private final Object wake = new Object();
     private boolean nudged;
@@ -78,6 +79,16 @@ public final class LinkService extends Service {
         watchdog(c);
     }
 
+    /** Until the service has started its thread or reconnects (the phone may otherwise sleep first). */
+    static synchronized void stayAwake(Context c) {
+        if (awake == null) {
+            awake = c.getApplicationContext().getSystemService(PowerManager.class)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ampi:check");
+            awake.setReferenceCounted(false);
+        }
+        awake.acquire(45_000);
+    }
+
     static void stop(Context c) {
         c.stopService(new Intent(c, LinkService.class));
         c.getSystemService(AlarmManager.class).cancel(watchdogIntent(c));
@@ -103,19 +114,20 @@ public final class LinkService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        show();
-        if (Config.load(this) == null) {
-            stopSelf();
+        if (!show() || Config.load(this) == null) {
+            stopSelf(startId);
             return START_NOT_STICKY;
         }
+        // Reconnecting must not wait for the next time the phone wakes up.
         if (thread == null || !thread.isAlive()) {
+            stayAwake(this);
             thread = new Thread(this::run, "ampi-link");
             thread.start();
         } else if (socket != null && SystemClock.elapsedRealtime() - lastFrame > SILENT) {
-            lock.acquire(60_000);  // reconnecting must not wait for the next time the phone wakes up
+            stayAwake(this);
             reconnect();
         } else if (socket == null) {
-            lock.acquire(60_000);
+            stayAwake(this);
             nudge();
         }
         return START_STICKY;
@@ -124,11 +136,13 @@ public final class LinkService extends Service {
     @Override
     public void onDestroy() {
         stopping = true;
-        running = null;
+        if (running == this) {
+            running = null;
+            connectedSince = 0;
+        }
         getSystemService(ConnectivityManager.class).unregisterNetworkCallback(networks);
         close();
         nudge();
-        connectedSince = 0;
         if (lock.isHeld()) lock.release();
         super.onDestroy();
     }
@@ -175,15 +189,15 @@ public final class LinkService extends Service {
                 session(cfg);
                 problem = "the server closed the connection";
             } catch (GeneralSecurityException e) {
-                problem = e.getMessage();
+                problem = text(e);
             } catch (ConnectException | SocketTimeoutException | NoRouteToHostException e) {
                 problem = "can't reach the server";
-            } catch (IOException | JSONException | RuntimeException e) {
-                problem = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            } catch (IOException | JSONException | RuntimeException | StackOverflowError e) {
+                problem = text(e);
                 Log.i("Ampi", "connection: " + e);
             } finally {
                 socket = null;
-                connectedSince = 0;
+                if (running == this) connectedSince = 0;
             }
             if (stopping) break;
             if (welcomes != before) backoff = BACKOFF_MIN;  // only a real connection resets it
@@ -199,6 +213,10 @@ public final class LinkService extends Service {
             }
             backoff = Math.min(backoff * 2, BACKOFF_MAX);
         }
+    }
+
+    private static String text(Throwable e) {
+        return e.getMessage() == null ? e.getClass().getSimpleName() : Texts.line(e.getMessage(), 200);
     }
 
     private void session(Config cfg) throws IOException, GeneralSecurityException, JSONException {
@@ -249,10 +267,13 @@ public final class LinkService extends Service {
                 lastContact = System.currentTimeMillis();
                 switch (m.optString("t")) {
                     case "ping" -> {
-                        clock = new Clock(m.optDouble("now", 0));
+                        clock = clock.ahead(m.optDouble("now", 0));
                         Frames.write(out, "{\"t\":\"pong\"}");
                     }
-                    case "req" -> Frames.write(out, Requests.handle(this, m, clock.now()).toString());
+                    case "req" -> {
+                        clock = clock.ahead(m.optDouble("now", 0));
+                        Frames.write(out, Requests.handle(this, m, clock.now()).toString());
+                    }
                     default -> { }  // later versions' messages (logins) are never handled here
                 }
             } finally {
@@ -278,6 +299,11 @@ public final class LinkService extends Service {
             this(at, SystemClock.elapsedRealtime());
         }
 
+        /** A message held up on the way says an old time: whichever is further ahead is nearer the truth. */
+        Clock ahead(double at) {
+            return at > now() && at < now() + 3600 ? new Clock(at) : this;
+        }
+
         double now() {
             return at + (SystemClock.elapsedRealtime() - since) / 1000.0;
         }
@@ -285,25 +311,31 @@ public final class LinkService extends Service {
 
     private JSONObject hello() throws JSONException {
         JSONArray warn = Alarms.warnings(this);
-        if (!Checks.batteryFree(this)) warn.put("Android may stop the connection (battery setting)");
-        if (!Checks.keepsPermissions(this)) warn.put("Android may remove the app's permissions if it isn't opened for months");
+        if (!Checks.batteryFree(this)) warn.put("battery");
+        if (!Checks.keepsPermissions(this)) warn.put("hibernation");
         return new JSONObject().put("t", "hello").put("proto", 1).put("app", Checks.version(this))
                 .put("sdk", Build.VERSION.SDK_INT + "." + Build.getMinorSdkVersion(Build.VERSION.SDK_INT_FULL))
                 .put("model", Build.MANUFACTURER + " " + Build.MODEL).put("zone", java.time.ZoneId.systemDefault().getId())
                 .put("warn", warn);
     }
 
-    private void show() {
-        LinkService me = running;
-        if (me == null) return;
+    private boolean show() {
+        if (running != this) return false;
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
         Notification n = new Notification.Builder(this, App.LINK).setSmallIcon(R.drawable.ic_ampi)
                 .setContentTitle(connectedSince != 0 ? "Connected" : "Not connected").setContentIntent(open).setOngoing(true)
                 .setShowWhen(false).setLocalOnly(true).setAllowSystemGeneratedContextualActions(false).build();
-        if (Thread.currentThread() == getMainLooper().getThread()) {
-            startForeground(NOTE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else {
-            getSystemService(NotificationManager.class).notify(NOTE, n);
+        try {
+            if (Thread.currentThread() == getMainLooper().getThread()) {
+                startForeground(NOTE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                getSystemService(NotificationManager.class).notify(NOTE, n);
+            }
+            return true;
+        } catch (RuntimeException e) {  // not allowed from the background without the battery exemption
+            Log.w("Ampi", "can't show the connection", e);
+            problem = "Android didn't let the connection start in the background";
+            return false;
         }
     }
 }
