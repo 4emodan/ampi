@@ -418,6 +418,16 @@ def test_stated_amount_must_be_the_grand_total(tmp_path):
         run(d.run(req("checkout.pay", **{**PAY, "amount": "109.00"}), None, origin="private"))
 
 
+def test_a_total_that_cannot_be_read_is_not_guessed(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.totals = [{"amount": "23.90", "currency": "EUR", "label": "total"},
+                  {"amount": "unreadable (1,23,456)", "currency": "EUR", "label": "grand total"}]
+    with pytest.raises(ToolError, match="no order total in EUR found.*unreadable"):
+        run(d.run(req("checkout.pay", **PAY), None, origin="private"))
+    ctl.totals[1]["label"] = "subtotal"  # (not what is charged)
+    assert run(d.run(req("checkout.pay", **PAY), None, origin="private")).get("approval")
+
+
 def test_kr_counts_as_the_card_currency(tmp_path):
     d, _, ctl = make(tmp_path, currency="SEK")
     ctl.totals = [{"amount": "23.90", "currency": "KR", "label": "Totalt"}]

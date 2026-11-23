@@ -31,6 +31,12 @@ if ! id "$TOOLS_USER" >/dev/null 2>&1; then
   exit 1
 fi
 
+. "$SRC_DIR/deploy/checkout-busy.sh"
+if checkout_busy; then
+  echo "A checkout session is open; close it (or wait 10 minutes) and run this again." >&2
+  exit 1
+fi
+
 echo "==> Users: $ENGINE_USER (engine), $CTL_USER (controller), group $USE_GROUP ($TOOLS_USER only)"
 for u in "$ENGINE_USER" "$CTL_USER"; do
   getent group "$u" >/dev/null || groupadd --system "$u"

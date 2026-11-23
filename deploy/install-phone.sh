@@ -110,7 +110,12 @@ line="AMPI_CHECKOUT_SIGNIN_UIDS=$(id -u "$SI_USER")"
 if [[ -f $ctl ]] && ! grep -qx "$line" "$ctl"; then
   sed -i '/^AMPI_CHECKOUT_SIGNIN_UIDS=/d' "$ctl"
   printf '%s\n' "$line" >> "$ctl"
-  systemctl try-restart ampi-checkout.service || true
+  . "$SRC_DIR/deploy/checkout-busy.sh"
+  if checkout_busy; then
+    echo "    note: a checkout session is open; signing in on sites works after it ends (systemctl restart ampi-checkout)"
+  else
+    systemctl try-restart ampi-checkout.service || true
+  fi
 fi
 
 echo "==> systemd units"
