@@ -287,6 +287,12 @@ class Daemon:
         # Instagram/Threads web-session reads: only social-mode conversations; direct messages: never through here.
         check_social_origin(ops, origin, "run")
         ops_phone.check_phone(ops, origin)
+        if any(o["op"] == "gmail.download" for o in ops):
+            # A stranger's file lands in the workspace: only when the owner asked in their own chat.
+            if origin != "private":
+                raise ToolError("files from emails are only for the owner's own chat")
+            if len(ops) > 1:
+                raise ToolError("one file per request")
         parsed = parse_origin(origin)
         if parsed is not None:
             # A Claude run of a watcher's agent step (watchers v2): changes go through the keeper.
@@ -427,7 +433,9 @@ class Daemon:
             level = "places"  # places in the owner's city stay readable: street, full address, email, phone, names
         else:
             level = "light"
-        return self._mask_obj(resp, level)
+        file = resp.pop("file", None) if any(o["op"] == "gmail.download" for o in ops) else None
+        masked = self._mask_obj(resp, level)
+        return {**masked, "file": file} if file is not None else masked  # bytes: nothing in them can be masked
 
     def _locations(self) -> list[tuple[float, float]]:
         vault = getattr(self.services.checkout_side, "vault", None)

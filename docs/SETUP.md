@@ -163,6 +163,8 @@ Setup (after sections 7 and 8, with `[tools] approvals = true`): re-run `deploy/
    `sudo -u ampitools -H bash -c 'set -a; . ~/env; ~/app/.venv/bin/ampi-tools check'`
 5. In `config.toml`, add `"Bash(todoist:*)"` and `"Bash(gmail:*)"` to `allowed_tools`, add a `[tools]` section with `approvals = true` (see `config.example.toml`), and `systemctl restart claude-assistant`.
 
+Ampi can save files attached to emails when you ask in the private chat (gmail files, gmail download, 10 MB each): they land in its workspace under `inbox/mail/` and it can send them to you. Groups, watchers and forwarded messages can't.
+
 ## 8b. YouTube (optional)
 
 The `youtube` command works right away for public channels: their newest uploads (RSS), and title and channel of

@@ -132,6 +132,8 @@ SOCIAL_SESSION_WRITES = frozenset(op for op in WRITE_OPS if op.startswith(("igwe
 NOT_FOR_WATCHERS = frozenset({"telegram.revoke", "telegram.permissions", "info.revoke", "approvals.list",
                               "info.fields", "info.reveal", "info.collect", "info.save_place", "payment.log",
                               "checkout.submit",
+                              # a stranger's file in the workspace: only in the owner's own chat
+                              "gmail.download",
                               # the owner's phone: their own chat only (ops_phone.check_phone)
                               "phone.status", "phone.notify", "phone.alarm", "phone.timer", "phone.alarms",
                               "phone.cancel"}) \

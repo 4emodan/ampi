@@ -8,6 +8,7 @@ as "waiting for the owner's approval" instead of running.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import hashlib
 import json
@@ -17,6 +18,7 @@ import socket
 import sys
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tg_reader.client import deliver
@@ -193,6 +195,10 @@ def gmail_parser() -> argparse.ArgumentParser:
     s.add_argument("-n", "--limit", type=int, default=20)
     sub.add_parser("read").add_argument("id")
     sub.add_parser("thread").add_argument("id")
+    sub.add_parser("files", help="the files attached to an email, numbered").add_argument("id")
+    s = sub.add_parser("download", help="save attached files (by number) under inbox/mail/")
+    s.add_argument("id")
+    s.add_argument("numbers", nargs="+", type=int)
     sub.add_parser("labels")
     sub.add_parser("drafts")
     s = sub.add_parser("label", help="add/remove labels (missing labels are created)")
@@ -221,7 +227,7 @@ def gmail_ops(a: argparse.Namespace) -> list[dict]:
     c = a.cmd
     if c == "search":
         return [{"op": "gmail.search", "args": {"query": a.query, "limit": a.limit}}]
-    if c in ("read", "thread", "send-draft"):
+    if c in ("read", "thread", "files", "send-draft"):
         return [{"op": f"gmail.{c.replace('-', '_')}", "args": {"id": a.id}}]
     if c in ("labels", "drafts"):
         return [{"op": f"gmail.{c}", "args": {}}]
@@ -915,8 +921,56 @@ def todoist_main(argv: list[str] | None = None) -> int:
     return _main("todoist", todoist_parser(), todoist_ops, argv)
 
 
+MAIL_FILES = Path("inbox/mail")
+
+
+def save_mail_file(number: int, f: dict, now: datetime | None = None) -> Path:
+    """Saves one downloaded file under inbox/mail/: always a new file, always in there, never one that is run or loaded
+    (the name is the sender's)."""
+    now = now or datetime.now(timezone.utc)
+    root = Path.cwd().resolve()
+    folder = MAIL_FILES / now.strftime("%Y-%m-%d")
+    for part in (MAIL_FILES.parent, MAIL_FILES, folder):
+        part.mkdir(exist_ok=True)
+        if part.is_symlink() or not part.resolve().is_relative_to(root):
+            raise SystemExit(f"{part} must be a real folder in the working directory")
+    name = re.sub(r"[^\w.-]+", "_", str(f.get("name") or "file")).strip("._")
+    stem, dot, ext = name.rpartition(".")
+    if not dot or len(ext) > 8:
+        stem, ext = name, ""
+    name = (stem[:80] or "file") + (f".{ext}" if ext else "")
+    data = base64.b64decode(f["data"], validate=True)
+    for i in range(100):
+        target = folder / f"{now:%H%M%S}_{number}{f'-{i}' if i else ''}_{name}"
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0), 0o640)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        return target
+    raise SystemExit(f"too many files called {name} already")
+
+
+def _gmail_download(a: argparse.Namespace) -> int:
+    if len(a.numbers) > 10:
+        raise SystemExit("gmail: at most 10 files at once")
+    for n in dict.fromkeys(a.numbers):
+        r = request({"cmd": "run", "ops": [{"op": "gmail.download", "args": {"id": a.id, "number": n}}], "reason": a.reason,
+                     "origin": os.environ.get("AMPI_ORIGIN") or None})
+        f = r.get("file")
+        if not r.get("ok") or not isinstance(f, dict):
+            print(f"gmail: file {n}: {r.get('error', 'failed')}", file=sys.stderr)
+            return 1
+        path = save_mail_file(n, f)
+        print(f"{path.as_posix()} ({f.get('mime')}, {max(1, int(f.get('size') or 0) // 1024)} KB)", flush=True)
+    return 0
+
+
 def gmail_main(argv: list[str] | None = None) -> int:
-    return _main("gmail", gmail_parser(), gmail_ops, argv)
+    args = gmail_parser().parse_args(argv)
+    return _gmail_download(args) if args.cmd == "download" else _main("gmail", gmail_parser(), gmail_ops, argv)
 
 
 def youtube_main(argv: list[str] | None = None) -> int:
