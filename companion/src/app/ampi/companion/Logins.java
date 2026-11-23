@@ -88,8 +88,8 @@ final class Logins {
         try {
             return (SecretKey) Keys.store().getKey(KEY, null);
         } catch (UnrecoverableKeyException e) {  // also what getKey makes of a key that was invalidated
-            if (String.valueOf(e.getMessage()).toLowerCase(java.util.Locale.ROOT).contains("invalidated")) throw new Gone();
-            throw e;
+            if (String.valueOf(e.getMessage()).contains("Failed to obtain information")) throw e;  // perhaps only now
+            throw new Gone();
         }
     }
 
@@ -98,7 +98,8 @@ final class Logins {
         if (!all(c).isEmpty()) return encryptor();
         try {
             return encryptor();
-        } catch (Gone e) {
+        } catch (Gone | GeneralSecurityException e) {  // nothing is lost by starting anew
+            Keys.delete(KEY);
             create();
             return encryptor();
         }

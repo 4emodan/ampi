@@ -175,7 +175,7 @@ public final class RingService extends Service {
         changed();
         try {
             Unlock.interrupt();  // never two things at once that want the owner's finger; after the sound, so it can't stop that
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
             Log.e("Ampi", "interrupt", e);
         }
     }
