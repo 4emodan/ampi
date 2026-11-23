@@ -546,7 +546,7 @@ PAGE_JS = r"""
       let inner = null;
       try { inner = f.contentDocument; } catch (e) {}
       return !!inner && (depth > 3 || boxed(inner, depth + 1));
-    });
+    }) || Array.from(doc.querySelectorAll('*')).some(e => e.shadowRoot && (depth > 8 || boxed(e.shadowRoot, depth + 1)));
     const loginFacts = (U, S) => {
       const F = formOf(S || U);
       let box = F;
@@ -619,7 +619,10 @@ PAGE_JS = r"""
           !Array.from(c.attributes || []).some(x => /^(on|data-.*(method|confirm|action|remote|toggle|ajax|click|submit|href|url))/i.test(x.name));
         const formButton = !!owner && Array.from(owner.querySelectorAll('button,input[type=submit],input[type=image]')).some(x =>
           (x.tagName === 'INPUT' || (x.getAttribute('type') || 'submit').toLowerCase() === 'submit') && visible(x));
-        const dialog = !!(c.closest && c.closest('[role=dialog],[role=alertdialog],dialog,[aria-modal=true],[id*=cookie i],[class*=cookie i],[id*=consent i],[class*=consent i]'));
+        // (Not the whole page: cookie tools mark <body> too.)
+        const about = c.closest ? c.closest('[id*=cookie i],[class*=cookie i],[id*=consent i],[class*=consent i]') : null;
+        const cookies = about && !['HTML', 'BODY', 'MAIN', 'FORM'].includes(about.tagName) && String(about.textContent || '').length < 4000;
+        const dialog = cookies ? 'cookies' : c.closest && c.closest('[role=dialog],[role=alertdialog],dialog,[aria-modal=true]') ? 'dialog' : '';
         // A password that was filled in and would go into an address.
         const eff = (c.getAttribute('formmethod') || (owner && owner.getAttribute('method')) || 'get').trim().toLowerCase();
         const leaks = submits && eff !== 'post' && Array.from(owner.querySelectorAll('input')).concat(owner.id ? Array.from(document.querySelectorAll('input[form]')) : []).some(x => kept.has(x) && x.value && formOf(x) === owner);
@@ -1179,8 +1182,22 @@ class Controller:
         if s.account and d.get("type") != "search":
             g = self._gate(s, frame, n)
             if not g["form_button"] and not g["search"]:
-                raise Refused("in a signed-in account only fields of a form with a button can be filled in; this may act at once. "
-                              "The owner has to do it")
+                raise Refused("in a signed-in account a field that isn't in a form with a button may act at once: use "
+                              "`checkout submit REF --option … --what …`, which asks the owner")
+
+    @staticmethod
+    def _settable(d: dict, option: Any) -> None:
+        """A list or a text field, set after the owner's approval (bind_submit/submit with `option`)."""
+        if not isinstance(option, str) or not 0 < len(option) <= 200 or any(ord(c) < 32 for c in option) or has_card_number(option):
+            raise Refused("give the option's text (or the text for the field), up to 200 ordinary characters")
+        if d.get("disabled"):
+            raise Refused("that field is disabled right now")
+        if d.get("kind") == "select":
+            return
+        if d.get("kind") not in ("input", "textarea") or (d.get("kind") == "input" and d.get("type") not in TEXT_TYPES):
+            raise Refused("only a list or a text field can be set")
+        if any(SECRET_FIELD.search(str(d.get(k) or "")) for k in ("type", "autocomplete", "name", "id")):
+            raise Refused("that field is for card, password or code details")
 
     def choose(self, req: dict) -> dict:
         s = self._session(req)
@@ -1249,7 +1266,7 @@ class Controller:
             raise Refused(PAGE_CHANGED)
         return {"tag": str(g.get("tag") or "")[:20], "texts": [br.MARKERS.sub("", br.clean(str(t)))[:200] for t in (g.get("texts") or [])[:12]],
                 "ident": br.clean(str(g.get("ident") or ""))[:120], "submits": bool(g.get("submits")), "search": bool(g.get("search")),
-                "plain": bool(g.get("plain")), "form_button": bool(g.get("formButton")), "dialog": bool(g.get("dialog")),
+                "plain": bool(g.get("plain")), "form_button": bool(g.get("formButton")), "dialog": str(g.get("dialog") or "")[:10],
                 "leaks": bool(g.get("leaks")),
                 "dest": br.clean(str(g.get("dest") or ""))[:1000], "method": str(g.get("method") or "")[:10],
                 "href": br.clean(str(g.get("href") or ""))[:1000],
@@ -1281,8 +1298,12 @@ class Controller:
         s = self._session(req)
         frames = self._frames(s)
         bframe, d, n = self._element(s, req.get("ref"), frames)
-        box = d.get("kind") in ("checkbox", "radio")
-        if (d.get("kind") not in ("button", "link") and not box) or d.get("disabled"):
+        box, option = d.get("kind") in ("checkbox", "radio"), req.get("option")
+        if option is not None:
+            if not s.account:
+                raise Refused("use `checkout choose` or `checkout type` for that")
+            self._settable(d, option)
+        elif (d.get("kind") not in ("button", "link") and not box) or d.get("disabled"):
             raise Refused("give the ref of an enabled button")
         if box and not d.get("checked") and RISKY.search(str(d.get("label") or "")):
             raise Refused("that box may add a subscription or cost; the owner ticks it")
@@ -1294,7 +1315,8 @@ class Controller:
                 "title": snap["title"], "form": fields, "digest": digest, "gen": s.gen, "press": self._press(g),
                 "seen": self._seen(g, snap["title"]), "priced": snap["priced"], "gate_totals": snap["gate_totals"],
                 "around": g["around"], "frames": sorted({f["origin"] for f in frames}),
-                **({"box": d["kind"], "checked": bool(d.get("checked"))} if box else {})}
+                **({"set": d["kind"], "option": option, "was": str(d.get("selected") or "")[:60]} if option is not None else
+                   {"box": d["kind"], "checked": bool(d.get("checked"))} if box else {})}
 
     def submit(self, req: dict) -> dict:
         s = self._session(req)
@@ -1312,12 +1334,16 @@ class Controller:
         except Refused:
             raise changed from None
         if (bframe["frame_id"] != b.get("frame_id") or bframe["origin"] != b.get("frame_origin")
-                or d.get("kind") not in ("button", "link", "checkbox", "radio") or d.get("disabled")
-                or d["kind"] in ("checkbox", "radio") and (d["kind"], bool(d.get("checked"))) != (req.get("box"), req.get("checked"))
+                or d.get("kind") not in (("button", "link", "checkbox", "radio") if req.get("option") is None else (req.get("set"),))
+                or d.get("disabled") or d["kind"] in ("checkbox", "radio") and (d["kind"], bool(d.get("checked"))) != (req.get("box"), req.get("checked"))
                 or any(self._m(s, str(d.get(k) or "")[:120]) != str(b.get(k) or "") for k in self.BOUND + ("label",))):
             raise changed
         if req.get("gen") != s.gen:
             raise Refused("something else was done in the browser since the approval; nothing was pressed")
+        op: dict = {"op": "click", "n": n}
+        if req.get("option") is not None:
+            self._settable(d, req["option"])
+            op = {"op": "choose", "n": n, "option": req["option"]} if d["kind"] == "select" else {"op": "set", "n": n, "value": req["option"]}
         g = self._gate(s, bframe, n)
         if hidden(self._press(g), s.secrets) != req.get("press"):
             raise changed
@@ -1335,7 +1361,10 @@ class Controller:
         s.gen += 1  # an approval is good for one press
         self._phase = "sent"
         try:
-            r = self._run(s, bframe, {"op": "click", "n": n}) or {}
+            r = self._run(s, bframe, op) or {}
+            if r.get("why") == "option":
+                self._phase = "verify"
+                return self._error("no such option in that list; nothing was changed")
             if not r.get("ok"):
                 return self._error("the button vanished while being pressed; it MAY have gone through")
             return {**self._after_action(s), "phase": "sent"}
@@ -1526,7 +1555,7 @@ class Controller:
         if any(not fillable(v) for v in values.values()) or not fillable(req.get("name")):
             raise Refused("bad request")
         s.gen += 1
-        s.filled = True
+        s.filled, before = True, (s.signed_in, s.user_step)
         s.secrets += [Name(req["name"]), *([values["password"]] if "password" in values else [])]
         if "password" in values:
             s.signed_in = True
@@ -1539,8 +1568,7 @@ class Controller:
                                "expect": {k: v for k, v in facts.items() if k != "targets"}}) or {}
         if not r.get("ok"):
             if r.get("set") is False:  # nothing was put in yet
-                s.signed_in = s.user_step = False
-                s.user_step = "user" not in els
+                s.signed_in, s.user_step = before
                 self._phase = "verify"
                 raise changed
             raise Refused("the page changed while it was being filled in; close the session and start again")

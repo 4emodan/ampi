@@ -652,9 +652,33 @@ def test_a_box_is_ticked_with_approval(tmp_path, box, says):
     ctl.elements["f0:20"]["tag"] = "div"  # something that only looks like a box
     with pytest.raises(ToolError, match="may be the button that orders"):
         run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
-    ctl.elements["f0:20"].update(label="Pay with my saved card", tag="input")
-    with pytest.raises(ToolError):
+    ctl.elements["f0:20"].update(label="I understand that I pay at the desk", tag="input")
+    run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    assert "⚠ It says something about paying" in d.approvals.unnotified()[-1]["card"]["details"]
+
+
+def test_a_field_is_set_with_approval(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"].update(label="Payment", tag="select")
+    ctl.box, ctl.totals, ctl.gate_totals = {"set": "select", "option": "Pay at the desk", "was": "Card"}, TOTAL, TOTAL
+    res = run(d.run(req("checkout.submit", **SUBMIT, option="Pay at the desk"), None, origin="private"))
+    det = d.approvals.unnotified()[0]["card"]["details"]
+    assert det.startswith("Set “Payment” to “Pay at the desk” on") and "(now: Card)" in det and "⚠ It says something about paying" in det
+    assert approve(d, res)["status"] == "done"
+    (call,) = [c for c in ctl.calls if c["cmd"] == "submit"]
+    assert call["set"] == "select" and call["option"] == "Pay at the desk"
+    assert [c for c in ctl.calls if c["cmd"] == "bind_submit"][0]["option"] == "Pay at the desk"
+    with pytest.raises(ToolError, match="something else"):  # (never a press where a value was asked for, or the other way round)
         run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))
+    ctl.box = {}
+    with pytest.raises(ToolError, match="something else"):
+        run(d.run(req("checkout.submit", **SUBMIT, option="2"), None, origin="private"))
+
+
+def test_an_arrow_can_be_pressed_with_approval(tmp_path):
+    d, _, ctl = make(tmp_path)
+    ctl.elements["f0:20"]["label"], ctl.totals = "›", []
+    assert run(d.run(req("checkout.submit", **SUBMIT), None, origin="private"))["approval"]
 
 
 def test_submit_says_when_it_goes_to_another_site(tmp_path):
