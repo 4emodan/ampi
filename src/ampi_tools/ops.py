@@ -133,6 +133,12 @@ def _int(lo: int, hi: int) -> Callable[[Any], int]:
     return check
 
 
+def _file_number(v: Any) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 100:
+        raise ToolError("the number of a file, as `gmail files` shows it")
+    return v
+
+
 def _priority(v: Any) -> str:
     api_priority(v)  # raises if invalid
     return str(v)
@@ -172,7 +178,7 @@ FIELDS: dict[str, Callable[[Any], Any]] = {
     "due": _text(100, True), "deadline": _date, "priority": _priority, "labels": _strs(60, 30),
     "project": SHORT, "section": SHORT, "name": _text(120, True),
     "query": SHORT, "filter": SHORT, "since": SHORT, "until": SHORT, "limit": _int(1, 1000),
-    "number": _int(1, 100),
+    "number": _file_number,
     "to": _text(2000, True), "cc": _text(2000, True), "subject": _text(500, True), "body": _text(100_000, False),
     "add": _strs(100, 20), "remove": _strs(100, 20),
     # YouTube: links become plain ids here, so nothing after this ever handles a URL.

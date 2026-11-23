@@ -85,6 +85,8 @@ def _load_plan(path: str, prefix: str) -> list[dict]:
         name = item.get("op", "")
         if "." not in name:
             name = f"{prefix}.{name.replace('-', '_')}"
+        if name == "gmail.download":
+            raise SystemExit("a plan can't download files; use `gmail download ID N`")
         ops.append({"op": name, "args": item.get("args") or {k: v for k, v in item.items() if k != "op"}})
     return ops
 
@@ -936,9 +938,10 @@ def save_mail_file(number: int, f: dict, now: datetime | None = None) -> Path:
             raise SystemExit(f"{part} must be a real folder in the working directory")
     name = re.sub(r"[^\w.-]+", "_", str(f.get("name") or "file")).strip("._")
     stem, dot, ext = name.rpartition(".")
-    if not dot or len(ext) > 8:
+    if not dot or len(ext.encode()) > 12:
         stem, ext = name, ""
-    name = (stem[:80] or "file") + (f".{ext}" if ext else "")
+    stem = stem.encode()[:160].decode("utf-8", "ignore") or "file"  # (a file name has at most 255 bytes)
+    name = stem + (f".{ext}" if ext else "")
     data = base64.b64decode(f["data"], validate=True)
     for i in range(100):
         target = folder / f"{now:%H%M%S}_{number}{f'-{i}' if i else ''}_{name}"
@@ -963,7 +966,11 @@ def _gmail_download(a: argparse.Namespace) -> int:
         if not r.get("ok") or not isinstance(f, dict):
             print(f"gmail: file {n}: {r.get('error', 'failed')}", file=sys.stderr)
             return 1
-        path = save_mail_file(n, f)
+        try:
+            path = save_mail_file(n, f)
+        except (OSError, ValueError) as e:
+            print(f"gmail: file {n}: couldn't be saved ({e})", file=sys.stderr)
+            return 1
         print(f"{path.as_posix()} ({f.get('mime')}, {max(1, int(f.get('size') or 0) // 1024)} KB)", flush=True)
     return 0
 

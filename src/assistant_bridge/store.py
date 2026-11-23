@@ -261,6 +261,15 @@ class Store:
                              "ON CONFLICT (profile, key) DO UPDATE SET value=excluded.value", (profile, key, value))
         self._db.commit()
 
+    def settings(self, profile: str, prefix: str) -> dict[str, str]:
+        rows = self._db.execute("SELECT key, value FROM settings WHERE profile=? AND substr(key, 1, ?)=?",
+                                (profile, len(prefix), prefix))
+        return {r["key"]: r["value"] for r in rows}
+
+    def copy_settings(self, profile: str, prefix: str, to: str) -> None:
+        for key, value in self.settings(profile, prefix).items():
+            self.set_setting(profile, to + key[len(prefix):], value)
+
     def get_offset(self, profile: str) -> int | None:
         row = self._db.execute("SELECT next_update_id FROM offsets WHERE profile=?", (profile,)).fetchone()
         return row["next_update_id"] if row else None

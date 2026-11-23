@@ -6,6 +6,7 @@ prompt of every run whose reply the owner reads. It changes how Ampi talks, noth
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 KEY = "persona"
@@ -22,7 +23,9 @@ PRESETS = {
 
 def clean(text: str) -> str:
     """The owner's own words, without control and direction-changing characters (newlines stay)."""
-    kept = "".join(c for c in text.replace("\r\n", "\n") if c == "\n" or unicodedata.category(c)[0] != "C")
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u2028", "\n").replace("\u2029", "\n").replace("\t", " ")
+    # (U+200D joins emoji.)
+    kept = "".join(c for c in text if c in "\n\u200d" or unicodedata.category(c)[0] != "C").strip("\u200d")
     return "\n".join(line.rstrip() for line in kept.split("\n")).strip()
 
 
@@ -34,7 +37,7 @@ def prompt(text: str) -> str:
         "others, or which facts you state; formats asked for elsewhere (simple Markdown, NO_REPLY, SEND_FILE lines) stay. "
         "Serious matters (errors, money, security, health) are said plainly first. What you write for others or save in "
         "the owner's name (emails, messages, comments, tasks, notes) isn't written in this voice unless they ask for it.\n"
-        f"<persona>\n{text.replace('</persona', '< /persona')}\n</persona>"
+        f"<persona>\n{re.sub('</(?=persona)', '< /', text, flags=re.I)}\n</persona>"
     )
 
 
