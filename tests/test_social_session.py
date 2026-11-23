@@ -839,7 +839,7 @@ def test_dm_watcher_end_to_end(web, tmp_path, monkeypatch):
     act = Active("personal", spec, "all", "low", "active")
     sent = []
 
-    async def notify(text, fmt, name=None):
+    async def notify(text, fmt, name=None, **kw):
         sent.append((text, fmt))
 
     async def tools(payload):
@@ -885,7 +885,7 @@ def test_dm_watcher_test_mode_uses_stub_data(tmp_path):
         calls.append(payload)
         return {"ok": True, "text": "x"}
 
-    async def notify(text, fmt, name=None):
+    async def notify(text, fmt, name=None, **kw):
         raise AssertionError("a test sends nothing")
 
     claude = FakeClaude(['{"worth": "yes", "summary": "@alice asks about Saturday"}'])

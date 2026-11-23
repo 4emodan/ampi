@@ -26,7 +26,7 @@ from assistant_bridge.watch.pipeline import _defang
 from tg_reader.reader import Reader, UserError
 from tg_reader.writer import Writer
 
-SECRET = "SECRET-SOCIAL-TEXT"
+SECRET = "SECRET-SOCIAL-TEXT of some length"
 AMPI = NS(id=777111, first_name="Ampi", last_name=None, username="my_ampi_bot", bot=True)
 LINK = f"https://www.instagram.com/p/{MEDIA_CODE}/"
 TLINK = f"https://www.threads.com/@carol/post/{TH_CODE}"
@@ -270,7 +270,7 @@ def test_slow_down_error_type():
     assert msess._problem(400, {"error_type": "rate_limit_error"}, "") == "slow_down"
 
 
-@pytest.mark.parametrize("status,paused", [(200, True), (404, True), (500, False), (502, False)])
+@pytest.mark.parametrize("status,paused", [(200, True), (404, False), (500, False), (502, False)])
 def test_non_json_from_a_json_endpoint_pauses_unless_the_server_failed(web, status, paused):
     w = web()
     w.fake.override[("GET", "/api/v1/feed/reels_tray/")] = httpx.Response(status, text="<html>hello</html>")

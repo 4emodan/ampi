@@ -367,8 +367,8 @@ now (Run in `/watcher` also during quiet hours; `instagram dms` from chat or soc
 from social mode at most once per 10 minutes); the summary only ever goes to you.
 Messages count as reported only after the
 message to you was sent: if a run fails they are reported again (you may see some twice), not lost. A big backlog comes
-in several messages; messages that failed twice at the AI step are only counted ("see the app") so they don't hold up
-newer ones; when Instagram didn't send everything, the message says so and you look in the app.
+in several messages; messages the AI couldn't handle twice (or Telegram refused three times) are only counted ("see the app") so they don't
+hold up newer ones, while outages and usage limits just wait; when Instagram didn't send everything, the message says so and you look in the app.
 
 **What is kept.** Social conversations aren't written to `chats/`, long results are cut instead of saved, and their
 approval requests and results are visible only to social conversations (and you in Telegram). Runs of the DM watcher keep
@@ -382,7 +382,7 @@ social text themselves).
 
 **Reading your Telegram (section 7).** `tg-read` can't read your chat with Ampi's own bots: not in lists, history, search,
 watchers or forwards. ampi-tools tells tg-reader which bots those are (from the bridge, with `[tools] approvals = true`),
-and tg-reader remembers them. With ampi-tools installed, tg-reader reads nothing until it was told once, so update both
+and tg-reader remembers them. With ampi-tools installed, tg-reader reads nothing until it was told at least one bot (so `[tools] approvals` must be on), so update both
 (`install-tools.sh`, `install-tg-reader.sh`) and restart claude-assistant; saving a session is refused until this works.
 Files that earlier `tg-read` calls saved aren't touched: look through `~/profiles/*/telegram/` (and `chats/`,
 `instagram/`, `threads/`) yourself and delete what you don't want later conversations to read.
