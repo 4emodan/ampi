@@ -42,13 +42,21 @@ if ($Pair) {
     $sum = ("$(Invoke-Adb shell -n sha256sum $there)".Trim() -split '\s+')[0]
     if ($sum -ne (Get-FileHash -Algorithm SHA256 $Apk).Hash) { throw "the app on the phone isn't $Apk" }
     # Both sides must have forgotten an earlier pairing, before any codes are compared.
-    $state = (Invoke-Adb shell -n am broadcast -n "$pkg/.PairReceiver" -a "$pkg.CERT") -join " "
+    $state = ""
+    for ($i = 0; $i -lt 5 -and $state -notmatch 'result='; $i++) {
+        try { $state = (Invoke-Adb shell -n am broadcast -n "$pkg/.PairReceiver" -a "$pkg.CERT") -join " " }
+        catch { Start-Sleep -Seconds 2 }  # the phone was busy: ask again
+    }
     if ($state -match 'result=2') { throw "the phone is already paired: unpair it in the app first (Ampi, at the bottom)" }
-    $known = @(Invoke-Server "ampi-phone devices") | Where-Object { "$_" -match "^$([regex]::Escape($Name))\s" }
-    if ($known) {
-        Write-Host "The server still has this phone: $known"
-        if ((Read-Host "Remove it there and pair again? (yes/no)") -ne "yes") { throw "stopped: nothing was changed" }
-        Invoke-Server "ampi-phone remove $Name" | Out-Host
+    # Removed only once the codes were compared; none of them is this phone any more (it isn't paired).
+    $old = @()
+    foreach ($line in @(Invoke-Server "ampi-phone devices")) {
+        $known = ("$line" -split '\s')[0]
+        if (-not $known) { continue }
+        Write-Host "The server still knows a phone: $line"
+        $answer = Read-Host "Remove it when this one is paired? (yes/no)"
+        if ($answer -eq "yes") { $old += $known }
+        elseif ($known -eq $Name) { throw "stopped, nothing was changed: a phone called $Name is already there (use -Name for another)" }
     }
     $offer = (Invoke-Server "ampi-phone offer") -join ""
     $p = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($offer)).Replace("+", "-").Replace("/", "_").TrimEnd("=")
@@ -71,6 +79,7 @@ if ($Pair) {
     Write-Host ""
     $yes = Read-Host "Does the phone show exactly this code? (yes/no)"
     if ($yes -ne "yes") { throw "stopped: nothing was paired. Cancel on the phone too." }
+    foreach ($known in $old) { Invoke-Server "ampi-phone remove $known" | Out-Host }
     Invoke-Server "ampi-phone add $Name --code '$code'" $cert | Out-Host
     Write-Host "Now press 'The codes match' on the phone, and switch USB debugging off when you're done."
 }

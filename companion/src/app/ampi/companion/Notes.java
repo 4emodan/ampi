@@ -25,7 +25,8 @@ import java.util.List;
 
 /** Notifications and the list of messages. Tapping one only ever opens the app. */
 final class Notes {
-    private static final int MESSAGE = 10, CHANGE = 11, BACKUP = 12, SUMMARY = 13;
+    static final int SUMMARY = 13;
+    private static final int MESSAGE = 10, CHANGE = 11, BACKUP = 12;
     private static final int KEEP_SHOWN = 15, KEEP_CHANGES = 25, KEEP = 50, PER_HOUR = 30;
 
     private Notes() {}
@@ -112,7 +113,7 @@ final class Notes {
      * Messages and changes get groups of their own. Otherwise Android 16 bundles everything of this app, also the ringing
      * alarm, and a bundled alarm doesn't open its screen over the lock screen.
      */
-    private static void grouped(Context c, String channel, Notification.Builder b, int icon) {
+    static void grouped(Context c, String channel, Notification.Builder b, int icon) {
         b.setGroup(channel).setGroupAlertBehavior(Notification.GROUP_ALERT_CHILDREN);
         Notification summary = new Notification.Builder(c, channel).setSmallIcon(icon).setGroup(channel).setGroupSummary(true)
                 .setGroupAlertBehavior(Notification.GROUP_ALERT_CHILDREN).setAutoCancel(true)

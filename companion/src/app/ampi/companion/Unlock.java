@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 /**
@@ -27,7 +28,7 @@ import java.util.function.Consumer;
  */
 final class Unlock {
     private static final int NOTE = 3;
-    private static final int PER_10_MIN = 6, PER_DAY = 30, UNKNOWN_PER_HOUR = 10;
+    private static final int PER_10_MIN = 6, PER_DAY = 30;
     private static final long PAUSE = 60_000;
 
     private static final Handler main = new Handler(Looper.getMainLooper());
@@ -43,15 +44,17 @@ final class Unlock {
         final List<Logins.Login> choices;
         final long deadline;  // elapsedRealtime
         private final Context app;
+        private final BooleanSupplier paired;
         private final Consumer<JSONObject> send;
         private boolean over;  // guarded by Unlock.class
 
-        private Ask(Context c, String host, List<Logins.Login> choices, long deadline, Consumer<JSONObject> send) {
+        private Ask(Context c, String host, List<Logins.Login> choices, long deadline, BooleanSupplier paired, Consumer<JSONObject> send) {
             this.app = c.getApplicationContext();
             this.host = host;
             this.nonce = Logins.newId();
             this.choices = choices;
             this.deadline = deadline;
+            this.paired = paired;
             this.send = send;
         }
 
@@ -72,17 +75,27 @@ final class Unlock {
                 over = true;
                 if (current == this) current = null;
             }
-            app.getSystemService(NotificationManager.class).cancel(nonce, NOTE);
+            hide();
             main.post(() -> {
                 if (watcher != null) watcher.run();
             });
             return true;
         }
 
+        private void hide() {
+            try {
+                NotificationManager nm = app.getSystemService(NotificationManager.class);
+                nm.cancel(nonce, NOTE);
+                nm.cancel(App.SIGNIN, Notes.SUMMARY);
+            } catch (RuntimeException e) {
+                Log.e("Ampi", "sign-in notice", e);
+            }
+        }
+
         /** The fingerprint was given and the login opened. */
         void unlocked() {
-            boolean late = left() <= 0;
-            if (end()) answer(late ? "expired" : null);
+            String no = left() <= 0 ? "expired" : paired.getAsBoolean() ? null : "interrupted";
+            if (end()) answer(no);
         }
 
         void refuse() {
@@ -110,39 +123,52 @@ final class Unlock {
         }
     }
 
-    static synchronized Ask current() {
-        return current;
+    /** The one the owner can still decide, or null. */
+    static Ask current() {
+        Ask a;
+        synchronized (Unlock.class) {
+            a = current;
+        }
+        return a != null && a.live() ? a : null;
     }
 
     /** At the start: a request that was open when the app was killed is gone, its notification too. */
     static void clean(Context c) {
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         for (StatusBarNotification n : nm.getActiveNotifications()) if (n.getId() == NOTE) nm.cancel(n.getTag(), NOTE);
+        nm.cancel(App.SIGNIN, Notes.SUMMARY);
     }
 
-    /** The screen wants to know when the request is over (main thread). */
+    /** The screen that is there wants to know when the request is over (main thread). */
     static void watch(Runnable r) {
         watcher = r;
     }
 
+    static void unwatch(Runnable r) {
+        if (watcher == r) watcher = null;
+    }
+
     /** Something else needs the owner now. */
     static void interrupt() {
-        Ask a = current();
+        Ask a;
+        synchronized (Unlock.class) {
+            a = current;
+        }
         if (a != null) a.end("interrupted");
     }
 
     /** Shows a request: answers why not, or "asking" and later the outcome. Not on the main thread. */
-    static Ask request(Context c, String host, long waitMs, byte[] signin, Consumer<JSONObject> send) {
+    static Ask request(Context c, String host, long waitMs, byte[] signin, BooleanSupplier paired, Consumer<JSONObject> send) {
         Ask ask = null;
         String no;
         try {
             List<Logins.Login> choices = new ArrayList<>();
-            for (Logins.Login l : Logins.all(c)) if (l.hosts().contains(host)) choices.add(l);
-            no = whyNot(c, choices, Logins.serverId(signin));
+            no = whyNot(c, host, Logins.serverId(signin), choices);
+            if (no == null && !paired.getAsBoolean()) no = "interrupted";
             if (no == null) {
                 synchronized (Unlock.class) {
                     if (current != null) no = "busy";
-                    else current = ask = new Ask(c, host, List.copyOf(choices), SystemClock.elapsedRealtime() + waitMs, send);
+                    else current = ask = new Ask(c, host, List.copyOf(choices), SystemClock.elapsedRealtime() + waitMs, paired, send);
                 }
             }
         } catch (Logins.Gone e) {
@@ -156,54 +182,69 @@ final class Unlock {
             return null;
         }
         Ask a = ask;
-        if (!RingService.texts().isEmpty()) {  // it started ringing just now
-            a.end("interrupted");
-        } else if (!show(c, a)) {
-            a.end("notifications_off");
-        } else {
+        try {
             main.postDelayed(() -> a.end("expired"), Math.max(0, a.left()));
-            try {
+            if (!RingService.texts().isEmpty()) {  // it started ringing just now
+                a.end("interrupted");
+            } else if (!show(c, a)) {
+                a.end("notifications_off");
+            } else if (!a.live()) {  // it was over before its notification was there
+                a.hide();
+            } else {
                 send.accept(new JSONObject().put("asking", true));
-            } catch (JSONException e) {
-                throw new IllegalStateException(e);
             }
+        } catch (JSONException | RuntimeException e) {
+            Log.e("Ampi", "sign-in request", e);
+            a.end("failed");
         }
         return a;
     }
 
-    private static String whyNot(Context c, List<Logins.Login> choices, String server) throws GeneralSecurityException, Logins.Gone {
+    /** First what doesn't depend on the site, and one limit for all sites: the answers must not tell which ones are saved
+     *  without the owner being shown something. */
+    private static String whyNot(Context c, String host, String server, List<Logins.Login> choices)
+            throws IOException, GeneralSecurityException, Logins.Gone {
         synchronized (Unlock.class) {
             if (current != null) return "busy";
             if (SystemClock.elapsedRealtime() - refused < PAUSE) return "paused";
         }
-        if (choices.isEmpty()) return allowed(c, "unknown", 3600_000L, UNKNOWN_PER_HOUR) ? "no_login" : "limit";
-        choices.removeIf(l -> !l.server().equals(server));
-        if (choices.isEmpty()) return "other_server";
         if (!RingService.texts().isEmpty()) return "ringing";
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         if (!nm.areNotificationsEnabled() || Notes.off(c, App.SIGNIN)) return "notifications_off";
         if (!Logins.fingerprintReady(c)) return "no_fingerprint";
-        Logins.toOpen(choices.get(0));  // is the key still there?
-        if (!allowed(c, "asked", 600_000L, PER_10_MIN) || !allowed(c, "asked_day", 24 * 3600_000L, PER_DAY)) return "limit";
+        List<Logins.Login> all = Logins.all(c);
+        if (!all.isEmpty()) Logins.toOpen(all.get(0));  // is the key still there?
+        if (!allowed(c)) return "limit";
+        for (Logins.Login l : all) if (l.hosts().contains(host) && l.server().equals(server)) choices.add(l);
+        if (choices.isEmpty()) {
+            // Asking for sites to find out which ones are saved doesn't go unnoticed.
+            Notes.change(c, "signin-missing", "Ampi asked for a login that isn't saved",
+                    "If you didn't expect that, ask Ampi what it was for.", null, null);
+            return "no_login";
+        }
         return null;
     }
 
-    /** Counts it, unless there were enough in that time. */
-    private static synchronized boolean allowed(Context c, String what, long time, int most) {
+    /** Counts it, unless there were enough lately. */
+    private static synchronized boolean allowed(Context c) {
         SharedPreferences p = c.getSharedPreferences("signin", Context.MODE_PRIVATE);
         long now = System.currentTimeMillis();
         var kept = new StringBuilder();
-        int n = 0;
-        for (String s : p.getString(what, "").split(",")) {
-            if (s.isEmpty()) continue;
-            long t = Long.parseLong(s);
-            if (t > now - time && t <= now) {
-                kept.append(s).append(',');
-                n++;
+        int day = 0, lately = 0;
+        for (String s : p.getString("asked", "").split(",")) {
+            long t;
+            try {
+                t = Long.parseLong(s);
+            } catch (NumberFormatException e) {
+                continue;
             }
+            if (Math.abs(now - t) >= 24 * 3600_000L) continue;
+            kept.append(t).append(',');
+            day++;
+            if (Math.abs(now - t) < 600_000L) lately++;
         }
-        if (n >= most) return false;
-        p.edit().putString(what, kept.append(now).append(',').toString()).apply();
+        if (lately >= PER_10_MIN || day >= PER_DAY) return false;
+        p.edit().putString("asked", kept.append(now).append(',').toString()).apply();
         return true;
     }
 
@@ -211,11 +252,13 @@ final class Unlock {
     private static boolean show(Context c, Ask a) {
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         PendingIntent open = PendingIntent.getActivity(c, 1, new Intent(c, UnlockActivity.class), PendingIntent.FLAG_IMMUTABLE);
-        nm.notify(a.nonce, NOTE, new Notification.Builder(c, App.SIGNIN).setSmallIcon(R.drawable.ic_ampi)
+        Notification.Builder b = new Notification.Builder(c, App.SIGNIN).setSmallIcon(R.drawable.ic_ampi)
                 .setContentTitle("Ampi wants to use a saved login").setContentText("Tap to see which one")
                 .setContentIntent(open).setAutoCancel(false).setOnlyAlertOnce(true).setLocalOnly(true)
                 .setTimeoutAfter(Math.max(1000, a.left())).setVisibility(Notification.VISIBILITY_PRIVATE)
-                .setGroup(App.SIGNIN).setAllowSystemGeneratedContextualActions(false).build());
+                .setAllowSystemGeneratedContextualActions(false);
+        Notes.grouped(c, App.SIGNIN, b, R.drawable.ic_ampi);  // never bundled with a ringing alarm
+        nm.notify(a.nonce, NOTE, b.build());
         return Notes.appeared(nm, a.nonce);
     }
 }

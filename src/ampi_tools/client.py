@@ -522,6 +522,7 @@ def phone_main(argv: list[str] | None = None) -> int:
 
 def signin_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="signin", description="Logins saved on the owner's phone (unlocked there by fingerprint).")
+    p.add_argument("-m", "--reason", help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("test", help="ask the owner to unlock the login for a site (nothing is sent or filled in)")
     s.add_argument("site", help="e.g. example.com")

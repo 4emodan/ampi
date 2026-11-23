@@ -36,7 +36,6 @@ WORDS = {
     "no_fingerprint": "the phone can't check a fingerprint now",
     "key_gone": "the phone's fingerprints changed, so its saved logins can't be opened any more (the owner deletes them in the "
                 "Ampi app and adds them again)",
-    "other_server": "that login was saved for another server; the owner adds it again in the Ampi app",
     "unsupported": "the app on the phone is too old for this",
     "offline": "the phone isn't reachable",
     "no_vault": "the phone is paired without saved logins (docs/SETUP.md, companion app: pair it again)",

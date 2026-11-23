@@ -122,7 +122,6 @@ public final class RingService extends Service {
         String id = intent == null ? null : intent.getStringExtra(ID);
         if (RING.equals(action) && id != null) {
             String text = intent.getStringExtra(TEXT);
-            Unlock.interrupt();  // never two things at once that want the owner's finger
             synchronized (ringing) {
                 ringing.put(id, text == null ? "Alarm" : text);
             }
@@ -174,6 +173,11 @@ public final class RingService extends Service {
         handler.removeCallbacks(end);
         handler.postDelayed(end, MAX_MS);
         changed();
+        try {
+            Unlock.interrupt();  // never two things at once that want the owner's finger; after the sound, so it can't stop that
+        } catch (RuntimeException e) {
+            Log.e("Ampi", "interrupt", e);
+        }
     }
 
     private boolean show() {

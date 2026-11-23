@@ -67,7 +67,8 @@ final class Ui {
         scroll.setBackgroundColor(background(a));
         int side = dp(a, 16);
         scroll.setOnApplyWindowInsetsListener((v, insets) -> {
-            Insets i = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            Insets i = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+                    | WindowInsets.Type.ime());
             v.setPadding(side + i.left, i.top + dp(a, 12), side + i.right, i.bottom + dp(a, 24));
             return WindowInsets.CONSUMED;
         });

@@ -45,7 +45,7 @@ FRAMES_PER_MINUTE = 120  # from the phone
 HANDSHAKE_S, HANDSHAKES, HANDSHAKES_PER_ADDR, ADDR_PER_MINUTE = 5.0, 64, 2, 30
 # For addresses a paired phone connected from in the last day: slots nobody else can take, and wider limits.
 RESERVED, KNOWN_PER_ADDR, KNOWN_PER_MINUTE, KNOWN_S, KNOWN_MAX = 16, 8, 120, 24 * 3600, 200
-CONTROLS = 16  # connections to the control socket at once
+CONTROLS, VAULT_CALLS = 16, 4  # connections to the control socket, and to the sign-in service's, at once
 MAX_CONTROL = 64 * 1024
 VAULT_SOCKET = "ampi-phone-vault.socket"
 # Sign-in channels: how many, how long the phone has to open its connection, how long and how much one may carry.
@@ -211,7 +211,7 @@ class Gateway:
         self.minute, self.hour = Window(PER_MINUTE, 60), Window(PER_HOUR, 3600)
         self.gate = Gate()
         self._tasks: set[asyncio.Task] = set()
-        self._controls = 0
+        self._controls = self._vault_calls = 0
         self.tunnel: Tunnel | None = None
         self.vault_minute, self.vault_hour = Window(VAULT_PER_MINUTE, 60), Window(VAULT_PER_HOUR, 3600)
 
@@ -346,9 +346,9 @@ class Gateway:
     async def vault_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                                allowed: frozenset[int]) -> None:
         """ampi-signin: one line, then (when that was answered with ok) the bytes to and from the phone."""
-        self._controls += 1
+        self._vault_calls += 1
         try:
-            if peer_uid(writer) not in allowed or self._controls > CONTROLS:
+            if peer_uid(writer) not in allowed or self._vault_calls > VAULT_CALLS:
                 return
             line = await asyncio.wait_for(reader.readline(), 10)
             code = await self.relay(reader, writer) if line == b'{"cmd": "open"}\n' else "failed"
@@ -358,7 +358,7 @@ class Gateway:
         except (OSError, asyncio.TimeoutError, ValueError):
             pass
         finally:
-            self._controls -= 1
+            self._vault_calls -= 1
             writer.close()
 
     async def relay(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> str:
@@ -373,16 +373,18 @@ class Gateway:
         self.vault_minute.add()
         self.vault_hour.add()
         t = self.tunnel = Tunnel(link.device, secrets.token_hex(16), asyncio.get_running_loop().create_future())
+        first = asyncio.create_task(reader.read(8192))  # the phone speaks first, so before that this is ampi-signin leaving
         try:
-            try:
+            with contextlib.suppress(Closed):
                 link.send({"t": "vault.open", "ch": t.ch, "now": time.time()})
-                rd, wr = await asyncio.wait_for(t.phone, VAULT_DIAL)
-            except (Closed, asyncio.TimeoutError):
-                log.info("sign-in channel: no answer from %s", link.device)
+                await asyncio.wait({t.phone, first}, timeout=VAULT_DIAL, return_when=asyncio.FIRST_COMPLETED)
+            if not t.phone.done() or first.done():
+                log.info("sign-in channel: %s", "not wanted any more" if first.done() else f"no answer from {link.device}")
                 return "no_answer"
+            rd, wr = t.phone.result()
             writer.write(b'{"ok": true}\n')
             log.info("sign-in channel to %s", link.device)
-            pumps = [asyncio.create_task(self._pump(reader, wr)), asyncio.create_task(self._pump(rd, writer))]
+            pumps = [asyncio.create_task(self._pump(reader, wr, first)), asyncio.create_task(self._pump(rd, writer))]
             try:
                 await asyncio.wait(pumps, timeout=VAULT_LIFE, return_when=asyncio.FIRST_COMPLETED)
             finally:
@@ -392,14 +394,17 @@ class Gateway:
             log.info("sign-in channel closed")
             return ""
         finally:
+            first.cancel()
+            t.phone.cancel()  # (nobody may join it any more)
             t.over.set()
             self.tunnel = None
 
     @staticmethod
-    async def _pump(rd: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
+    async def _pump(rd: asyncio.StreamReader, wr: asyncio.StreamWriter, first: asyncio.Task | None = None) -> None:
         total = 0
         with contextlib.suppress(OSError):
-            while data := await rd.read(8192):
+            while data := await (first or rd.read(8192)):
+                first = None
                 total += len(data)
                 if total > VAULT_BYTES:
                     log.warning("sign-in channel: too much data")

@@ -1076,6 +1076,24 @@ class Daemon:
             for r in rows
         ), "all")
 
+    async def _while_there(self, request: dict, pid: int, rd: asyncio.StreamReader) -> dict | None:
+        """A sign-in asks the owner on their phone: it ends when the command that wanted it is gone (None). Everything else
+        runs on as before."""
+        ops = request.get("ops")
+        if not (isinstance(ops, list) and any(isinstance(o, dict) and str(o.get("op")).startswith("signin.") for o in ops)):
+            return await self.handle(request, pid)
+        work, gone = asyncio.create_task(self.handle(request, pid)), asyncio.create_task(rd.read(1))
+        try:
+            await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
+            if work.done():
+                return work.result()
+            work.cancel()
+            await asyncio.wait({work})
+            return None
+        finally:
+            for t in (work, gone):
+                t.cancel()
+
     async def connection(self, rd: asyncio.StreamReader, wr: asyncio.StreamWriter) -> None:
         try:
             try:
@@ -1085,7 +1103,9 @@ class Daemon:
             except (ValueError, asyncio.TimeoutError):
                 response = {"ok": False, "error": "bad request"}
             else:
-                response = await self.handle(request, peer_pid(wr))
+                response = await self._while_there(request, peer_pid(wr), rd)
+                if response is None:
+                    return
             wr.write(json.dumps(response).encode() + b"\n")
             await wr.drain()
         except Exception:

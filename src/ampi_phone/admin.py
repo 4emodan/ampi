@@ -171,13 +171,16 @@ def main(argv: list[str] | None = None, conf: Path = trust.CONF, signin: Path = 
         elif a.cmd == "devices":
             for f in sorted((conf / "devices").glob("*.json")):
                 print(describe(f, conf, signin))
+            for f in sorted((signin / "devices").glob("*.json")):
+                if not (conf / "devices" / f.name).exists():
+                    print(f"{f.stem}  only known to the sign-in service: ampi-phone remove {f.stem}")
         elif a.cmd == "remove":
             remove(conf, a.name, signin)
             print(f"{a.name} was removed and disconnected")
         elif a.cmd == "status":
             try:
                 print(json.dumps(status(), indent=2))
-            except FileNotFoundError:
+            except (FileNotFoundError, ConnectionRefusedError):
                 print("nothing is running: no phone is paired")
     except (ValueError, OSError) as e:
         print(f"ampi-phone: {e}", file=sys.stderr)

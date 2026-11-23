@@ -140,15 +140,17 @@ Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-si
                   \_______________ TLS 1.3 inside, ampi-signin <-> phone, both pinned _______________/
 ```
 
-- **On the phone** (`Logins`): one AES-256-GCM key in the secure hardware, a fingerprint (class 3) for every single use, saving
-  included; a newly added fingerprint, no fingerprint left or no screen lock destroys it (then the logins are entered again:
-  they belong in a password manager too). Bound into every login: its id, sites, label, and the sign-in service it was saved for,
+- **On the phone** (`Logins`): one AES-256-GCM key in the secure hardware, a class-3 biometric for every single use, saving
+  included: any fingerprint enrolled on the phone (Android can't tell fingers apart, and on phones that have it also strong face
+  unlock). A newly added one, none left or no screen lock destroys the key (then the logins are entered again: they belong in
+  a password manager too; the app says to look for fingerprints that aren't the owner's first). Bound into every login: its id, sites, label, and the sign-in service it was saved for,
   so re-pairing the phone with another server makes them useless there. Nothing can be shown again. Sites are exact https
   host names (ASCII; `www.` is the same site), up to 5 per login; big providers (Google, Apple, Facebook, Microsoft, Yahoo) are
   refused: their password opens much more than one site.
 - **Asking** (`Unlock`, `UnlockActivity`): a notification without the site -> tap -> the screen with the site, which login, and
-  "Use fingerprint" / "Refuse". One at a time, 75 s at most (monotonic), 6 in 10 minutes, 30 a day; after a refusal none for a
-  minute. All words are the app's own. While it is open, Ampi's messages, alarms and cancellations are refused
+  "Use fingerprint" / "Refuse". One at a time, 75 s at most (monotonic), 6 in 10 minutes, 30 a day for all sites together, saved
+  or not; after a refusal none for a minute. What doesn't depend on the site is checked first, and asking for one that isn't saved
+  shows a notice: nobody finds out unseen which sites there are. All words are the app's own. While it is open, Ampi's messages, alarms and cancellations are refused
   (`signin_open`); if something rings, the request ends ("interrupted"); while something rings, none starts. When the server or
   the channel goes away, so does the request. Only Refuse is a refusal: a closed or timed-out fingerprint prompt goes back to the
   screen.
@@ -156,9 +158,11 @@ Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-si
   random number). The phone opens a second connection to the same port, says that number, and inside it starts TLS 1.3 with
   ampi-signin: the phone's certificate is its connection key, the service's is the one fixed while pairing. Nothing is
   looked at before both are proved, so the gateway can neither ask, nor read, nor change anything: it can only not pass it on.
-  One channel at a time, 6 a minute, 40 an hour, 64 KB each way, 130 s.
+  One request per channel, which must come within 10 s of the handshake; the phone ends a channel after 110 s whatever arrives.
+  One channel at a time, 6 a minute, 40 an hour (both sides count for themselves), 64 KB each way. Unpairing ends it.
 - **ampi-signin** (`src/ampi_phone/signin.py`, standard library): socket-activated, only ampi-tools may call it (uid checked), one
-  request at a time (others are told "busy" at once, never queued), ends with the caller or after 100 s, exits when idle. Its own
+  request at a time (others are told "busy" at once, never queued), ends when the command that asked is gone or after 100 s,
+  exits when idle. Its own
   key proves who is asking; it opens nothing. Sandbox as the gateway's, plus: of /run it sees only the vault socket.
   Journal: outcomes, never sites.
 - **ampi-tools** (`ops_signin.py`): the private chat only. Outcomes become words from its own list.

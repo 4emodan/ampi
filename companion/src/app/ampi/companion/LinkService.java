@@ -196,6 +196,9 @@ public final class LinkService extends Service {
             } catch (IOException | JSONException | RuntimeException | StackOverflowError e) {
                 problem = text(e);
                 Log.i("Ampi", "connection: " + e);
+            } catch (Error e) {  // out of threads or memory: not the end of the app
+                problem = "the phone was too busy";
+                Log.e("Ampi", "connection", e);
             } finally {
                 socket = null;
                 if (running == this) connectedSince = 0;

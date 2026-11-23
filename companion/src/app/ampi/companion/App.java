@@ -17,13 +17,17 @@ public final class App extends Application {
     public void onCreate() {
         super.onCreate();
         channels(this);
-        Unlock.clean(this);
+        try {
+            Unlock.clean(this);
+        } catch (RuntimeException e) {  // nothing may stand before an alarm
+            android.util.Log.e("Ampi", "clean", e);
+        }
     }
 
     static void channels(Context c) {
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         make(nm, AMPI, "Messages from Ampi", NotificationManager.IMPORTANCE_DEFAULT, null);
-        make(nm, CHANGES, "Alarm changes by Ampi", NotificationManager.IMPORTANCE_DEFAULT, null);
+        make(nm, CHANGES, "Changes by Ampi", NotificationManager.IMPORTANCE_DEFAULT, null);
         NotificationChannel alarms = make(nm, ALARMS, "Ringing alarms", NotificationManager.IMPORTANCE_HIGH, null);
         alarms.setSound(null, null);  // RingService plays the sound
         alarms.enableVibration(false);

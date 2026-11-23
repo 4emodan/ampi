@@ -39,7 +39,7 @@ MAX_LINE, MAX_FRAME, MAX_CALLS = 4096, 8192, 4
 HOST_RE = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])")
 # What the phone and the gateway may answer; anything else is "failed".
 PHONE_CODES = frozenset({"no_login", "busy", "paused", "limit", "ringing", "notifications_off", "no_fingerprint", "key_gone",
-                         "other_server", "denied", "expired", "interrupted", "unsupported", "bad_request", "failed"})
+                         "denied", "expired", "interrupted", "unsupported", "bad_request", "failed"})
 GATEWAY_CODES = frozenset({"offline", "no_vault", "busy", "limit", "no_answer"})
 
 
@@ -132,10 +132,14 @@ def open_vault() -> socket.socket:
 def ask(host: str, caller: socket.socket, conf: Path = CONF, vault: Callable[[], socket.socket] = open_vault) -> str:
     """Has the owner unlock the login for `host` on the phone; "ok" or why not."""
     deadline = time.monotonic() + TOTAL
-    devices = trust.load_devices(conf)
-    if not devices:
-        return "not_paired"
-    ctx = trust.make_context(devices, conf)
+    try:
+        devices = trust.load_devices(conf)
+        if not devices:
+            return "not_paired"
+        ctx = trust.make_context(devices, conf)
+    except (OSError, ValueError):  # a broken device file, an unreadable key
+        log.exception("the pairing can't be read")
+        return "failed"
     try:
         sock = vault()
     except OSError:
@@ -148,8 +152,10 @@ def ask(host: str, caller: socket.socket, conf: Path = CONF, vault: Callable[[],
         except ssl.SSLEOFError:
             return "expired" if watch.late else "lost"
         except ssl.SSLError as e:
-            log.warning("sign-in channel: %s", e.reason)
-            return "untrusted"
+            reason = str(e.reason or "")
+            log.warning("sign-in channel: %s", reason)
+            # A certificate that isn't the paired one, on either side; anything else broke on the way.
+            return "untrusted" if "CERT" in reason or "UNKNOWN_CA" in reason else "lost"
         except (Lost, OSError, ValueError):
             return "expired" if watch.late else "lost"
         finally:
@@ -205,6 +211,9 @@ class Service:
             return {"ok": False, "code": "busy"}
         try:
             code = self.ask(host, conn)
+        except Exception:
+            log.exception("asking failed")
+            code = "failed"
         finally:
             self.asking.release()
         log.info("test: %s", code)

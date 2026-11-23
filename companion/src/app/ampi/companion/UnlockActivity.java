@@ -21,7 +21,7 @@ import javax.crypto.Cipher;
 /** Shows the one open sign-in request; only the fingerprint goes on from here. */
 public final class UnlockActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final Runnable tick = this::tick;
+    private final Runnable tick = this::tick, over = this::over;
     private Unlock.Ask ask;
     private Logins.Login chosen;
     private CancellationSignal prompt;
@@ -57,7 +57,7 @@ public final class UnlockActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        Unlock.watch(this::over);
+        Unlock.watch(over);
         over();
         handler.post(tick);
     }
@@ -70,7 +70,7 @@ public final class UnlockActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        Unlock.watch(null);
+        Unlock.unwatch(over);
         stopPrompt();
         super.onDestroy();
     }
@@ -90,6 +90,7 @@ public final class UnlockActivity extends Activity {
 
     private void draw() {
         LinearLayout page = Ui.page(this);
+        ((android.view.View) page.getParent()).setAccessibilityDataSensitive(android.view.View.ACCESSIBILITY_DATA_SENSITIVE_YES);
         Ui.title(page, "Use a saved login?");
         LinearLayout card = Ui.card(page);
         TextView host = Ui.add(card, ask.host, 26, Ui.accent(this));

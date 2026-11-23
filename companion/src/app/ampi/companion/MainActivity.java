@@ -155,6 +155,8 @@ public final class MainActivity extends Activity {
     private void unpair() {
         LinkService.stop(this);
         Config.clear(this);
+        Unlock.interrupt();
+        VaultSession.closeCurrent();
         Notes.clear(this);
         refresh();
     }

@@ -30,6 +30,7 @@
         android:label="Ampi"
         android:supportsRtl="true"
         android:theme="@style/Ampi"
+        android:enableOnBackInvokedCallback="true"
         android:usesCleartextTraffic="false">
 
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop">

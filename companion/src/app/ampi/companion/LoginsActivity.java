@@ -15,11 +15,14 @@ import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
+import android.view.textclassifier.TextClassifier;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 import org.json.JSONException;
 
@@ -33,6 +36,7 @@ import javax.crypto.Cipher;
 public final class LoginsActivity extends Activity {
     private static final int TEXT = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
 
+    private final OnBackInvokedCallback toList = this::list;
     private CancellationSignal prompt;
     private boolean adding;
 
@@ -41,7 +45,6 @@ public final class LoginsActivity extends Activity {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         getWindow().setHideOverlayWindows(true);
-        list();
     }
 
     @Override
@@ -59,6 +62,7 @@ public final class LoginsActivity extends Activity {
         LinearLayout page = Ui.page(this);
         View root = (View) page.getParent();
         root.setImportantForContentCapture(View.IMPORTANT_FOR_CONTENT_CAPTURE_NO_EXCLUDE_DESCENDANTS);
+        root.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES);
         root.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
         Ui.title(page, title);
         return page;
@@ -67,10 +71,12 @@ public final class LoginsActivity extends Activity {
     // --- the list --------------------------------------------------------------------------------------------
 
     private void list() {
+        if (adding) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(toList);
         adding = false;
         LinearLayout page = start("Saved logins");
-        Ui.small(page, "Only on this phone. Each use needs your fingerprint. Keep them in your password manager too: without "
-                + "this phone, or after a fingerprint is added, they have to be entered again.");
+        Ui.small(page, "Only on this phone. Each use needs your fingerprint (any fingerprint saved on this phone, or its face "
+                + "unlock if that is of the strong kind). Keep them in your password manager too: without this phone, or after a "
+                + "fingerprint is added, they have to be entered again.");
         byte[] signin = signin(this);
         List<Logins.Login> all;
         try {
@@ -99,17 +105,19 @@ public final class LoginsActivity extends Activity {
             LinearLayout card = Ui.card(page);
             Ui.body(card, String.join("\n", l.hosts()));
             Ui.small(card, l.label());
-            if (!l.server().equals(server)) Ui.small(card, "Saved for another server: can't be used with this one.");
-            Ui.button(card, "Delete", false, v -> new AlertDialog.Builder(this).setTitle("Delete this login?")
+            if (signin.length > 0 && !l.server().equals(server)) Ui.small(card, "Saved for another server: can't be used with this one.");
+            Ui.button(card, "Delete", false, v -> show(new AlertDialog.Builder(this).setTitle("Delete this login?")
                     .setMessage(String.join(", ", l.hosts()) + " · " + l.label()).setNegativeButton("Keep", null)
                     .setPositiveButton("Delete", (d, w) -> {
+                        String problem = null;
                         try {
                             Logins.delete(this, l.id());
                         } catch (IOException e) {
-                            tell("It couldn't be deleted: " + e.getMessage());
+                            problem = "It couldn't be deleted: " + e.getMessage();
                         }
                         list();
-                    }).show());
+                        if (problem != null) tell(problem);
+                    })));
         }
         if (all.isEmpty()) Ui.small(Ui.card(page), "None yet.");
         if (gone) return;
@@ -151,20 +159,28 @@ public final class LoginsActivity extends Activity {
     }
 
     private void deleteAll() {
-        new AlertDialog.Builder(this).setTitle("Delete all saved logins?").setNegativeButton("Keep", null)
+        show(new AlertDialog.Builder(this).setTitle("Delete all saved logins?").setNegativeButton("Keep", null)
                 .setPositiveButton("Delete all", (d, w) -> {
                     Logins.deleteAll(this);
                     list();
-                }).show();
+                }));
     }
 
     private void tell(String s) {
-        new AlertDialog.Builder(this).setMessage(s).setPositiveButton("OK", null).show();
+        show(new AlertDialog.Builder(this).setMessage(s).setPositiveButton("OK", null));
+    }
+
+    /** A dialog is a window of its own: screenshots must not see it either. */
+    private static void show(AlertDialog.Builder b) {
+        AlertDialog d = b.create();
+        d.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        d.show();
     }
 
     // --- adding one --------------------------------------------------------------------------------------------
 
     private void add() {
+        if (!adding) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, toList);
         adding = true;
         LinearLayout page = start("Add a login");
         LinearLayout card = Ui.card(page);
@@ -173,7 +189,6 @@ public final class LoginsActivity extends Activity {
         EditText label = field(card, "Name for it, e.g. Personal", TEXT);
         EditText user = field(card, "User name or email", TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
         EditText secret = field(card, "Password", TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        for (EditText e : new EditText[] {user, secret}) e.setAccessibilityDataSensitive(View.ACCESSIBILITY_DATA_SENSITIVE_YES);
         CheckBox show = new CheckBox(this);
         show.setText("Show password");
         show.setTextColor(Ui.quiet(this));
@@ -196,6 +211,7 @@ public final class LoginsActivity extends Activity {
         e.setInputType(type);
         e.setTextColor(Ui.text(this));
         e.setSaveEnabled(false);
+        e.setTextClassifier(TextClassifier.NO_OP);  // selected text goes to no "smart" service
         e.setImeOptions(EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING | EditorInfo.IME_FLAG_NO_FULLSCREEN);
         parent.addView(e, Ui.FULL, Ui.WRAP);
         return e;
@@ -224,7 +240,8 @@ public final class LoginsActivity extends Activity {
         problem.setText("");
         if (prompt != null) prompt.cancel();
         prompt = new CancellationSignal();
-        new BiometricPrompt.Builder(this).setTitle("Save this login").setSubtitle(hosts.get(0) + " · " + name)
+        new BiometricPrompt.Builder(this).setTitle("Save this login").setSubtitle(name)
+                .setDescription("For " + String.join(", ", hosts))
                 .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 .setNegativeButton("Cancel", getMainExecutor(), (d, w) -> { })
                 .build().authenticate(new BiometricPrompt.CryptoObject(cipher), prompt, getMainExecutor(),
@@ -234,13 +251,18 @@ public final class LoginsActivity extends Activity {
                                 try {
                                     Logins.add(LoginsActivity.this, Logins.sealed(r.getCryptoObject().getCipher(), name, hosts,
                                             Logins.serverId(signin), u, s));
-                                    getSystemService(ClipboardManager.class).clearPrimaryClip();
-                                    secret.setText("");
-                                    list();
                                 } catch (GeneralSecurityException | JSONException | IOException | RuntimeException e) {
                                     Log.e("Ampi", "save", e);
                                     problem.setText("It wasn't saved. Try again. (" + Texts.line(String.valueOf(e.getMessage()), 150) + ")");
+                                    return;
                                 }
+                                secret.setText("");
+                                try {
+                                    getSystemService(ClipboardManager.class).clearPrimaryClip();
+                                } catch (RuntimeException e) {
+                                    Log.w("Ampi", "clipboard", e);
+                                }
+                                if (!isDestroyed()) list();
                             }
 
                             @Override

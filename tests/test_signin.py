@@ -290,6 +290,7 @@ def test_the_phone_does_not_come(confs, certs, monkeypatch):
     with Server(confs[0]) as s:
         Phone(certs, s, joins=False)
         assert ask(confs, s) == "no_answer"
+    with Server(confs[0]) as s:
         p = Phone(certs, s, answers({"ok": True}), ch="0" * 32)  # another channel's number
         assert ask(confs, s) == "no_answer"
         assert p.asked
@@ -298,9 +299,15 @@ def test_the_phone_does_not_come(confs, certs, monkeypatch):
 def test_nobody_joins_without_being_asked(confs, certs):
     with Server(confs[0]) as s:
         p = Phone(certs, s, joins=False)
-        c = p.connect({"t": "vault", "ch": ""})
-        with contextlib.suppress(OSError):
-            assert c.recv(1) == b""
+        for ch in ("", "0" * 32, None):
+            c = p.connect({"t": "vault", "ch": ch})
+            c.settimeout(3)
+            try:
+                assert c.recv(1) == b""
+            except TimeoutError:
+                raise AssertionError("it stays open") from None
+            except OSError:
+                pass  # reset
 
 
 def test_the_caller_goes_away(confs, certs):
@@ -372,18 +379,78 @@ def test_the_gateway_can_only_break_it(confs, certs):
         assert p.asked in (["SSLError"], ["ConnectionError"], []) or isinstance(p.asked[0], dict)
 
 
-def test_too_much_data_ends_it(confs, certs, monkeypatch):
-    monkeypatch.setattr(gateway, "VAULT_BYTES", 8000)
+def test_too_much_data_ends_it(confs, certs, monkeypatch, caplog):
+    monkeypatch.setattr(gateway, "VAULT_BYTES", 12000)
 
     def inside(phone, inner):
         inner.read()
+        inner.send({"asking": True})
         with contextlib.suppress(OSError):
-            for _ in range(1000):
-                inner.send({"x": "y" * 4000})
+            inner._do(inner.obj.write, struct.pack(">I", 8000))
+            for _ in range(1000):  # (an answer that never gets complete)
+                inner._do(inner.obj.write, b"" if phone.channel is None else b" " * 7)
+                time.sleep(0.001)
     with Server(confs[0]) as s:
         Phone(certs, s, inside)
-        assert ask(confs, s) in ("lost", "failed")
-        assert s.gw.links
+        with caplog.at_level("WARNING", "ampi-phone"):
+            assert ask(confs, s) == "lost"
+        assert s.gw.links and any("too much data" in r.message for r in caplog.records)
+
+
+def test_the_service_leaving_while_the_phone_is_waited_for(confs, certs):
+    with Server(confs[0]) as s:
+        Phone(certs, s, joins=False)
+        c = s.vault()
+        c.sendall(b'{"cmd": "open"}\n')
+        for _ in range(200):
+            if s.gw.tunnel is not None:
+                break
+            time.sleep(0.01)
+        c.close()
+        assert closed(s)  # at once, not after the 12 s for the phone
+
+
+def test_holding_the_vault_socket_does_not_stop_phone_control(confs, certs):
+    with Server(confs[0]) as s:
+        held = [s.vault() for _ in range(gateway.CONTROLS + 4)]
+        time.sleep(0.3)
+        assert s.gw._vault_calls <= gateway.VAULT_CALLS + 1 and s.gw._controls == 0
+        for c in held:
+            c.close()
+
+
+def test_a_broken_pairing_is_said(confs, certs):
+    (confs[1] / "devices" / "phone.json").write_text("{")
+    assert signin.ask("example.com", None, confs[1], lambda: 1 / 0) == "failed"
+
+
+@pytest.mark.parametrize("names,ok", [
+    (["ampi-phone.socket", "ampi-phone.socket"], True),
+    (["ampi-phone.socket", "ampi-phone.socket", "ampi-phone-vault.socket"], True),
+    (["ampi-phone-vault.socket", "ampi-phone.socket", "ampi-phone.socket"], True),
+    (["ampi-phone.socket", "other.socket"], False), (["ampi-phone.socket"], False), ([""], False),
+    (["ampi-phone-vault.socket", "ampi-phone.socket"], False)])
+def test_the_sockets_systemd_hands_over(monkeypatch, names, ok):
+    class Fake:
+        def __init__(self, fileno):
+            self.name = names[fileno - 3]
+            first = names.index("ampi-phone.socket") + 3 if "ampi-phone.socket" in names else -1
+            self.family = "inet" if fileno == first else "unix"  # the unit's first is the public one
+
+        def setblocking(self, on):
+            pass
+    monkeypatch.setattr(gateway.socket, "socket", Fake)
+    monkeypatch.setattr(gateway.socket, "AF_UNIX", "unix", raising=False)
+    monkeypatch.setenv("LISTEN_PID", str(gateway.os.getpid()))
+    monkeypatch.setenv("LISTEN_FDS", str(len(names)))
+    monkeypatch.setenv("LISTEN_FDNAMES", ":".join(names))
+    if not ok:
+        with pytest.raises(SystemExit):
+            gateway.systemd_sockets()
+        return
+    public, control, vault = gateway.systemd_sockets()
+    assert [p.name for p in public] == ["ampi-phone.socket"] and control.name == "ampi-phone.socket"
+    assert (vault is not None) == ("ampi-phone-vault.socket" in names)
 
 
 def test_one_channel_at_a_time_and_limits(confs, certs, monkeypatch):
@@ -625,6 +692,69 @@ def test_every_code_has_words():
     assert (signin.PHONE_CODES | signin.GATEWAY_CODES | {"not_paired", "untrusted", "lost"}) - {"failed", "bad_request"} \
         == set(ops_signin.WORDS)
     assert signin.HOST_RE.pattern == ops_signin.HOST_RE.pattern
+
+
+def test_a_command_that_goes_away_ends_the_request(tmp_path):
+    started, ended = [], []
+
+    class Slow:
+        async def call(self, req):
+            started.append(req)
+            try:
+                await asyncio.sleep(30)
+            finally:
+                ended.append(1)
+
+    async def trusted(pid):
+        return False
+
+    async def go():
+        d = Daemon(Services(signin_client=Slow()), Approvals(tmp_path / "a.sqlite3"), Policy(), trusted)
+        d.runs = type("R", (), {"origin_of": lambda self, pid: "private"})()
+        rd = asyncio.StreamReader()
+        req = {"cmd": "run", "ops": [{"op": "signin.test", "args": {"site_host": "example.com"}}]}
+        task = asyncio.create_task(d._while_there(req, 1, rd))
+        while not started:
+            await asyncio.sleep(0.01)
+        rd.feed_eof()
+        assert await asyncio.wait_for(task, 5) is None and ended
+        # Anything else goes on without its command, as before.
+        rd = asyncio.StreamReader()
+        rd.feed_eof()
+        r = await d._while_there({"cmd": "run", "ops": [{"op": "signin_test"}]}, 1, rd)
+        assert r["ok"] is False
+    asyncio.run(asyncio.wait_for(go(), 20))
+
+
+def test_the_client_of_the_service(monkeypatch):
+    async def go(reply):
+        async def served(rd, wr):
+            assert json.loads(await rd.readline()) == {"cmd": "test", "host": "example.com"}
+            wr.write(reply)
+            wr.close()
+        server = await asyncio.start_server(served, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(asyncio, "open_unix_connection", lambda path: asyncio.open_connection("127.0.0.1", port), raising=False)
+        async with server:
+            return await ops_signin.SigninClient("x", 5).call({"cmd": "test", "host": "example.com"})
+    assert asyncio.run(go(b'{"ok": true}\n')) == {"ok": True}
+    assert asyncio.run(go(b'[1]\n')) == {}
+    for broken in (b"", b"{"):
+        with pytest.raises(ToolError, match="no answer"):
+            asyncio.run(go(broken))
+
+    async def refused(path):
+        raise FileNotFoundError
+    monkeypatch.setattr(asyncio, "open_unix_connection", refused, raising=False)
+    with pytest.raises(ToolError, match="set up"):
+        asyncio.run(ops_signin.SigninClient("x").call({}))
+
+
+def test_the_whole_command(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(client, "request", lambda payload, **kw: seen.append(payload) or {"ok": True, "text": "unlocked"})
+    assert client.signin_main(["test", "example.com"]) == 0
+    assert seen[0]["ops"] == [{"op": "signin.test", "args": {"site_host": "example.com"}}] and "unlocked" in capsys.readouterr().out
 
 
 def test_the_command():

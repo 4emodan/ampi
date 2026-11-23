@@ -51,7 +51,9 @@ final class Logins {
     /** The key is there no more (a fingerprint was added, all were removed, or the screen lock was). */
     static final class Gone extends Exception {
         Gone() {
-            super("The saved logins can't be opened any more, because the phone's fingerprints or screen lock changed.");
+            super("The saved logins can't be opened any more, because the phone's fingerprints, face unlock or screen lock "
+                    + "changed. If that wasn't you, first remove fingerprints you don't know and change the PIN: whoever added one "
+                    + "could also open what you save next.");
         }
     }
 
@@ -86,7 +88,8 @@ final class Logins {
         try {
             return (SecretKey) Keys.store().getKey(KEY, null);
         } catch (UnrecoverableKeyException e) {  // also what getKey makes of a key that was invalidated
-            throw new Gone();
+            if (String.valueOf(e.getMessage()).toLowerCase(java.util.Locale.ROOT).contains("invalidated")) throw new Gone();
+            throw e;
         }
     }
 

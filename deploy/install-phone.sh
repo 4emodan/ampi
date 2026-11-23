@@ -30,7 +30,7 @@ if [[ ${1:-} == --uninstall ]]; then
   rm -f /etc/systemd/system/ampi-phone.socket /etc/systemd/system/ampi-phone.service /usr/local/sbin/ampi-phone \
     /etc/systemd/system/ampi-phone-vault.socket /etc/systemd/system/ampi-signin.socket /etc/systemd/system/ampi-signin.service
   systemctl daemon-reload
-  rm -rf "$LIB_DIR" "$CONF_DIR" "$SI_LIB" "$SI_CONF" /run/ampi-phone-vault
+  rm -rf "$LIB_DIR" "$CONF_DIR" "$SI_LIB" "$SI_CONF" /run/ampi-phone-vault /etc/tmpfiles.d/ampi-phone.conf
   userdel "$GW_USER" 2>/dev/null || true
   userdel "$SI_USER" 2>/dev/null || true
   for g in "$USE_GROUP" ampisignin-use; do
@@ -102,6 +102,13 @@ echo "==> systemd units"
 # The socket is only restarted when its unit changed: while it listens, nobody else can take the port.
 socket_changed=0
 cmp -s "$SRC_DIR/deploy/ampi-phone.socket" /etc/systemd/system/ampi-phone.socket || socket_changed=1
+vault_changed=0
+cmp -s "$SRC_DIR/deploy/ampi-phone-vault.socket" /etc/systemd/system/ampi-phone-vault.socket || vault_changed=1
+signin_changed=0
+cmp -s "$SRC_DIR/deploy/ampi-signin.socket" /etc/systemd/system/ampi-signin.socket || signin_changed=1
+# There at every boot, before the gateway's first start: the sign-in service's view of /run is fixed when it starts.
+echo 'd /run/ampi-phone-vault 0755 root root' > /etc/tmpfiles.d/ampi-phone.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/ampi-phone.conf
 install -m 644 "$SRC_DIR/deploy/ampi-phone.socket" /etc/systemd/system/ampi-phone.socket
 for f in ampi-phone.service ampi-phone-vault.socket ampi-signin.socket ampi-signin.service; do
   install -m 644 "$SRC_DIR/deploy/$f" "/etc/systemd/system/$f"
@@ -111,6 +118,8 @@ if compgen -G "$CONF_DIR/devices/*.json" >/dev/null; then
   systemctl enable ampi-phone.socket >/dev/null 2>&1
   if [[ $socket_changed == 1 ]]; then
     systemctl stop ampi-phone.service ampi-phone.socket 2>/dev/null || true
+  elif [[ $vault_changed == 1 ]]; then
+    systemctl stop ampi-phone-vault.socket 2>/dev/null || true  # (the service's restart below starts it as it is now)
   fi
   systemctl start ampi-phone.socket
   systemctl restart ampi-phone.service
@@ -123,6 +132,7 @@ else
 fi
 # It listens only on a Unix socket; without a paired phone it says so.
 systemctl stop ampi-signin.service 2>/dev/null || true
+if [[ $signin_changed == 1 ]]; then systemctl stop ampi-signin.socket 2>/dev/null || true; fi
 systemctl enable --now ampi-signin.socket >/dev/null 2>&1
 systemctl is-active --quiet ampi-signin.socket || { echo "ampi-signin.socket isn't listening" >&2; exit 1; }
 # Group membership only applies to new processes.
