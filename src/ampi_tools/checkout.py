@@ -93,7 +93,7 @@ CURRENCY_CODES = {"EUR", "USD", "GBP", "SEK", "NOK", "DKK", "PLN", "CHF", "CZK",
 # "kr" stays "KR" (Swedish, Norwegian, Danish, Icelandic krona all print as kr): the daemon maps it to the card's.
 SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP", "kr": "KR", "zł": "PLN", "CA$": "CAD", "C$": "CAD", "A$": "AUD",
            "AU$": "AUD", "US$": "USD", "NZ$": "NZD"}
-_CUR = r"(?:CA|AU|US|NZ|A|C)\$|€|\$|£"
+_CUR = r"(?:CA|AU|US|NZ|A|C)\$|€|(?<![^\W\d_])\$|£"
 CONFIRMATION = re.compile(r"order|confirm|thank|kiitos|tilaus|vahvist", re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 # The same as HOST_RE in ampi_phone/signin.py: the sites a login can be saved for.
@@ -114,14 +114,16 @@ PAY_HOST = re.compile(r"(^|[./])(stripe|adyen|braintreegateway|paypal|paypalobje
 PAGE_WORDS = frozenset({"title", "text", "label", "texts", "around", "options", "selected", "risky_checked", "checked", "url", "href",
                         "dest", "name", "id", "ident", "value", "confirmation", "error"})
 _SP = " \u00a0\u2007\u2009\u202f"  # spaces that group digits ("1 234,00")
-_CODE = r"\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr|zł)\b"
-# The whole run of digits and whatever may separate them (norm_amount says what it is, or that it can't be read): a piece of
-# a number must never be taken for the amount.
-AMOUNT = re.compile(
-    rf"(?P<pre>{_CUR}|{_CODE})?\s?"
-    rf"(?P<num>(?<!\d)(?<!\d[.,:'’·])(?:(?<![\d.,:'’·])[.,'’·])?"
-    rf"(?:\d{{1,3}}(?:[{_SP}]\d{{3}})+(?:[.,:'’·]\d+)*(?!\d)|\d+(?:[.,:'’·]\d+)*))"
-    rf"\s?(?P<post>{_CUR}|{_CODE})?")
+_CODE = r"(?<![^\W\d_])(?i:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr|zł|euros?)(?![^\W\d_])"
+# A whole run of digits and whatever may separate them (norm_amount says what it is, or that it can't be read): a piece of a
+# number must never be taken for the amount. (A tab is the next cell of a table.)
+RUN = re.compile(r"\d(?:\d|(?:[^\S\t\n]|[.,'’‘´`·˙，．٫٬:])+(?=\d))*")
+PRE_CUR = re.compile(rf"({_CUR}|{_CODE})\)?\s*:?\s*$")
+POST_CUR = re.compile(rf"(?:[.,][-–—]{{1,2}})?\s*\(?({_CUR}|{_CODE})")
+NOT_MONEY = re.compile(r"\s*(?:%|(?:kg|gr?|km|c?m|mm|min|hrs?|h|hours?|days?|nights?|items?|pcs|pieces?|points?|pts|products?|articles?|"
+                       r"persons?|people|guests?|adults?|tickets?|seats?|reviews?|tuotetta|tuotteita|kpl|yötä|henkilöä|artikel|st|stk|"
+                       r"товар\w*|шт)\b)", re.I)
+DATE_OR_TIME = re.compile(r"\d{1,2}\.(?:0?\d|1[0-2])\.(?:20)?\d\d|\d{1,2}:\d\d")
 CAPTCHA_FRAME = re.compile(r"hcaptcha\.com/captcha/.*frame=challenge|recaptcha/(api2|enterprise)/bframe|"
                            r"challenges\.cloudflare\.com|captcha-delivery\.com|arkoselabs\.com|funcaptcha", re.I)
 THREEDS_FRAME = re.compile(r"3ds|threeds|three-d|/acs\b|acs\.|/challenge|authenticat", re.I)
@@ -182,28 +184,49 @@ def norm_amount(num: str) -> str | None:
     return f"{int(whole)}.{(frac or '0').ljust(2, '0')}"
 
 
+def read_amounts(line: str, start: int = 0) -> list[tuple[int, str, str]]:
+    """(where it begins, the amount or "unreadable (…)", its currency or "?") for what may be money in a line."""
+    out = []
+    for k, m in enumerate(RUN.finditer(line, start)):
+        if k >= 100:  # no honest line
+            return [*out, (m.start(), "unreadable (many numbers)", "?")]
+        num, off = m.group(), max(0, m.start() - 40)
+        before, after = line[off:m.start()], line[m.end():m.end() + 40]
+        dot = before[-1:] in (".", ",", "'", "’", "·") and not (before[-2:-1].isalpha() or before[-2:-1] == ".")  # ".50"
+        pre, post = PRE_CUR.search(before[:-1] if dot else before), POST_CUR.match(after)
+        head, tail = before[:pre.start()] if pre else before, after[post.end():] if post else after
+        glued = (not pre and before[-1:].isalpha()) or (not post and after[:1].isalpha())
+        times = re.search(r"(?<![^\W\d_])[x×*]\s*$", head) or re.match(r"\s*[x×*]\s*\d", tail)
+        names = [c.group(1) for c in (pre, post) if c]
+        if names:
+            cur = {SYMBOLS.get(c) or SYMBOLS.get(c.lower()) or ("EUR" if c.lower().startswith("eur") else c.upper()) for c in names}
+            amount = None if dot or glued or times or len(cur) > 1 else norm_amount(num)
+            out.append((off + len(head), amount or f"unreadable ({num[:20]})", sorted(cur)[0]))
+        elif dot or not (NOT_MONEY.match(after) or re.fullmatch(r"\d{1,2}", num) or DATE_OR_TIME.fullmatch(num) or glued and num.isdigit()):
+            out.append((off + len(head), f"unreadable ({num[:20]})", "?"))
+    return out
+
+
 def extract_totals(text: str, words: "re.Pattern | None" = None) -> list[dict]:
-    """Amounts on lines that say total/summa/…, with their currency (best effort; for the approval's 'page says')."""
+    """Amounts on lines that say total/summa/…, with their currency, for the approval's 'page says' and for `pay`. Where the
+    line has none, the next one counts, if it is only an amount. What can't be read for sure says so."""
     out: list[dict] = []
     lines = text.splitlines()[:3000]
     for i, line in enumerate(lines):
         word = (words or TOTAL_WORDS).search(line)
         if not word:
             continue
-        for candidate in (line[word.end():], lines[i + 1] if i + 1 < len(lines) else ""):
-            found = False
-            for m in AMOUNT.finditer(candidate):
-                cur = m.group("pre") or m.group("post")
-                if not cur:
-                    continue
-                amount = norm_amount(m.group("num")) or f"unreadable ({m.group('num')[:20]})"
-                cur = SYMBOLS.get(cur, cur.upper())
-                item = {"amount": amount, "currency": cur, "label": word.group(1).lower()}
-                if item not in out:
-                    out.append(item)
-                found = True
-            if found:
-                break
+        found = [(line[word.start():min(at, word.start() + 200)], amount, cur) for at, amount, cur in read_amounts(line, word.end())]
+        if not found:
+            after = next((x for x in lines[i + 1:i + 4] if x.strip()), "")
+            for at, amount, cur in read_amounts(after):
+                alone = not re.search(r"[^\W\d_]", after[:at])
+                if alone or cur != "?":
+                    found.append((f"{line[word.start():word.start() + 200]} {after[:min(at, 200)]}", amount if alone or amount.startswith("un") else f"unreadable ({amount})", cur))
+        for label, amount, cur in found:
+            item = {"amount": amount, "currency": cur, "label": re.sub(r"\s+", " ", label).strip(" :(-–—.").lower()[:80]}
+            if item not in out:
+                out.append(item)
         if len(out) >= 50:
             break
     return out

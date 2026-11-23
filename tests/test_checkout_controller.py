@@ -708,19 +708,66 @@ def test_bad_requests():
     ("Total 1'234.50 CHF", [("1234.50", "CHF")]),
     ("Total 1.234,56 €", [("1234.56", "EUR")]),
     ("Total 1.234 €", [("1234.00", "EUR")]),
-    ("Total 2 1234.00 €", [("1234.00", "EUR")]),
-    ("Total 10:30 12 €", [("12.00", "EUR")]),
     ("Total: 12.00 zł", [("12.00", "PLN")]),
     ("Total 120.00€.", [("120.00", "EUR")]),
+    ("Total:23.90 €", [("23.90", "EUR")]),
+    ("Total.......45.00 €", [("45.00", "EUR")]),
+    ("Total.45.00 €", [("45.00", "EUR")]),
+    ("Total 12,- kr", [("12.00", "KR")]),
+    ("Total CHF 12.–", [("12.00", "CHF")]),
+    ("Total €12/month", [("12.00", "EUR")]),
+    ("Total\t2\t50,00 €", [("50.00", "EUR")]),
+    ("Order total (EUR): 1,234.00\nShipping €4.90", [("1234.00", "EUR")]),
+    ("Total in EUR: 1234.00\nYou save €34.00", [("1234.00", "EUR")]),
+    ("Gesamt: 1.234,00 Euro\ninkl. MwSt.: 197,04 €", [("1234.00", "EUR")]),
+    ("Total €  1234.00\nVAT €200.00", [("1234.00", "EUR")]),
+    ("Total (2 items)\n\n€50.00", [("50.00", "EUR")]),
+    ("Total (120 items): \n50.00 EUR", [("50.00", "EUR")]),
+    ("Total for 24.11.2026 10:30 (2): €50", [("unreadable (24.11.2026 10:30)", "?"), ("50.00", "EUR")]),
+    ("Total on 24.11.2026: €50", [("50.00", "EUR")]),
+    ("Total incl. 24% VAT €50", [("50.00", "EUR")]),
+    ("Total points: 120 points", []),
+    ("A total of 12 people", []),
+    ("Total\nShipping €4.90", [("unreadable (4.90)", "EUR")]),
+    ("Total\nOrder 123456", []),
+    ("Total\n1234.00", [("unreadable (1234.00)", "?")]),
+    ("Total: 1234.00\nYou save €34.00", [("unreadable (1234.00)", "?")]),
+    ("Total R$ 1234.00\n€34.00", [("unreadable (1234.00)", "?")]),
+    ("Total 2 1234.00 €", [("unreadable (2 1234.00)", "EUR")]),
     ("Total 1,23,456 €", [("unreadable (1,23,456)", "EUR")]),
     ("Total 1234:50 kr", [("unreadable (1234:50)", "KR")]),
     ("Total 12·50 €", [("unreadable (12·50)", "EUR")]),
     ("Total €0.1234", [("unreadable (0.1234)", "EUR")]),
     ("Total 1,234,50 €", [("unreadable (1,234,50)", "EUR")]),
-    ("Total\n.50 €", [("unreadable (.50)", "EUR")]),
+    ("Total\n.50 €", [("unreadable (50)", "EUR")]),
+    ("Total €.50", [("unreadable (50)", "EUR")]),
+    ("Total 1,234 .50 €", [("unreadable (1,234 .50)", "EUR")]),
+    ("Total 1  234,00 €", [("unreadable (1  234,00)", "EUR")]),
+    ("Total 1\u00a0 234,00 €", [("unreadable (1\u00a0 234,00)", "EUR")]),
+    ("Total 1\u200a234,00 €", [("unreadable (1\u200a234,00)", "EUR")]),
+    ("Total 1\u2003234,00 €", [("unreadable (1\u2003234,00)", "EUR")]),
+    ("Total € 1‘234.50", [("unreadable (1‘234.50)", "EUR")]),
+    ("Total € 1´234.50", [("unreadable (1´234.50)", "EUR")]),
+    ("Total €1，234.00", [("unreadable (1，234.00)", "EUR")]),
+    ("Total €1 23 456", [("unreadable (1 23 456)", "EUR")]),
+    ("Total €2.5k", [("unreadable (2.5)", "EUR")]),
+    ("Total €12 99", [("unreadable (12 99)", "EUR")]),
+    ("Total 1.234 00 €", [("unreadable (1.234 00)", "EUR")]),
+    ("Total 3 x €40.00", [("unreadable (40.00)", "EUR")]),
+    ("Total €40.00 x 3", [("unreadable (40.00)", "EUR")]),
+    ("Total EUR 5 USD", [("unreadable (5)", "EUR")]),
 ])
 def test_extract_totals(text, expected):
     assert [(t["amount"], t["currency"]) for t in co.extract_totals(text)] == expected
+
+
+def test_totals_on_a_hostile_page_do_not_take_long():
+    import time
+    t0 = time.monotonic()
+    for text in ("Total " + "1 € " * 15000, "Total " + "1." * 30000, "Total 1" + " " * 60000, "Total €1\n" * 3000, "Total " + "x 5" * 20000):
+        co.extract_totals(text)
+    assert time.monotonic() - t0 < 5
+    assert co.extract_totals("Total " + "1 € " * 150)[-1]["currency"] == "?"
 
 
 def test_origin_of():
