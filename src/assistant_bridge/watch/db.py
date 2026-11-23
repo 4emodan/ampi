@@ -197,13 +197,14 @@ class WatchDB:
             " AND test=0", (profile, name, start)).fetchone()
         return dict(row)
 
-    def failed_streak(self, profile: str, name: str, since: str | None = None) -> int:
-        """Failed runs in a row (retry attempts don't count), only since `since` (the last resume or new version)."""
+    def failed_streak(self, profile: str, name: str, since: str | None = None,
+                      waiting: bool = False) -> int:
+        """Failed runs in a row (retry attempts don't count unless `waiting`), only since `since` (the last resume or new version)."""
         n = 0
         for r in self.db.execute("SELECT status FROM wt_runs WHERE profile=? AND name=? AND test=0 AND status IN "
-                                 "('ok', 'stopped', 'failed') AND started >= ? ORDER BY started DESC LIMIT 20",
-                                 (profile, name, since or "")):
-            if r["status"] != "failed":
+                                 "('ok', 'stopped', 'failed', ?) AND started >= ? ORDER BY started DESC, rowid DESC LIMIT 100",
+                                 (profile, name, "retrying" if waiting else "failed", since or "")):
+            if r["status"] not in ("failed", "retrying"):
                 break
             n += 1
         return n

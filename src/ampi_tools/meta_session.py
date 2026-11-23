@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import getpass
+import hashlib
 import json
 import logging
 import os
@@ -268,6 +269,7 @@ class SessionAuth:
         self.path = path
         self.notify = notify
         self.clock = clock
+        self._stops: dict[tuple, dict] = {}  # stops of a session, in memory before anything touches the file
         for v in (self.load().get("cookies") or {}).values():
             register_secret(v if isinstance(v, str) else None)
 
@@ -326,43 +328,157 @@ class SessionAuth:
                             "again")
         return {"id": uid, "username": name}
 
+    # --- stops: in memory first, then a marker (no lock), then the session file -------------------------------
+
+    def marker(self, session: tuple | None = None, kind: str = "paused") -> Path:
+        """Stands for a stop the session file doesn't hold (yet). Named after the session, so it can't stop another one;
+        its mere existence counts, even empty."""
+        key = hashlib.sha256(json.dumps(identity(self.load()) if session is None else session).encode()).hexdigest()[:16]
+        return self.path.with_name(f"{self.path.name}.{'stop' if kind == 'paused' else 'slow'}-{key}")
+
+    def _read_marker(self, session: tuple, kind: str) -> dict | None:
+        m = self.marker(session, kind)
+        try:
+            raw, at = m.read_text(), m.stat().st_mtime
+        except OSError:
+            return None
+        try:
+            got = json.loads(raw)
+            return {"kind": kind, "reason": str(got["reason"]), "at": float(got["at"]), "until": float(got["until"])}
+        except (ValueError, TypeError, KeyError):
+            return {"kind": kind, "reason": "unknown", "at": at, "until": at + COOLDOWN}
+
+    def note(self, kind: str, reason: str, session: tuple | None = None) -> dict | None:
+        """A stop, effective from now on whatever happens to the files. Tells the owner (once)."""
+        d = self.load()
+        session = identity(d) if session is None else session
+        if d and identity(d) != session:
+            return None  # a late reply to a session that was replaced
+        if d.get("state") == "paused":
+            return None
+        old = self._active(d, session)
+        if old is not None and (old["kind"] == "paused" or kind == "cooldown"):
+            return old
+        at = self.clock()
+        stop = {"kind": kind, "reason": reason, "at": at, "until": at + COOLDOWN, "session": session, "saved": False,
+                "noticed": kind == "cooldown" and float(d.get("cooldown_until") or 0) > at}
+        self._stops[session] = stop
+        try:
+            fd = os.open(self.marker(session, kind), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps({k: stop[k] for k in ("reason", "at", "until")}))
+        except OSError as e:
+            log.warning("couldn't write the stop marker of the %s session (%s)", self.s.name, type(e).__name__)
+        self.tell(stop)
+        return stop
+
+    def tell(self, stop: dict) -> None:
+        if stop["noticed"]:
+            return
+        try:
+            (self.paused_notice if stop["kind"] == "paused" else lambda _: self.cooling_notice())(stop["reason"])
+            stop["noticed"] = True
+        except Exception as e:  # noqa: BLE001 - tried again before the next request
+            log.warning("couldn't tell the owner about the %s stop (%s)", self.s.name, type(e).__name__)
+
+    def _active(self, d: dict, session: tuple | None = None) -> dict | None:
+        """The stop that holds for this session (memory, else a marker left by an earlier process)."""
+        if not d:  # unreadable right now: whatever stopped last still holds
+            return next(reversed(self._stops.values()), None)
+        session = identity(d) if session is None else session
+        for key in [k for k in self._stops if k != identity(d)]:
+            del self._stops[key]
+        stop = self._stops.get(session)
+        resumed = float(d.get("resumed_at") or 0)
+        if stop is None:
+            for kind in ("paused", "cooldown"):
+                found = self._read_marker(session, kind)
+                if found is None:
+                    continue
+                if resumed > found["at"]:
+                    with contextlib.suppress(OSError):
+                        self.marker(session, kind).unlink()
+                    continue
+                stop = self._stops[session] = {**found, "session": session, "saved": False, "noticed": True}
+                break
+        if stop is not None and (resumed > stop["at"] or (
+                stop["saved"] and stop["noticed"] and (stop["kind"] == "paused" or stop["until"] <= self.clock()))):
+            # resumed, or the file itself holds it (or it's over): the file decides from here on
+            del self._stops[session]
+            return None
+        return stop
+
+    def save_stop(self, stop: dict) -> bool:
+        """Puts a stop into the session file; True when the file holds it (or no longer needs to)."""
+        def change(d: dict) -> bool:
+            if d.get("state") == "paused" or float(d.get("resumed_at") or 0) > stop["at"]:
+                return False
+            if stop["kind"] == "paused":
+                d.update(state="paused", paused_reason=stop["reason"], paused_at=stop["at"])
+            else:
+                d["cooldown_until"] = max(float(d.get("cooldown_until") or 0), stop["until"])
+            return True
+
+        try:
+            if not self._change(stop["session"], change) and not self.load() and self.path.exists():
+                return False  # unreadable just now
+            with contextlib.suppress(FileNotFoundError):
+                self.marker(stop["session"], stop["kind"]).unlink()
+        except (ToolError, OSError) as e:
+            log.warning("couldn't save the %s stop yet (%s)", self.s.name, type(e).__name__)
+            return False
+        stop["saved"] = True
+        return True
+
+    def unsettled(self) -> list[dict]:
+        stop = self._active(self.load())
+        return [stop] if stop is not None and not (stop["saved"] and stop["noticed"]) else []
+
+    def stop_text(self, stop: dict) -> str:
+        if stop["kind"] == "paused":
+            return self.paused_text()
+        return f"{self.s.name} asked to slow down; nothing is sent until that is recorded. Don't try another way."
+
+    def stopped(self, session: tuple) -> bool:
+        """This very session is paused."""
+        d = self.load()
+        if identity(d) != session:
+            return False
+        stop = self._active(d)
+        return d.get("state") == "paused" or (stop is not None and stop["kind"] == "paused")
+
     def state(self) -> str:
         d = self.load()
-        if d.get("state") == "paused":
+        stop = self._active(d)
+        if d.get("state") == "paused" or (stop and stop["kind"] == "paused"):
             return "paused"
-        if float(d.get("cooldown_until") or 0) > self.clock():
+        if float(d.get("cooldown_until") or 0) > self.clock() or stop:
             return "cooldown"
         return "ok" if self.configured() else "missing"
 
     def check(self) -> None:
         """Raises while paused or cooling down (the file is shared: the watchers stop too)."""
         d = self.load()
-        if d.get("state") == "paused":
+        stop = self._active(d)
+        if d.get("state") == "paused" or (stop and stop["kind"] == "paused"):
             raise ToolError(self.paused_text())
-        left = float(d.get("cooldown_until") or 0) - self.clock()
+        left = max(float(d.get("cooldown_until") or 0), stop["until"] if stop else 0) - self.clock()
         if left > 0:
             raise ToolError(f"{self.s.name} asked to slow down; paused for {int(left // 60) + 1} more minute(s). "
                             "Don't try another way.")
 
     def paused_text(self) -> str:
         """Why it's paused, as far as that's known (never text from the service)."""
-        reason = self.load().get("paused_reason")
+        d = self.load()
+        reason = d.get("paused_reason") if d.get("state") == "paused" else (self._active(d) or {}).get("reason")
         text = UA_TEXT if reason == "user_agent" else NEUTRAL_TEXT if reason in NEUTRAL else None
         return text.format(name=self.s.name, command=self.s.command) if text else self.s.paused_text
 
     def pause(self, reason: str, session: tuple | None = None) -> None:
         """Until the owner resumes. One Telegram notice, on the change only."""
-        if self.mark_paused(reason, session):
-            self.paused_notice(reason)
-
-    def mark_paused(self, reason: str, session: tuple | None = None) -> bool:
-        def change(d: dict) -> bool:
-            if d.get("state") == "paused":
-                return False
-            d.update(state="paused", paused_reason=reason, paused_at=self.clock())
-            return True
-
-        return self._change(session, change)
+        stop = self.note("paused", reason, session)
+        if stop is not None:
+            self.save_stop(stop)
 
     def paused_notice(self, reason: str) -> None:
         log.warning("%s session paused (%s)", self.s.name, reason)
@@ -371,22 +487,9 @@ class SessionAuth:
             self.notify(notice.format(name=self.s.name, command=self.s.command))
 
     def cool_down(self, session: tuple | None = None) -> None:
-        if self.mark_cooling(session):
-            self.cooling_notice()
-
-    def mark_cooling(self, session: tuple | None = None) -> bool:
-        """True when it wasn't cooling down already."""
-        already = []
-
-        def change(d: dict) -> bool:
-            if d.get("state") == "paused":
-                return False
-            if float(d.get("cooldown_until") or 0) > self.clock():
-                already.append(True)
-            d["cooldown_until"] = self.clock() + COOLDOWN
-            return True
-
-        return self._change(session, change) and not already
+        stop = self.note("cooldown", "slow_down", session)
+        if stop is not None:
+            self.save_stop(stop)
 
     def cooling_notice(self) -> None:
         log.warning("%s asked to slow down; pausing reads for an hour", self.s.name)
@@ -409,15 +512,23 @@ class SessionAuth:
 
     def resume(self) -> None:
         def change(d: dict) -> bool:
-            d.update(state="ok", cooldown_until=0, resumed_at=self.clock())  # page tokens are fetched again
-            d.pop("paused_reason", None)
+            stops = [m["at"] for k in ("paused", "cooldown") if (m := self._read_marker(identity(d), k))]
+            # Later than anything that stopped this session, so no marker or other process can bring it back.
+            d.update(state="ok", cooldown_until=0, resumed_at=max([self.clock()] + [at + 0.001 for at in stops]))
+            d.pop("paused_reason", None)  # (a new resumed_at also means fetching the page tokens again)
             return True
 
         if not self._change(None, change):
             raise ToolError(f"no {self.s.name} session saved")
+        for kind in ("paused", "cooldown"):
+            with contextlib.suppress(OSError):
+                self.marker(kind=kind).unlink()
 
     def forget(self) -> bool:
         with file_lock(self.path):
+            for kind in ("paused", "cooldown"):
+                with contextlib.suppress(OSError):
+                    self.marker(kind=kind).unlink()
             try:
                 self.path.unlink()
                 return True
@@ -432,7 +543,8 @@ class SessionAuth:
         who = f"@{d.get('username', '?')}"
         saved = time.strftime("%Y-%m-%d", time.gmtime(float(d.get("saved_at") or 0)))
         if st == "paused":
-            return f"{self.s.name} web session: PAUSED ({d.get('paused_reason', '?')}), {who}, saved {saved}: " \
+            reason = d.get("paused_reason") or (self._active(d) or {}).get("reason", "?")
+            return f"{self.s.name} web session: PAUSED ({reason}), {who}, saved {saved}: " \
                    f"`ampi-tools {self.s.command} --resume`"
         return f"{self.s.name} web session: {'cooling down (rate limit)' if st == 'cooldown' else 'on'}, {who}, " \
                f"saved {saved}"
@@ -552,6 +664,11 @@ _LOGIN_PAGE = re.compile(r'''"is_logged_in":false|id="loginForm"|<(?:a|form)\b[^
 # Whole phrases only: "This link has expired" or "Blog in maintenance" are not about the login.
 _LOGIN_RE = re.compile(r"\bnot logged in\b|\blog ?in (?:is )?required\b|\bplease log ?in\b|\b(?:login|session) (?:has )?"
                        r"expired\b|\byou must log ?in\b|\blog in to continue\b", re.I)
+# A page that is no data but sends a browser on to a login or challenge page (by script or refresh).
+_REDIRECT_PAGE = re.compile(r'''(?:\blocation(?:\.href)?\s*=|\blocation\.(?:replace|assign)\s*\()\s*["'`][^"'`]*'''
+                            r'''(?:/accounts/login/?["'`?#]|/challenge/)'''
+                            r'''|<meta\b(?=[^>]*\brefresh\b)[^>]*\burl\s*=\s*["']?[^"'>]*(?:/accounts/login/?["'?#>\s]|/challenge/)''',
+                            re.I)
 HOME = {"instagram": "ig.home", "threads": "th.home"}
 
 
@@ -589,6 +706,7 @@ class WebClient:
         self._tokens: dict[str, Any] = {}
         self._token_lock = asyncio.Lock()  # one token fetch at a time; waiting callers share its result
         self._stale_key: tuple = ()
+        self._saving: set[asyncio.Task] = set()
         self._empty = 0  # empty 200 replies in a row
         self._stale: list[dict] = []  # token sets refused in a row (several callers may have used the same set)
 
@@ -608,8 +726,7 @@ class WebClient:
                     self._tokens = {}
                 if len(self._stale) >= 2:  # fresh tokens refused too
                     self._stale.clear()
-                    if await asyncio.to_thread(self.auth.mark_paused, "stale_tokens"):
-                        self.auth.paused_notice("stale_tokens")
+                    await self._pause("stale_tokens", identity(self.auth.load()))
                     raise ToolError(self.auth.paused_text()) from None
                 if e.cls != "read":  # a change is never sent twice
                     raise ToolError(f"{self.s.name} refused the page tokens; nothing was changed. Ask again in a "
@@ -644,6 +761,7 @@ class WebClient:
             cls, friendly = d.cls, d.name
         if allowed(ep.method, ep.host, path, d.doc_id if d else None, friendly) != name:
             raise ToolError(f"refusing {self.s.name} request outside the allow-list")
+        await self._settle()
         self.auth.check()
         cookies, session = self.auth.snapshot()
         tokens: dict = {}
@@ -665,6 +783,7 @@ class WebClient:
             wait = self._last + self.gap - self._clock()
             if wait > 0:
                 await self._sleep(wait)
+            await self._settle()
             self.auth.check()
             if not self.auth.same(session):
                 raise ToolError(f"the {self.s.name} session was replaced meanwhile; nothing was sent, ask again")
@@ -690,14 +809,27 @@ class WebClient:
                 body = await self._body(resp)
             finally:
                 await resp.aclose()
-        return await self._answer(ep, status, body, cls, d, tokens, session)
+            # Still under the lock: the next request waits until this reply's stop signals count.
+            return await self._answer(ep, status, body, cls, d, tokens, session)
+
+    async def _settle(self) -> None:
+        """Nothing is sent while a stop isn't in the session file (or the owner wasn't told)."""
+        for stop in self.auth.unsettled():
+            self.auth.tell(stop)
+            if not stop["saved"] and not await asyncio.to_thread(self.auth.save_stop, stop):
+                raise ToolError(self.auth.stop_text(stop))
 
     async def _pause(self, reason: str, session: tuple) -> None:
-        try:
-            if await asyncio.to_thread(self.auth.mark_paused, reason, session):
-                self.auth.paused_notice(reason)
-        except ToolError:
-            log.warning("%s session should be paused (%s), but its file is busy", self.s.name, reason)
+        await self._record(self.auth.note("paused", reason, session))
+
+    async def _record(self, stop: dict | None) -> None:
+        """Saves a stop that already holds; goes on even if the caller is cancelled."""
+        if stop is None or stop["saved"]:
+            return
+        task = asyncio.create_task(asyncio.to_thread(self.auth.save_stop, stop))
+        self._saving.add(task)
+        task.add_done_callback(self._saving.discard)
+        await asyncio.shield(task)
 
     async def _stop(self, reason: str, session: tuple, cls: str = "read") -> None:
         await self._pause(reason, session)
@@ -734,7 +866,7 @@ class WebClient:
                 session: tuple) -> Any:
         name = self.s.name
         maybe = "" if cls == "read" else MAYBE
-        if self.auth.same(session) and self.auth.load().get("state") == "paused":  # e.g. its cookie was deleted just now
+        if self.auth.stopped(session):  # e.g. its cookie was deleted just now
             raise ToolError(self.auth.paused_text() + maybe)
         if status == 429 and isinstance(body, str):
             await self._slow_down(cls, session)
@@ -795,8 +927,7 @@ class WebClient:
 
     async def _slow_down(self, cls: str, session: tuple) -> None:
         if cls == "read":
-            if await asyncio.to_thread(self.auth.mark_cooling, session):
-                self.auth.cooling_notice()
+            await self._record(self.auth.note("cooldown", "slow_down", session))
             raise ToolError(f"{self.s.name} asked to slow down; no requests for an hour. Don't try another way.")
         await self._stop("feedback_required", session, cls)  # a refused change: stop until the owner looks at the account
 
@@ -844,7 +975,8 @@ class WebClient:
             if not dtsg or not lsd:
                 # A 200 page without the tokens: stop (paused, so this is never fetched again in a loop), and name a
                 # cause only when the page shows it.
-                await self._stop("login_required" if any(m in page for m in _LOGIN_MARKERS) else
+                await self._stop("login_required" if any(m in page for m in _LOGIN_MARKERS)
+                                 or _REDIRECT_PAGE.search(page.replace("\\/", "/")) else
                                  "user_agent" if _UA_RE.search(page) else "no_page_tokens", session)
             fb_dtsg, lsd_token = dtsg.group(1), lsd.group(1)
             jazoest = "2" + str(sum(ord(c) for c in fb_dtsg))
@@ -882,7 +1014,7 @@ def _problem(status: int, data: Any, text: str, kind: str = "json") -> str | Non
         return "slow_down"
     if kind == "graphql" and 1357004 in codes:
         return "stale_tokens"
-    if data is None and _LOGIN_PAGE.search(text):
+    if data is None and (_LOGIN_PAGE.search(text) or _REDIRECT_PAGE.search(text.replace("\\/", "/"))):
         return "challenge"
     return None
 
@@ -993,7 +1125,7 @@ async def store_session(home: Path, service: WebService, cookies: dict[str, str]
             if own:
                 await http.aclose()
         data = auth.load()
-        if data.get("state") == "paused":
+        if auth.state() == "paused":
             raise ToolError(service.paused_text)
         data.update(user_id=who["id"], username=who["username"], saved_at=time.time(), state="ok")
         auth.save(data)
@@ -1001,7 +1133,7 @@ async def store_session(home: Path, service: WebService, cookies: dict[str, str]
             os.replace(trial, final)
         return data
     finally:
-        for p in (trial, trial.with_name(trial.name + ".lock")):
+        for p in (trial, *trial.parent.glob(trial.name + ".*")):
             with contextlib.suppress(OSError):
                 p.unlink()
 
