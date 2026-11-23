@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS social_messages (
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE TABLE IF NOT EXISTS social_texts (hash TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS settings (
+    profile TEXT NOT NULL,
+    key     TEXT NOT NULL,
+    value   TEXT NOT NULL,
+    PRIMARY KEY (profile, key)
+);
 CREATE TABLE IF NOT EXISTS offsets (
     profile TEXT PRIMARY KEY,
     next_update_id INTEGER NOT NULL
@@ -241,6 +247,18 @@ class Store:
             " ON CONFLICT(profile, name) DO UPDATE SET state=excluded.state",
             (profile, name, json.dumps(state)),
         )
+        self._db.commit()
+
+    def get_setting(self, profile: str, key: str) -> str | None:
+        row = self._db.execute("SELECT value FROM settings WHERE profile=? AND key=?", (profile, key)).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, profile: str, key: str, value: str | None) -> None:
+        if value is None:
+            self._db.execute("DELETE FROM settings WHERE profile=? AND key=?", (profile, key))
+        else:
+            self._db.execute("INSERT INTO settings (profile, key, value) VALUES (?, ?, ?) "
+                             "ON CONFLICT (profile, key) DO UPDATE SET value=excluded.value", (profile, key, value))
         self._db.commit()
 
     def get_offset(self, profile: str) -> int | None:

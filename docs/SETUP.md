@@ -52,7 +52,9 @@ sudo systemctl start claude-assistant
 journalctl -u claude-assistant -f
 ```
 
-Send your bot a message. Commands: `/new [title]`, `/reset`, `/cancel`, `/model [name|default]`, `/status`, `/help`.
+Send your bot a message. Commands: `/new [title]`, `/reset`, `/cancel`, `/model [name|default]`, `/persona`, `/status`, `/help`.
+
+`/persona butler` (or your own words, e.g. `/persona dry humour, in Russian, at most five sentences`) sets the tone and character of the replies; `/persona` shows what is set and the ready-made ones, `/persona off` goes back. Only your own command in the private chat changes it, and it changes only how Ampi talks.
 
 ## 6. Groups (optional)
 

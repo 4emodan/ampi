@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import chatlog
+from . import chatlog, persona
 from .chatlog import CHATS_DIR
 from .claude_runner import ClaudeRunner, RunResult
 from .config import Group, Profile, Watcher
@@ -47,6 +47,7 @@ COMMANDS = [
     {"command": "reset", "description": "Forget this conversation's context"},
     {"command": "cancel", "description": "Stop the current task"},
     {"command": "model", "description": "Show or set the model for this conversation"},
+    {"command": "persona", "description": "Tone and character of my replies"},
     {"command": "status", "description": "Show this conversation's status"},
     {"command": "watchers", "description": "List watchers (automations)"},
     {"command": "info", "description": "Personal info (masked) and site permissions"},
@@ -61,6 +62,7 @@ HELP_TEXT = (
     "/reset – forget this conversation's context\n"
     "/cancel – stop the current task\n"
     "/model [name|default] – show or change the model here\n"
+    "/persona – tone and character of my replies\n"
     "/status – session info and usage\n"
     "/watchers – your watchers; /watcher NAME – details and buttons\n"
     "/info – your personal info (masked) and which sites may fill it\n"
@@ -273,8 +275,9 @@ class ProfileBot:
         key = (chat_id, thread_id)
         text = (msg.get("text") or msg.get("caption") or "").strip()
 
-        if text.startswith("/") and "forward_origin" not in msg:
-            command, _, args = text[1:].partition(" ")
+        command = re.match(r"/(\S+)\s*(.*)", text, re.S) if "forward_origin" not in msg else None
+        if command is not None:
+            command, args = command.groups()
             command, _, target = command.partition("@")
             if target and self.username and target.lower() != self.username.lower():
                 return  # a command for another bot in the same group
@@ -353,7 +356,7 @@ class ProfileBot:
                 return
             for m, body in bodies if not social else ():
                 chatlog.append(log_dir, "Owner", body, chatlog.message_time(m))
-            system_prompt = self.system_prompt
+            system_prompt = self._system_prompt()
             if group is not None:
                 system_prompt += "\n\n" + self._group_prompt(group, title)
             # Every social turn until /new is kept apart, because the context holds text written by strangers (feeds,
@@ -476,7 +479,7 @@ class ProfileBot:
                     started=False,
                     model=self.profile.model,
                     allowed_tools=watcher_tools(watcher, self.profile),
-                    append_system_prompt=self.system_prompt + "\n\n" + self._watcher_prompt(watcher),
+                    append_system_prompt=self._system_prompt() + "\n\n" + self._watcher_prompt(watcher),
                     extra_args=self.profile.extra_args,
                     origin=f"watcher:{watcher.name}",
                 )
@@ -510,6 +513,10 @@ class ProfileBot:
             prefixed = replace(result, text=f"🔔 **{watcher.name}**\n\n{reply}")
             await self._deliver(chat_id, 0, prefixed)
             return result
+
+    def _system_prompt(self) -> str:
+        chosen = self.store.get_setting(self.profile.name, persona.KEY)
+        return self.system_prompt + ("\n\n" + persona.prompt(chosen) if chosen else "")
 
     def _watcher_prompt(self, watcher: Watcher) -> str:
         path = watcher.instructions_path(self.profile.workspace)
@@ -796,6 +803,29 @@ class ProfileBot:
         shown = model or self.profile.model or "Claude Code default"
         await self._send_text(chat_id, thread_id, f"Model for this conversation: {shown}", markdown=False)
 
+    async def _cmd_persona(self, chat_id: int, thread_id: int, args: str) -> None:
+        """Only the owner's own command sets it (nothing a run says or does can)."""
+        if chat_id != self.profile.owner_chat_id:
+            await self._send_text(chat_id, thread_id, "My persona is set in the private chat.", markdown=False)
+            return
+        name, text = self.profile.name, persona.clean(args)
+        if not text:
+            current = self.store.get_setting(name, persona.KEY)
+            await self._send_text(chat_id, thread_id, persona.describe(current), markdown=False)
+            return
+        if text.lower() in persona.OFF:
+            self.store.set_setting(name, persona.KEY, None)
+            await self._send_text(chat_id, thread_id, "Back to my default tone.", markdown=False)
+            return
+        text = persona.PRESETS.get(text.lower(), text)
+        if len(text) > persona.MAX:
+            await self._send_text(chat_id, thread_id, f"That's {len(text)} characters; at most {persona.MAX} fit. "
+                                  "Nothing changed.", markdown=False)
+            return
+        self.store.set_setting(name, persona.KEY, text)
+        await self._send_text(chat_id, thread_id, f"From the next message on: {persona.label(text)}.\n“{text}”\n"
+                              "/persona off – back to the default.", markdown=False)
+
     async def _cmd_info(self, chat_id: int, thread_id: int, args: str) -> None:
         if self.info_ui is None or chat_id != self.profile.owner_chat_id:
             await self._send_text(chat_id, thread_id, "Personal info is shown only in the private chat.", markdown=False)
@@ -842,6 +872,7 @@ class ProfileBot:
             f"Conversation: {conv.title or ('main chat' if thread_id == 0 else f'topic {thread_id}')}",
             f"Session: {conv.session_id[:8]}… ({'active' if conv.started else 'not started'})",
             f"Model: {conv.model or self.profile.model or 'Claude Code default'}",
+            f"Persona: {persona.label(self.store.get_setting(self.profile.name, persona.KEY))}",
             f"Social mode: {'on (Instagram/Threads, no web) until /new' if conv.social else 'off'}",
             f"Running now: {'yes' if (chat_id, thread_id) in self._running else 'no'}",
             f"Runs: {stats.runs} ({stats.failed} failed)",

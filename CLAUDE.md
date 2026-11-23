@@ -40,6 +40,7 @@ src/assistant_bridge/   the bridge (Python 3.11+, only dependency httpx)
   claude_runner.py      runs `claude -p --output-format json` (--session-id / --resume), strips API-key env vars
   text.py               Markdown -> Telegram HTML, message splitting
   bot.py                one ProfileBot per Telegram bot: routing, commands, attachments, group batches
+  persona.py            /persona: tone and character of replies, set only by the owner's command
   approvals.py          shows ampi-tools approval requests as Telegram buttons, sends back the answer
   watchers.py           checks Gmail/Todoist/Telegram/the clock and starts Claude runs (watchers/<name>.md)
   services.py           async client for the helper daemons' Unix sockets
