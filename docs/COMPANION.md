@@ -116,7 +116,7 @@ accessibility or notification-reading permission.
 
 ## Pairing: over the USB cable, nothing on the network
 
-1. `scripts/companion.ps1 -Pair`: `ampi-phone offer` (over SSH) gives the server's address, port and certificate
+1. `scripts/companion.ps1 -Pair`: the installed app must be byte for byte the one built on this PC; `ampi-phone offer` (over SSH) gives the server's address, port and certificate
    (public data); adb starts the pairing screen with it. Only adb can start that screen; it refuses while paired
    (unpair first, with the screen lock).
 2. The owner confirms on the phone; it makes its key and shows a code. The script fetches the phone's *public*

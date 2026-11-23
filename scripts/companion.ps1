@@ -28,7 +28,7 @@ function Invoke-Adb {
     $out
 }
 function Invoke-Server([string]$Command, [string]$In) {
-    if ($In) { $out = $In | & ssh $Server $Command } else { $out = & ssh $Server $Command }
+    if ($In) { $out = $In | & ssh $Server $Command } else { $out = & ssh -n $Server $Command }
     if ($LASTEXITCODE -ne 0) { throw "the server said no to: $Command $out" }
     $out
 }
@@ -37,16 +37,20 @@ if ($Install) {
     Invoke-Adb install -r $Apk | Out-Host
 }
 if ($Pair) {
+    # The app may have reached the phone some other way (a chat): it must be exactly the file built here.
+    $there = "$(Invoke-Adb shell -n pm path $pkg)".Trim() -replace '^package:', ''
+    $sum = ("$(Invoke-Adb shell -n sha256sum $there)".Trim() -split '\s+')[0]
+    if ($sum -ne (Get-FileHash -Algorithm SHA256 $Apk).Hash) { throw "the app on the phone isn't $Apk" }
     $offer = (Invoke-Server "ampi-phone offer") -join ""
     $p = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($offer)).Replace("+", "-").Replace("/", "_").TrimEnd("=")
     # Only adb may start this screen (it needs android.permission.DUMP).
-    $started = Invoke-Adb shell am start -W -n "$pkg/.PairActivity" --es offer $p
+    $started = Invoke-Adb shell -n am start -W -n "$pkg/.PairActivity" --es offer $p
     if ("$started" -match "Error|Exception") { throw "the pairing screen didn't open: $started" }
     Write-Host "Look at your phone and confirm the pairing there. Waiting (2 minutes)..."
     $cert = $null
     for ($i = 0; $i -lt 60 -and -not $cert; $i++) {
         Start-Sleep -Seconds 2
-        try { $r = (Invoke-Adb shell am broadcast -n "$pkg/.PairReceiver" -a "$pkg.CERT") -join " " }
+        try { $r = (Invoke-Adb shell -n am broadcast -n "$pkg/.PairReceiver" -a "$pkg.CERT") -join " " }
         catch { continue }  # the phone was busy: ask again
         if ($r -match 'result=1, data="([A-Za-z0-9+/=]+)"') { $cert = $Matches[1] }
         elseif ($r -match 'result=2') { throw "the phone is already paired: unpair it in the app first" }
