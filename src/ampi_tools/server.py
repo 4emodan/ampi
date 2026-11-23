@@ -263,6 +263,11 @@ class Daemon:
                     raise ToolError("ids must be numbers")
                 if self.tg_store:
                     self.tg_store.set_protected(ids, request.get("complete") is not False)
+                    bots = request.get("bots")
+                    if isinstance(bots, list) and all(isinstance(i, int) and not isinstance(i, bool) for i in bots):
+                        self.tg_store.add_own_bots(bots)
+                        with contextlib.suppress(ToolError):
+                            await tell_tg_reader(self.services)
                 return {"ok": True}
             raise ToolError(f"unknown command {cmd!r}")
         except ToolError as e:
@@ -1103,6 +1108,25 @@ async def refresh_meta_tokens(services: Services) -> None:
         await asyncio.sleep(6 * 3600)
 
 
+async def tell_tg_reader(services: Services) -> None:
+    """tg-reader keeps the bridge's own bot chats unreadable: they hold social-mode text."""
+    client = getattr(services.telegram_side, "client", None)
+    if client is not None:
+        social = any(c is not None and c.configured() for c in (services.igweb_client, services.thweb_client))
+        await client.tell_own_bots(social)
+
+
+async def keep_telling_tg_reader(services: Services) -> None:
+    while True:
+        try:
+            await tell_tg_reader(services)
+        except ToolError:
+            pass  # not installed or not running: it reads nothing without this
+        except Exception:
+            log.exception("telling tg-reader the bridge's bots failed")
+        await asyncio.sleep(60)
+
+
 def build_services(client: httpx.AsyncClient, home: Path) -> Services:
     services = Services()
     token = os.environ.get("TODOIST_TOKEN", "").strip()
@@ -1169,6 +1193,7 @@ async def _serve(home: Path) -> None:
                          "the outcome is unknown. Check before asking again.")
         daemon = Daemon(services, approvals, policy, systemd_main_pid_check(unit), keeper=Keeper(home / "watch.sqlite3"))
         refresher = asyncio.create_task(refresh_meta_tokens(services))  # noqa: F841 (runs for the daemon's life)
+        teller = asyncio.create_task(keep_telling_tg_reader(services))  # noqa: F841
         server = await serve_socket(daemon, socket_path())
         log.info("listening on %s", socket_path())
         async with server:

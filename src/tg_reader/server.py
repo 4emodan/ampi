@@ -164,6 +164,7 @@ async def _serve() -> None:
     deny = frozenset(int(x) for x in os.environ.get("TG_READER_DENY", "").replace(" ", "").split(",") if x)
     reader_obj = Reader(client, deny=deny)
     reader_obj.self_id = me.id
+    reader_obj.guard(Path.home() / "tg-reader-own-bots.json", required=writer_identity() is not None)
     server = await serve_socket(reader_obj, socket_path())
     log.info("listening on %s", socket_path())
     servers = [server]

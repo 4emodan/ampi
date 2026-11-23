@@ -94,6 +94,7 @@ class ApprovalRelay:
         self.ask = ask_fn
         self.interval = interval
         self.protected = protected
+        self.own_bots: list[int] = []  # every profile's bot (set by main)
         self._clock = clock or time.monotonic
         self._sent: set[int] = set()  # requests shown already in this process (never send one twice)
         self._confirm_keys: dict[int, set[str]] = {}  # request -> choices that need a second tap (high risk)
@@ -124,7 +125,8 @@ class ApprovalRelay:
         if self._protected_at is not None and not self._down and now - self._protected_at < PROTECT_EVERY:
             return
         ids, complete = self.protected()
-        resp = await self.ask(self.socket, {"cmd": "telegram.protect", "ids": ids, "complete": complete}, timeout=10)
+        resp = await self.ask(self.socket, {"cmd": "telegram.protect", "ids": ids, "complete": complete,
+                                            **({"bots": self.own_bots} if self.own_bots else {})}, timeout=10)
         if resp.get("ok"):
             # Incomplete (a Telegram watcher hasn't found its chat yet): try again in a minute.
             self._protected_at = now if complete else now - PROTECT_EVERY + 60
@@ -165,7 +167,8 @@ class ApprovalRelay:
                 continue  # 429 / network: try again on the next tick
             self._sent.add(approval_id)
             if item.get("social"):
-                self.bot.store.add_social_message(self.bot.profile.owner_chat_id, sent.get("message_id"))
+                self.bot.store.add_social_message(self.bot.profile.owner_chat_id, sent.get("message_id"),
+                                                  sent.get("text") or text)
             if isinstance(item.get("confirm_keys"), list):
                 self._confirm_keys[approval_id] = {k for k in item["confirm_keys"] if isinstance(k, str)}
             notified = await self.ask(
@@ -263,7 +266,9 @@ class ApprovalRelay:
         # A request from social mode quotes strangers (captions, names, comments): not in the logs later runs read.
         social = bool(resp.get("social")) or "Asked for by a social-mode conversation" in original \
             or self.bot.store.is_social_message(chat["id"], message.get("message_id"))
-        if not social:
+        if social:  # forwarded later, the answered request is recognised too
+            self.bot.store.add_social_message(chat["id"], message.get("message_id"), text)
+        else:
             log_dir = chatlog.conversation_dir(self.bot.profile.workspace, self.bot.profile.owner_chat_id, 0, None,
                                                None)
             chatlog.append(log_dir, "Approvals", text)

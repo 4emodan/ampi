@@ -8,11 +8,14 @@ the owner's own words. The client is duck-typed so tests can pass a fake.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import re
 import time
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 MAX_LIMIT = 2000
@@ -162,6 +165,24 @@ def format_message(msg: Any, chat_name: str | None = None, by_ampi: bool = False
     return "\n".join(lines)
 
 
+def forwarded_from(msg: Any) -> set[int]:
+    """Every account or chat id a forwarded message names as where it came from."""
+    out: set[int] = set()
+    fwd = getattr(msg, "forward", None) or getattr(msg, "fwd_from", None)
+    for f in (fwd, getattr(fwd, "original_fwd", None)):
+        for key in ("sender_id", "chat_id"):
+            v = getattr(f, key, None)
+            if isinstance(v, int):
+                out.add(v)
+        for key in ("from_id", "saved_from_peer", "saved_from_id", "sender", "chat"):
+            peer = getattr(f, key, None)
+            for attr in ("user_id", "id"):
+                v = getattr(peer, attr, None)
+                if isinstance(v, int):
+                    out.add(v)
+    return out
+
+
 class Reader:
     """All requests are served one at a time and rate-limited: Telegram's flood limits apply to the
     owner's whole account, so a looping or hijacked caller must not be able to get it restricted."""
@@ -178,6 +199,53 @@ class Reader:
         self._resolved: dict[str, int] = {}  # @username -> peer id, so repeat lookups cost nothing
         self.ampi_sent: set[tuple[int, int]] = set()  # (peer id, message id) the assistant sent (writer.py)
         self.self_id: int | None = None  # the account's own id (Saved Messages)
+        # The bridge's own bots: their chats with the owner hold social-mode replies, approval requests and message
+        # summaries (other people's text), which must not come back into runs that have the web.
+        self.own_bots: set[int] = set()
+        self.social = False        # a web session was configured at some point
+        self._told = True          # ampi-tools said which bots are its own (or there is no ampi-tools)
+        self._state: Path | None = None
+
+    # --- the bridge's own bots (told by ampi-tools through the write socket, remembered on disk) ---------------
+
+    def guard(self, path: Path, required: bool) -> None:
+        """`required`: ampi-tools is installed here, so nothing is read until it said which bots are the bridge's."""
+        self._state = path
+        try:
+            raw = json.loads(path.read_text())
+            bots = [int(b) for b in raw["bots"]]
+            self._apply(bots, raw["social"] is True)
+            self._told = True
+        except (OSError, ValueError, TypeError, KeyError):
+            self._told = not required
+
+    def _apply(self, bots: list[int], social: bool) -> None:
+        self.own_bots |= set(bots)  # never shrinks: an old bot's chat still holds its messages
+        self.social = self.social or social
+        self.deny = frozenset(self.deny | self.own_bots)
+
+    def set_own_bots(self, bots: list[int], social: bool) -> None:
+        before = (set(self.own_bots), self.social, self._told)
+        self._apply(bots, social)
+        self._told = True
+        if self._state is not None and before != (self.own_bots, self.social, True):
+            tmp = self._state.with_name(self._state.name + ".tmp")
+            tmp.write_text(json.dumps({"bots": sorted(self.own_bots), "social": self.social}))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, self._state)
+
+    def own_bots_active(self) -> bool:
+        return self._told and bool(self.own_bots)
+
+    def _own_text(self, msg: Any) -> bool:
+        """The message repeats something the bridge's bot sent (forwarded, by anyone, to anywhere)."""
+        return bool(self.own_bots & forwarded_from(msg))
+
+    def _format(self, msg: Any, **kw: Any) -> str:
+        if not self._own_text(msg):
+            return format_message(msg, **kw)
+        head = format_message(msg, **kw).split("\n", 1)[0]
+        return f"{head}\n(forwarded from Ampi's own chat: not shown)"
 
     def _by_ampi(self, peer_id: int | None, msg: Any) -> bool:
         peer = self.self_id if peer_id is None else peer_id
@@ -187,6 +255,9 @@ class Reader:
         """Never raises: errors come back as {"ok": False, "error": ...}."""
         async with self._lock:
             try:
+                if not self._told or (self.social and not self.own_bots):
+                    raise UserError("reading Telegram waits: Ampi's own bot isn't known yet, and its chat must stay "
+                                    "out (ampi-tools and claude-assistant tell it when they run)")
                 self._admit(request)
                 return await self._dispatch(request)
             except UserError as e:
@@ -370,7 +441,7 @@ class Reader:
         body = [header]
         if more:
             body.append(f"(limit {n} reached; for older ones run again with --before-id {messages[0].id})")
-        body += [format_message(m, by_ampi=self._by_ampi(peer_id, m)) for m in messages]
+        body += [self._format(m, by_ampi=self._by_ampi(peer_id, m)) for m in messages]
         return "\n\n".join(body)
 
     async def since(self, chat: str, after_id: Any = None, limit: int = SINCE_BATCH) -> dict:
@@ -387,7 +458,7 @@ class Reader:
         more = len(fetched) > limit
         messages = fetched[:limit]
         last_id = max([after] + [m.id for m in messages])
-        text = "\n\n".join(format_message(m, by_ampi=self._by_ampi(peer_id, m)) for m in messages)
+        text = "\n\n".join(self._format(m, by_ampi=self._by_ampi(peer_id, m)) for m in messages)
         return {"text": text, "count": len(messages), "last_id": last_id, "chat": name, "peer_id": peer_id,
                 "more": more}
 
@@ -397,9 +468,12 @@ class Reader:
         n = min(_limit(limit, 50), MAX_SEARCH)
         found = []
         async for m in self.client.iter_messages(None, search=query, limit=n):
-            if getattr(m, "chat_id", None) in self.deny:
+            peer = getattr(m, "chat_id", None)
+            if peer is None:
+                peer = getattr(getattr(m, "peer_id", None), "user_id", None)
+            if peer in self.deny or (peer is None and self.own_bots):  # an unknown chat could be the own bot's
                 continue
-            found.append(format_message(m, chat_name=display_name(getattr(m, "chat", None)),
+            found.append(self._format(m, chat_name=display_name(getattr(m, "chat", None)),
                                         by_ampi=self._by_ampi(getattr(m, "chat_id", None), m)))
         if not found:
             return f'Nothing found for "{query}".'

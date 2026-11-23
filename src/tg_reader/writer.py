@@ -214,6 +214,13 @@ class Writer:
 
     async def _dispatch(self, request: dict) -> dict:
         cmd = request.get("cmd")
+        if cmd in ("own_bots", "own_bots_status"):  # reads nothing and writes nothing
+            if cmd == "own_bots":
+                bots = request.get("bots")
+                if not isinstance(bots, list) or not all(isinstance(b, int) and not isinstance(b, bool) for b in bots):
+                    raise UserError("bots must be ids")
+                self.reader.set_own_bots(bots, request.get("social") is True)
+            return {"ok": True, "active": self.reader.own_bots_active(), "bots": sorted(self.reader.own_bots)}
         protected = request.get("protected")
         if not isinstance(protected, list) or not protected or \
                 not all(isinstance(i, int) and not isinstance(i, bool) for i in protected):
@@ -335,6 +342,8 @@ class Writer:
     async def messages(self, peer: int, d: Any, ids: list[int]) -> list[dict]:
         found = await self.client.get_messages(await self._entity(peer, d), ids=ids)
         by_id = {m.id: m for m in found or [] if m is not None}
+        if any(self.reader._own_text(m) for m in by_id.values()):
+            raise UserError("that message was forwarded from Ampi's own chat; it isn't shown or changed")
         return [{**snapshot(peer, by_id.get(i), i), "by_ampi": (peer, i) in self.reader.ampi_sent} for i in ids]
 
     async def send(self, peer: int, d: Any, text: str, reply_to: int | None) -> dict:

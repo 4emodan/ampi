@@ -197,6 +197,7 @@ _TG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS grants (peer_id INTEGER, action TEXT, title TEXT, created REAL, expires REAL,
     PRIMARY KEY (peer_id, action));
 CREATE TABLE IF NOT EXISTS protected (id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS own_bots (id INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS writes (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, peer_id INTEGER, title TEXT,
     action TEXT, message_ids TEXT, text_hash TEXT, auto INTEGER, status TEXT);
@@ -243,6 +244,14 @@ class TelegramStore:
         self.db.execute("INSERT OR REPLACE INTO meta VALUES ('protect_state', ?)",
                         ("complete" if complete else "incomplete",))
         self.db.commit()
+
+    # the bridge's own bots, now and before (tg-reader keeps their chats unreadable)
+    def add_own_bots(self, ids: list[int]) -> None:
+        self.db.executemany("INSERT OR IGNORE INTO own_bots VALUES (?)", [(i,) for i in ids])
+        self.db.commit()
+
+    def own_bots(self) -> list[int]:
+        return [r[0] for r in self.db.execute("SELECT id FROM own_bots ORDER BY id")]
 
     def protected(self) -> list[int]:
         state = self.db.execute("SELECT value FROM meta WHERE key='protect_state'").fetchone()
@@ -299,10 +308,14 @@ class TgWriterClient:
         self.store = store
         self.path = path or os.environ.get("TG_WRITER_SOCKET") or DEFAULT_SOCKET
 
-    async def call(self, payload: dict, timeout: float = WRITER_TIMEOUT) -> dict:
+    async def tell_own_bots(self, social: bool) -> dict:
+        return await self.call({"cmd": "own_bots", "bots": self.store.own_bots(), "social": social}, 15, plain=True)
+
+    async def call(self, payload: dict, timeout: float = WRITER_TIMEOUT, plain: bool = False) -> dict:
         """One request to tg-reader's write socket. The protected chats go with every request (the writer
         refuses without them). A write that times out or gets no answer has an unknown outcome."""
-        payload = {**payload, "protected": self.store.protected()}
+        if not plain:
+            payload = {**payload, "protected": self.store.protected()}
         writes = payload.get("cmd") in ("send", "edit", "delete")
         try:
             rd, wr = await asyncio.wait_for(asyncio.open_unix_connection(self.path, limit=4 * 1024 * 1024), 10)

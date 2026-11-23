@@ -131,7 +131,7 @@ def _conversations_prompt(profile: Profile) -> str:
     if (profile.workspace / TELEGRAM_SKILL).is_file():
         history = (
             "These logs only start when logging began and only cover chats with you. For anything else "
-            "(older messages, any other chat, group or channel of the owner) use the telegram skill "
+            "(any other chat, group or channel of the owner, but not your own chat with them) use the telegram skill "
             "(`tg-read`), which reads the owner's own Telegram account."
         )
     else:
@@ -173,6 +173,8 @@ class ProfileBot:
         self.store = store
         self.runner = runner
         self.system_prompt = bridge_system_prompt(profile)
+        prefix = profile.bot_token.split(":", 1)[0]
+        self.own_bot_ids: set[int] = {int(prefix)} if prefix.isdigit() else set()  # main adds the other profiles' bots
         self._locks: dict[Key, asyncio.Lock] = {}
         self._running: dict[Key, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -271,7 +273,7 @@ class ProfileBot:
         key = (chat_id, thread_id)
         text = (msg.get("text") or msg.get("caption") or "").strip()
 
-        if text.startswith("/") and not msg.get("forward_origin"):
+        if text.startswith("/") and "forward_origin" not in msg:
             command, _, args = text[1:].partition(" ")
             command, _, target = command.partition("@")
             if target and self.username and target.lower() != self.username.lower():
@@ -307,13 +309,28 @@ class ProfileBot:
         chat_id, thread_id = key
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
-            bodies = []
-            before = self.store.get_conversation(self.profile.name, chat_id, thread_id)
-            in_social = group is None and before is not None and before.social
-            for m in msgs:
-                body = await self._build_prompt(m, in_social)
-                if body:
-                    bodies.append((m, body))
+            # Running from the first moment (attachments may take a while): /reset, /new and /social wait for it.
+            self._running[key] = asyncio.current_task()  # type: ignore[assignment]
+            try:
+                for _ in range(3):
+                    before = self.store.get_conversation(self.profile.name, chat_id, thread_id)
+                    in_social = group is None and before is not None and before.social
+                    bodies = []
+                    for m in msgs:
+                        body = await self._build_prompt(m, in_social)
+                        if body:
+                            bodies.append((m, body))
+                    after = self.store.get_conversation(self.profile.name, chat_id, thread_id)
+                    if (after and (after.session_id, after.social)) == (before and (before.session_id, before.social)):
+                        break  # else the conversation changed meanwhile: quotes may no longer belong in it
+                else:
+                    return
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await self._send_text(chat_id, thread_id, "⏹ Stopped.", markdown=False)
+                return
+            finally:
+                self._running.pop(key, None)
             if not bodies:
                 return
             prompt = _join_items([b for _, b in bodies])
@@ -326,6 +343,12 @@ class ProfileBot:
             )
             # Social mode (/social): nothing of it goes into the chat logs, which every later run can read.
             social = group is None and conv.social
+            if social and not social_setup(self.profile.allowed_tools)[0]:
+                await self._send_text(
+                    chat_id, thread_id, "Social mode has no tools here: allowed_tools in config.toml needs the rule "
+                    "\"Bash(instagram:*)\" and/or \"Bash(threads:*)\", written exactly like that. Nothing was run; "
+                    "/reset leaves social mode.", markdown=False)
+                return
             for m, body in bodies if not social else ():
                 chatlog.append(log_dir, "Owner", body, chatlog.message_time(m))
             system_prompt = self.system_prompt
@@ -371,7 +394,7 @@ class ProfileBot:
                         # A forwarded message in the private chat is someone else's text: treat that run
                         # like outside content (e.g. no Telegram writes without asking).
                         origin=f"group:{group.name}" if group is not None else SOCIAL_ORIGIN if social else (
-                            "forwarded:private" if any(m.get("forward_origin") for m, _ in bodies) else None),
+                            "forwarded:private" if any("forward_origin" in m for m, _ in bodies) else None),
                         extra_env=extra_env,
                         extra_denied=denied,
                         tools=tools,
@@ -381,7 +404,7 @@ class ProfileBot:
                         # Social runs: only ("social", profile), which the watchers socket accepts for `instagram dms`
                         # alone (never as the owner's words).
                         tag=("social", self.profile.name) if social else None
-                        if group is not None or any(m.get("forward_origin") for m, _ in bodies)
+                        if group is not None or any("forward_origin" in m for m, _ in bodies)
                         else ("chat", self.profile.name, chat_id, thread_id, prompt[:4000]),
                     )
             except asyncio.CancelledError:
@@ -551,16 +574,34 @@ class ProfileBot:
 
     # --- incoming content ---------------------------------------------------------------
 
+    def _withheld_forward(self, msg: dict) -> bool:
+        """A forward that is, or could be, one of Ampi's own messages with social text. The bots' forwards name the bot;
+        a hidden sender is ruled out by comparing the text with what was sent; anything unknown isn't."""
+        if "forward_origin" not in msg:
+            return False
+        origin = msg.get("forward_origin") or {}
+        kind = origin.get("type")
+        if kind == "user":
+            return (origin.get("sender_user") or {}).get("id") in self.own_bot_ids or \
+                self.store.is_social_text(msg.get("text") or msg.get("caption"))
+        if kind in ("hidden_user", "chat", "channel"):
+            return self.store.is_social_text(msg.get("text") or msg.get("caption"))
+        return True
+
     async def _build_prompt(self, msg: dict, social: bool = False) -> str:
         text = (msg.get("text") or msg.get("caption") or "").strip()
+        if not social and self._withheld_forward(msg):
+            return ("[A message of Ampi's own chat was forwarded here. It may carry Instagram/Threads text, so it isn't "
+                    "shown outside social mode.]")
         parts: list[str] = []
         forwarded = _forward_note(msg)
         if forwarded:
             parts.append(forwarded)
         reply = msg.get("reply_to_message") or {}
         quoted = (reply.get("text") or reply.get("caption") or "").strip()
-        if quoted and not social and self.store.is_social_message((msg.get("chat") or {}).get("id"),
-                                                                  reply.get("message_id")):
+        if quoted and not social and (self._withheld_forward(reply) or self.store.is_social_text(quoted)
+                                      or self.store.is_social_message((msg.get("chat") or {}).get("id"),
+                                                                      reply.get("message_id"))):
             parts.append("[Replying to a message with Instagram/Threads content; its text isn't shown here]")
         elif quoted and not reply.get("forum_topic_created"):
             parts.append(f"[Replying to: {quoted[:1000]}]")
@@ -658,7 +699,7 @@ class ProfileBot:
             if sent is None:
                 sent = await self.api.send_message(chat_id, chunk, thread_id)
             if social:  # quoted later, its text stays out of that run (see _build_prompt)
-                self.store.add_social_message(chat_id, (sent or {}).get("message_id"))
+                self.store.add_social_message(chat_id, (sent or {}).get("message_id"), (sent or {}).get("text") or chunk)
 
     async def _send_workspace_file(self, chat_id: int, thread_id: int, name: str) -> None:
         root = self.profile.workspace.resolve()
@@ -687,6 +728,9 @@ class ProfileBot:
     _cmd_help = _cmd_start
 
     async def _cmd_new(self, chat_id: int, thread_id: int, args: str) -> None:
+        if chat_id < 0 and (chat_id, thread_id) in self._running:
+            await self._send_text(chat_id, thread_id, "A task is still running here. Use /cancel first.", False)
+            return
         title = args or datetime.now().strftime("Chat %d %b %H:%M")
         if chat_id < 0:  # a group: topics there are the group's own business
             self.store.reset_session(self.profile.name, chat_id, thread_id)
@@ -696,6 +740,9 @@ class ProfileBot:
             topic = await self.api.create_forum_topic(chat_id, title)
         except TelegramError as e:
             log.info("[%s] createForumTopic failed (%s); resetting current chat", self.profile.name, e.description)
+            if (chat_id, thread_id) in self._running:
+                await self._send_text(chat_id, thread_id, "A task is still running here. Use /cancel first.", False)
+                return
             self.store.reset_session(self.profile.name, chat_id, thread_id)
             await self._send_text(
                 chat_id,

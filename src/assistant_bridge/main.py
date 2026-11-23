@@ -178,8 +178,10 @@ async def serve(config: Config) -> None:
                 log.warning("[%s] %s is missing or not owned by root: Claude could give itself settings or hooks. "
                             "Run deploy/install.sh as root.", p.name, dot)
             bots.append(ProfileBot(p, TelegramAPI(p.bot_token, client), store, runner))
+        own_bots = sorted({i for b in bots for i in b.own_bot_ids})
         engines: dict[str, WatchEngine] = {}
         for b in bots:
+            b.own_bot_ids = set(own_bots)
             engine = WatchEngine(b, wdb, tools_socket=config.tools.socket, tg_socket=config.tools.tg_reader_socket,
                                  data_dir=config.db_path.parent)
             engines[b.profile.name] = engine
@@ -197,6 +199,7 @@ async def serve(config: Config) -> None:
             # Approval requests go to the first profile's owner chat (one relay, so no duplicates).
             bots[0].approvals = ApprovalRelay(bots[0], config.tools.socket,
                                               protected=lambda: protected_chats(config, store, wdb, engines))
+            bots[0].approvals.own_bots = own_bots
             pollers.append(asyncio.create_task(bots[0].approvals.run_forever(), name="approvals"))
             # ampi-tools learns which process each claude run is and where it comes from.
             socket_path = config.tools.socket

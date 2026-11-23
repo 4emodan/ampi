@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -47,11 +48,16 @@ CREATE TABLE IF NOT EXISTS social_messages (
     message_id INTEGER NOT NULL,
     PRIMARY KEY (chat_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS social_texts (hash TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS offsets (
     profile TEXT PRIMARY KEY,
     next_update_id INTEGER NOT NULL
 );
 """
+
+
+def text_hash(text: str) -> str:
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8", "replace")).hexdigest()
 
 
 def now_iso() -> str:
@@ -166,11 +172,19 @@ class Store:
         )
         self._db.commit()
 
-    def add_social_message(self, chat_id: int, message_id: int | None) -> None:
-        """A message Ampi sent that carries Instagram/Threads text: quoting it later must not bring the text along."""
+    def add_social_message(self, chat_id: int, message_id: int | None, text: str | None = None) -> None:
+        """A message Ampi sent that carries Instagram/Threads text: quoting or forwarding it later must not bring the
+        text along (only a hash of the text is kept)."""
+        if text and text.strip():
+            self._db.execute("INSERT OR IGNORE INTO social_texts VALUES (?)", (text_hash(text),))
+            self._db.commit()
         if isinstance(message_id, int):
             self._db.execute("INSERT OR IGNORE INTO social_messages VALUES (?, ?)", (chat_id, message_id))
             self._db.commit()
+
+    def is_social_text(self, text: str | None) -> bool:
+        return bool(text and text.strip()) and self._db.execute(
+            "SELECT 1 FROM social_texts WHERE hash=?", (text_hash(text or ""),)).fetchone() is not None
 
     def is_social_message(self, chat_id: int, message_id: int | None) -> bool:
         return self._db.execute("SELECT 1 FROM social_messages WHERE chat_id=? AND message_id=?",
