@@ -535,6 +535,18 @@ PAGE_JS = r"""
       }
       return false;
     };
+    // Content of somebody else that is kept apart only by sandbox="…" (a comment, an ad in a srcdoc): an engine that doesn't
+    // know sandbox would let its scripts read this page.
+    const boxed = (doc, depth) => Array.from(doc.querySelectorAll('iframe,frame,object,embed')).some(f => {
+      const src = (f.getAttribute('src') || f.getAttribute('data') || '').trim();
+      if (f.hasAttribute('sandbox')) {
+        if (f.hasAttribute('srcdoc') || !src || /^(about|blob|data|javascript|filesystem):/i.test(src)) return true;
+        try { if (new URL(src, document.baseURI || location.href).origin === location.origin) return true; } catch (e) { return true; }
+      }
+      let inner = null;
+      try { inner = f.contentDocument; } catch (e) {}
+      return !!inner && (depth > 3 || boxed(inner, depth + 1));
+    });
     const loginFacts = (U, S) => {
       const F = formOf(S || U);
       let box = F;
@@ -563,7 +575,7 @@ PAGE_JS = r"""
       }
       return { connected: true, hasForm: !!F, sameForm: [U, S].every(e => !e || formOf(e) === F), passwords: passwords, extra: extra, boxes: boxes,
         shown: [U, S].every(e => !e || visible(e)), method: F ? (F.getAttribute('method') || '').toLowerCase().trim() : '',
-        action: F ? actionOf(F) : '' };
+        action: F ? actionOf(F) : '', boxed: boxed(document, 0) };
     };
     // Where a form goes: '' = nowhere or the page itself (an empty action means the page, whatever its <base> says).
     const actionOf = (F) => { const raw = (F.getAttribute('action') || '').trim(); return !raw || /^javascript:/i.test(raw) ? '' : resolve(raw).slice(0, 1000); };
@@ -1384,7 +1396,7 @@ class Controller:
 
     # --- signing in (only ampi-signin) ---------------------------------------------------------
 
-    LOGIN_FACTS = ("hasForm", "sameForm", "passwords", "extra", "boxes", "shown", "method", "action")
+    LOGIN_FACTS = ("hasForm", "sameForm", "passwords", "extra", "boxes", "shown", "method", "action", "boxed")
 
     def _login(self, s: Session, req: dict) -> tuple[dict, dict, dict, dict | None]:
         """(top frame, {"user"/"password"/"press": (description, number)}, facts of the form, what the press would press): a
@@ -1439,6 +1451,8 @@ class Controller:
         facts = {k: facts.get(k) for k in self.LOGIN_FACTS}
         if not facts["sameForm"]:
             raise Refused("those fields don't belong to the same form")
+        if facts["boxed"] is not False:
+            raise Refused("that page shows content of others inside it (a sandboxed frame); signing in there is for the owner")
         if not facts["shown"]:
             raise Refused("one of those fields isn't visible on the page")
         if "password" in els and facts["passwords"] != 1:

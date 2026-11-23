@@ -25,7 +25,7 @@ from ampi_tools.todoist import ToolError
 SITE = "https://www.club.example"
 PW = "s3cret pa&ss"
 ME = "me@x.example"
-FACTS = ("hasForm", "sameForm", "passwords", "extra", "boxes", "shown", "method", "action")
+FACTS = ("hasForm", "sameForm", "passwords", "extra", "boxes", "shown", "method", "action", "boxed")
 
 
 class Engine(FakeEngine):
@@ -46,7 +46,7 @@ class Engine(FakeEngine):
                "passwords": sum(1 for e in mine if e["type"] == "password" and not e.get("hidden")),
                "extra": any(e not in es and e["kind"] in ("input", "textarea", "select") for e in mine),
                "boxes": sum(1 for e in mine if e["kind"] == "checkbox"),
-               "shown": not any(e.get("hidden") for e in es), "method": "post", "action": f"{SITE}/login"}
+               "shown": not any(e.get("hidden") for e in es), "method": "post", "action": f"{SITE}/login", "boxed": False}
         return {**out, **self.facts}
 
     def gate(self, f, a):
@@ -227,6 +227,7 @@ def test_wrong_fields(env, kw, why):
     ({"passwords": 2}, "several password"), ({"passwords": 0}, "isn't usable"), ({"extra": True}, "other fields"), ({"boxes": 3}, "other fields"),
     ({"boxes": None}, "other fields"), ({"method": "get"}, "address"), ({"method": "dialog"}, "address"), ({"method": "foo"}, "address"),
     ({"action": "http://www.club.example/login"}, "https site"), ({"action": "unreadable"}, "https site"),
+    ({"boxed": True}, "sandboxed"), ({"boxed": None}, "sandboxed"),
     ({"shown": False}, "visible"), ({"sameForm": False}, "same form"), ({"connected": False}, ""),
 ])
 def test_forms_that_are_not_for_this(env, facts, why):
@@ -791,10 +792,13 @@ out.far = login('e5', 'p5'); out.js = login('e6', 'p6'); out.getf = login('e7', 
 out.extras = [['e10', 'p10'], ['e11', 'p11'], ['e12', 'p12']].map(x => login(...x).extra);
 const btn = (sel) => all.find(e => e.tag === 'button' && run({ op: 'gate', n: e.n }).connected && q(sel) && e.id === (q(sel).id)).n;
 const gate = (sel, withName) => { const g = run({ op: 'gate', n: byId[sel], with: byName[withName] }); return [g.submits, g.withForm, g.method, g.ownMethod, g.to]; };
+const framed = (h) => { const d = document.createElement('div'); d.innerHTML = h; document.body.append(d); const r = login('email', 'p').boxed; d.remove(); return r; };
+out.boxed = ['', '<iframe src="https://other.example/x" sandbox></iframe>', '<iframe srcdoc="x"></iframe>', '<iframe></iframe>',
+  '<iframe srcdoc="x" sandbox="allow-scripts"></iframe>', '<iframe sandbox></iframe>', '<iframe sandbox src="data:text/html,x"></iframe>', '<iframe sandbox src="' + location.href + '"></iframe>'].map(framed);
 out.evil = gate('evil', 'p'); out.get = gate('get', 'p'); out.b2 = gate('b2', 'p2'); out.b5 = gate('b5', 'p5'); out.b8 = gate('b8', 'p8'); out.wrong = gate('b2', 'p');
 const look = (sel) => { const e = all.find(x => x.label === sel); const g = run({ op: 'gate', n: e.n }); return [g.tag, g.plain, g.formButton, g.dialog]; };
 out.links = ['Plain', 'Onclick', 'Method', 'Role'].map(look); out.boxes = ['Loose', 'In form'].map(look); out.dialogs = ['Bye', 'Bye2'].map(look);
-const expect = (f) => Object.fromEntries(['hasForm','sameForm','passwords','extra','boxes','shown','method','action'].map(k => [k, f[k]]));
+const expect = (f) => Object.fromEntries(['hasForm','sameForm','passwords','extra','boxes','shown','method','action','boxed'].map(k => [k, f[k]]));
 // a page that swaps the password field for a text field while the user name is being filled in
 q('[name=e6]').addEventListener('input', () => { q('[name=p6]').type = 'text'; });
 out.swap = [run({ op: 'signin', user: byName.e6, secret: byName.p6, values: { user: 'me', password: 'hunter22' }, expect: expect(out.js) }), q('[name=p6]').value];
@@ -841,6 +845,7 @@ def test_the_page_script_in_a_browser(tmp_path):
     assert out["wrong"][:2] == [True, False]
     assert [x[:2] for x in out["links"]] == [["a", True], ["a", False], ["a", False], ["a", False]]
     assert [x[2] for x in out["boxes"]] == [False, True] and [x[3] for x in out["dialogs"]] == [True, True]
+    assert out["boxed"][:4] == [False] * 4 and out["boxed"][4:7] == [True] * 3  # (a file: page is of no origin: the last is not tested)
     assert out["extras"] == [False, True, True]  # traps for robots and a language; a plan; a hidden field with something in it
     assert out["swap"] == [{"ok": False}, ""] and out["stale"] == {"ok": False, "set": False}
     assert out["fill"] == {"ok": True} and out["values"] == ["me", "hunter22", "post"]
