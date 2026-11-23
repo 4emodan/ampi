@@ -23,7 +23,9 @@ signin test example.com                                  only tests: the phone u
    If it refuses the button (no form, prices on the page, other words on it): run it without `--press`, then use
    `checkout submit REF --what "Sign in"`, which asks the owner.
 3. Read the page that comes back. Signed in: go on with what they asked, as in web-actions. In the owner's account almost every
-   button asks them first (`checkout submit`), and other addresses can't be opened: use the page's own links. Wrong password, a captcha, a code by email or phone, or "is this you?": stop, and tell them.
+   button asks them first (`checkout submit`), and other addresses can't be opened: use the page's own links. A box outside a form:
+   `checkout submit REF --what …` ticks it; a list or text field that `choose`/`type` refuse: `checkout submit REF --option "2"
+   --what …` sets it (both ask the owner). Wrong password, a captcha, a code by email or phone, or "is this you?": stop, and tell them.
 
 - A sign-in over two pages: first `signin fill --user REF --press REF`, then on the password page `signin fill --password REF
   --press REF` within 3 minutes (the phone asks once).

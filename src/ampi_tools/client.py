@@ -679,6 +679,7 @@ def checkout_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("submit", help="press a button that books, sends or requests something (asks the owner)")
     s.add_argument("ref")
     s.add_argument("--what", required=True, help="what it does, e.g. 'book yoga class, Fri 10:00, 1 person'")
+    s.add_argument("--option", help="for a list or a text field of a signed-in account that `choose`/`type` refuse: what to set it to")
     sub.add_parser("status", help="answer to a request").add_argument("approval", type=int)
     return p
 
@@ -695,7 +696,7 @@ def checkout_main(argv: list[str] | None = None) -> int:
                                             amount=a.amount, currency=a.currency, what=a.what, card=a.card),
                             a.reason, a.wait)
     if c == "submit":
-        return _run_waiting("checkout", _op("checkout.submit", ref=a.ref, what=a.what), a.reason, a.wait)
+        return _run_waiting("checkout", _op("checkout.submit", ref=a.ref, what=a.what, option=a.option), a.reason, a.wait)
     args = {"open": {"url": getattr(a, "url", None), "engine": getattr(a, "engine", None)}, "click": {"ref": getattr(a, "ref", None)},
             "type": {"ref": getattr(a, "ref", None), "text": getattr(a, "text", None)},
             "choose": {"ref": getattr(a, "ref", None), "option": getattr(a, "option", None)}}.get(c, {})
