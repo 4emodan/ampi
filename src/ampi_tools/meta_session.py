@@ -157,6 +157,8 @@ class Doc:
     cls: str        # read | write | follow
     status: str = "known"  # known | stale (real but old: sent, may fail) | placeholder (never sent)
 
+    success: tuple[str, ...] = ("status",)  # a change: the result's field that must say ok (GUESS until seen)
+
     @property
     def sendable(self) -> bool:
         return self.status != "placeholder" and bool(re.fullmatch(r"[1-9][0-9]{8,24}", self.doc_id))
@@ -229,20 +231,24 @@ def allowed(method: str, host: str, path: str, doc: str | None = None, friendly:
 
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
-    """One process at a time changes `path` (the daemon and the owner's commands share these files). Not reentrant."""
+    """One process at a time changes `path` (the daemon and the owner's commands share these files). Not reentrant.
+    Waits a while, then gives up; in the daemon it runs outside the event loop."""
+    deadline = time.monotonic() + LOCK_WAIT
     fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        try:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except ImportError:  # Windows (development)
-            import msvcrt
-            while True:
+        while True:
+            try:
                 try:
-                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                    break
-                except OSError:
-                    continue
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except ImportError:  # Windows (development)
+                    import msvcrt
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise ToolError("the session file is busy; try again in a moment") from None
+                time.sleep(0.02)
         yield
     finally:
         os.close(fd)  # releases the lock
@@ -346,20 +352,30 @@ class SessionAuth:
 
     def pause(self, reason: str, session: tuple | None = None) -> None:
         """Until the owner resumes. One Telegram notice, on the change only."""
+        if self.mark_paused(reason, session):
+            self.paused_notice(reason)
+
+    def mark_paused(self, reason: str, session: tuple | None = None) -> bool:
         def change(d: dict) -> bool:
             if d.get("state") == "paused":
                 return False
             d.update(state="paused", paused_reason=reason, paused_at=self.clock())
             return True
 
-        if not self._change(session, change):
-            return
+        return self._change(session, change)
+
+    def paused_notice(self, reason: str) -> None:
         log.warning("%s session paused (%s)", self.s.name, reason)
         if self.notify is not None:
             notice = {"user_agent": UA_NOTICE}.get(reason, NEUTRAL_NOTICE if reason in NEUTRAL else PAUSE_NOTICE)
             self.notify(notice.format(name=self.s.name, command=self.s.command))
 
     def cool_down(self, session: tuple | None = None) -> None:
+        if self.mark_cooling(session):
+            self.cooling_notice()
+
+    def mark_cooling(self, session: tuple | None = None) -> bool:
+        """True when it wasn't cooling down already."""
         already = []
 
         def change(d: dict) -> bool:
@@ -370,10 +386,11 @@ class SessionAuth:
             d["cooldown_until"] = self.clock() + COOLDOWN
             return True
 
-        if not self._change(session, change):
-            return
+        return self._change(session, change) and not already
+
+    def cooling_notice(self) -> None:
         log.warning("%s asked to slow down; pausing reads for an hour", self.s.name)
-        if self.notify is not None and not already:
+        if self.notify is not None:
             self.notify(COOLDOWN_NOTICE.format(name=self.s.name))
 
     def rotate(self, name: str, value: str, session: tuple | None = None) -> None:
@@ -421,6 +438,7 @@ class SessionAuth:
                f"saved {saved}"
 
 
+LOCK_WAIT = 10.0  # seconds
 NEUTRAL = ("no_page_tokens", "stale_tokens", "not_json")
 MAYBE = ". It MAY have happened anyway: check it yourself before asking again; it isn't retried"
 PAUSE_NOTICE = ("⚠️ Ampi stopped using your {name} session: {name} asked to confirm it's you, or the session was logged "
@@ -527,9 +545,10 @@ def pk_to_shortcode(pk: str | int) -> str:
 
 
 _CHALLENGES = ("checkpoint_required", "challenge_required", "login_required", "consent_required", "sentry_block")
-_LOGIN_MARKERS = ("/accounts/login", '"is_logged_in":false', 'id="loginForm"')
+_LOGIN_MARKERS = ("/accounts/login/\"", "/accounts/login/'", "/accounts/login/?", '"is_logged_in":false', 'id="loginForm"')
 # A login page even if it carries page tokens (a plain mention of /accounts/login can be on logged-in pages too).
-_LOGIN_PAGE = re.compile(r'"is_logged_in":false|id="loginForm"|<(?:a|form)\b[^>]*(?:href|action)="[^"]*/accounts/login')
+_LOGIN_PAGE = re.compile(r'''"is_logged_in":false|id="loginForm"|<(?:a|form)\b[^>]*(?:href|action)=["'][^"']*'''
+                         r'''(?:/accounts/login/?["'?#]|/challenge/)''')
 # Whole phrases only: "This link has expired" or "Blog in maintenance" are not about the login.
 _LOGIN_RE = re.compile(r"\bnot logged in\b|\blog ?in (?:is )?required\b|\bplease log ?in\b|\b(?:login|session) (?:has )?"
                        r"expired\b|\byou must log ?in\b|\blog in to continue\b", re.I)
@@ -546,7 +565,10 @@ class _StaleTokens(Exception):
         super().__init__(cls)
         self.cls = cls
         self.tokens = tokens
-_SLOW_DOWN = ("feedback_required", "please wait a few minutes", "rate_limit")
+_SLOW_DOWN = re.compile(r"feedback_required|please wait a few minutes|rate[ _-]*limit|too[ _-]+many[ _-]+requests")
+_UA_RE = re.compile(r"user[ _-]?agent[ _-]?(?:mismatch|not (?:supported|allowed)|blocked|refused)|"
+                    r"(?:unsupported|invalid|blocked|bad) user[ _-]?agent", re.I)
+_AUTH_WORDS = re.compile(r"log ?in|session|authenti|authori[sz]|checkpoint|challenge|forbidden")
 
 
 class WebClient:
@@ -567,6 +589,7 @@ class WebClient:
         self._tokens: dict[str, Any] = {}
         self._token_lock = asyncio.Lock()  # one token fetch at a time; waiting callers share its result
         self._stale_key: tuple = ()
+        self._empty = 0  # empty 200 replies in a row
         self._stale: list[dict] = []  # token sets refused in a row (several callers may have used the same set)
 
     def configured(self) -> bool:
@@ -585,7 +608,8 @@ class WebClient:
                     self._tokens = {}
                 if len(self._stale) >= 2:  # fresh tokens refused too
                     self._stale.clear()
-                    self.auth.pause("stale_tokens")
+                    if await asyncio.to_thread(self.auth.mark_paused, "stale_tokens"):
+                        self.auth.paused_notice("stale_tokens")
                     raise ToolError(self.auth.paused_text()) from None
                 if e.cls != "read":  # a change is never sent twice
                     raise ToolError(f"{self.s.name} refused the page tokens; nothing was changed. Ask again in a "
@@ -644,7 +668,7 @@ class WebClient:
             self.auth.check()
             if not self.auth.same(session):
                 raise ToolError(f"the {self.s.name} session was replaced meanwhile; nothing was sent, ask again")
-            self.budget.take(cls, watch, self.s.name)
+            await asyncio.to_thread(self.budget.take, cls, watch, self.s.name)
             self._last = self._clock()
             try:
                 request = self._client.build_request(ep.method, f"https://{ep.host}{path}", params=params or None,
@@ -657,20 +681,27 @@ class WebClient:
                 self._client.cookies.clear()  # no shared cookie jar: cookies only go in our own header
             try:
                 # Status and headers first: a stop signal counts whatever the body is (or can't be read as).
-                self._set_cookies(resp, session)
+                await self._set_cookies(resp, session)
                 status = resp.status_code
                 if 300 <= status < 400:
-                    self._stop("redirect", session)  # to /accounts/login, /challenge or anywhere: never followed
+                    await self._stop("redirect", session, cls)  # to /accounts/login, /challenge or anywhere: never followed
                 if status in (401, 403):
-                    self._stop(f"http_{status}", session)
+                    await self._stop(f"http_{status}", session, cls)
                 body = await self._body(resp)
             finally:
                 await resp.aclose()
-        return self._answer(ep, status, body, cls, d, tokens, session)
+        return await self._answer(ep, status, body, cls, d, tokens, session)
 
-    def _stop(self, reason: str, session: tuple) -> None:
-        self.auth.pause(reason, session)
-        raise ToolError(self.auth.paused_text())
+    async def _pause(self, reason: str, session: tuple) -> None:
+        try:
+            if await asyncio.to_thread(self.auth.mark_paused, reason, session):
+                self.auth.paused_notice(reason)
+        except ToolError:
+            log.warning("%s session should be paused (%s), but its file is busy", self.s.name, reason)
+
+    async def _stop(self, reason: str, session: tuple, cls: str = "read") -> None:
+        await self._pause(reason, session)
+        raise ToolError(self.auth.paused_text() + ("" if cls == "read" else MAYBE))
 
     async def _body(self, resp: httpx.Response) -> bytes | str:
         """The body, or why there is none (read in pieces: never more than the limit)."""
@@ -684,7 +715,7 @@ class WebClient:
             return f"unreadable reply ({type(e).__name__})"
         return bytes(out)
 
-    def _set_cookies(self, resp: httpx.Response, session: tuple) -> None:
+    async def _set_cookies(self, resp: httpx.Response, session: tuple) -> None:
         for raw in resp.headers.get_list("set-cookie"):
             first, _, attrs = raw.partition(";")
             cname, _, value = first.strip().partition("=")
@@ -692,24 +723,27 @@ class WebClient:
             gone = not value or value == "deleted" or re.search(r"max-age=0\b", attrs, re.I) is not None \
                 or re.search(r"expires=thu, 01[- ]jan[- ]1970", attrs, re.I) is not None
             if cname == "sessionid" and gone:
-                self.auth.pause("logged_out", session)
+                await self._pause("logged_out", session)
             elif not gone:
-                self.auth.rotate(cname, value, session)
+                try:
+                    await asyncio.to_thread(self.auth.rotate, cname, value, session)
+                except ToolError:
+                    log.warning("couldn't save a changed %s cookie: its file is busy", self.s.name)
 
-    def _answer(self, ep: Endpoint, status: int, body: bytes | str, cls: str, d: Doc | None, tokens: dict,
+    async def _answer(self, ep: Endpoint, status: int, body: bytes | str, cls: str, d: Doc | None, tokens: dict,
                 session: tuple) -> Any:
         name = self.s.name
         maybe = "" if cls == "read" else MAYBE
         if self.auth.same(session) and self.auth.load().get("state") == "paused":  # e.g. its cookie was deleted just now
             raise ToolError(self.auth.paused_text() + maybe)
         if status == 429 and isinstance(body, str):
-            self._slow_down(cls, session)
+            await self._slow_down(cls, session)
         if isinstance(body, str):
             raise ToolError(f"{name}: {body}{maybe}")
         text = body.decode("utf-8", "replace")
         if ep.kind == "html":
             if status == 429:
-                self._slow_down(cls, session)
+                await self._slow_down(cls, session)
             if status != 200:
                 raise ToolError(f"{name} answered {status}")
             return text
@@ -726,38 +760,55 @@ class WebClient:
         if ep.kind == "graphql":
             self._stale.clear()  # any other answer: the tokens aren't what's wrong
         if problem in ("challenge", "user_agent"):
-            self._stop(problem, session)
+            await self._stop(problem, session, cls)
         if problem == "slow_down":
-            self._slow_down(cls, session)
-        if data is None and status < 500:
-            self._stop("not_json", session)  # a page where data belongs: a wall, a login page, a changed site
+            await self._slow_down(cls, session)
+        self._empty = self._empty + 1 if status == 200 and not stripped else 0
+        # A page where data belongs: a wall, a changed site. (Marked login pages were stopped above; an ordinary "not
+        # found" or a single empty reply is just an error.)
+        if data is None and status < 500 and status not in (400, 404) and self._empty != 1:
+            await self._stop("not_json", session, cls)
         if data is None:
             raise ToolError(f"{name} answered {status}{maybe}")
         if not isinstance(data, dict):
             raise ToolError(f"{name} sent an unexpected reply (HTTP {status}){maybe}")
         if ep.kind == "graphql":
-            return self._graphql_data(d, data, status, cls)
+            return await self._graphql_data(d, data, status, cls, session)
         if status >= 400 or data.get("status") == "fail" or "errorSummary" in data or data.get("error") \
                 or data.get("errors"):
             msg = redact(str(data.get("message", "")))[:200]
             raise ToolError(f"{name} error {status}" + (f": {msg}" if msg else "") + (maybe if status >= 500 else ""))
-        if cls != "read" and not data:
+        if cls != "read":
+            await self._check_result(data, session)
+        if cls != "read" and (not data or _failed(data)):
             raise ToolError(f"{name} didn't confirm the change{maybe}")
         return data
 
-    def _slow_down(self, cls: str, session: tuple) -> None:
-        if cls == "read":
-            self.auth.cool_down(session)
-            raise ToolError(f"{self.s.name} asked to slow down; no requests for an hour. Don't try another way.")
-        self._stop("feedback_required", session)  # a refused change: stop until the owner looks at the account
+    async def _check_result(self, result: Any, session: tuple) -> None:
+        """The stop signals, in a change's own result objects (they hold no one's posts)."""
+        for r in _nested(result):
+            problem = _problem(200, {k: v for k, v in r.items() if k not in ("summary", "description")}, "", "json")
+            if problem in ("challenge", "user_agent"):
+                await self._stop(problem, session, "write")
+            if problem == "slow_down":
+                await self._slow_down("write", session)
 
-    def _graphql_data(self, d: Doc | None, data: dict, status: int, cls: str) -> Any:
+    async def _slow_down(self, cls: str, session: tuple) -> None:
+        if cls == "read":
+            if await asyncio.to_thread(self.auth.mark_cooling, session):
+                self.auth.cooling_notice()
+            raise ToolError(f"{self.s.name} asked to slow down; no requests for an hour. Don't try another way.")
+        await self._stop("feedback_required", session, cls)  # a refused change: stop until the owner looks at the account
+
+    async def _graphql_data(self, d: Doc | None, data: dict, status: int, cls: str, session: tuple) -> Any:
         assert d is not None
         inner = data.get("data")
         if cls != "read":
             # Only a clean, non-empty result counts as done.
             results = list(inner.values()) if isinstance(inner, dict) else []
-            good = [r for r in results if r and not (isinstance(r, dict) and r.get("status") == "fail")]
+            await self._check_result(inner, session)
+            good = [r for r in results if isinstance(r, dict) and not _failed(r)
+                    and any(r.get(k) in ("ok", "success", True) for k in d.success)]
             if status >= 400 or data.get("errors") or data.get("error") or not results or len(good) != len(results) \
                     or (d.root and not inner.get(d.root)):
                 raise ToolError(f"{self.s.name} didn't confirm the change (`{d.name}`){MAYBE}")
@@ -787,14 +838,14 @@ class WebClient:
             session = identity(self.auth.load())
             page = await self._call(HOME[self.s.key], None, None, None, None, None, False)
             if _LOGIN_PAGE.search(page):  # before looking for tokens: login pages carry some too
-                self._stop("login_required", session)
+                await self._stop("login_required", session)
             dtsg = re.search(r'"DTSGInitialData",\[\],\{"token":"([^"]{8,200})"', page)
             lsd = re.search(r'"LSD",\[\],\{"token":"([^"]{4,200})"', page)
             if not dtsg or not lsd:
                 # A 200 page without the tokens: stop (paused, so this is never fetched again in a loop), and name a
                 # cause only when the page shows it.
-                self._stop("login_required" if any(m in page for m in _LOGIN_MARKERS) else
-                           "user_agent" if re.search(r"user ?agent mismatch", page, re.I) else "no_page_tokens", session)
+                await self._stop("login_required" if any(m in page for m in _LOGIN_MARKERS) else
+                                 "user_agent" if _UA_RE.search(page) else "no_page_tokens", session)
             fb_dtsg, lsd_token = dtsg.group(1), lsd.group(1)
             jazoest = "2" + str(sum(ord(c) for c in fb_dtsg))
             for v in (fb_dtsg, lsd_token):
@@ -817,20 +868,21 @@ def _problem(status: int, data: Any, text: str, kind: str = "json") -> str | Non
     said = " | ".join(str(e.get(k) or "") for e in entries for k in _TEXT_KEYS).lower()
     codes = {int(c) for e in entries for k in ("code", "error", "error_code", "status_code")
              if isinstance(c := e.get(k), (int, str)) and re.fullmatch(r"\d{1,9}", str(c))}
-    if any(c in said for c in _CHALLENGES) or _LOGIN_RE.search(said) or codes & {401, 403, 1357001} or any(
+    if any(c in said for c in _CHALLENGES) or _LOGIN_RE.search(said) or codes & {401, 1357001} \
+            or (403 in codes and _AUTH_WORDS.search(said)) or any(
             e.get("challenge") or e.get("checkpoint_url") or e.get("require_login") is True or e.get("logout_reason")
             or e.get("user_has_logged_out") for e in entries):
         return "challenge"
-    if re.search(r"user ?agent", said):
+    if _UA_RE.search(said):
         return "user_agent"
     if status in (401, 403):
         return "challenge"
-    if status == 429 or 429 in codes or any(c in said for c in _SLOW_DOWN) or any(
+    if status == 429 or 429 in codes or _SLOW_DOWN.search(said) or any(
             e.get("spam") is True for e in entries):
         return "slow_down"
     if kind == "graphql" and 1357004 in codes:
         return "stale_tokens"
-    if data is None and ("/accounts/login" in text or "/challenge/" in text):
+    if data is None and _LOGIN_PAGE.search(text):
         return "challenge"
     return None
 
@@ -839,17 +891,42 @@ _TEXT_KEYS = ("message", "summary", "description", "errorSummary", "errorDescrip
               "logout_reason")
 
 
+_WRAPPERS = ("errors", "error", "extensions", "original_error", "originalError", "payload")
+
+
 def _entries(data: Any) -> list[dict]:
-    """The reply itself and everything in it that reports an error (GraphQL `errors`, `error` objects, extensions)."""
-    if not isinstance(data, dict):
+    """The reply itself and what reports an error in it (GraphQL `errors`, `error` objects, their wrappers), not too deep."""
+    out: list[dict] = []
+    level = [data]
+    for _ in range(6):
+        following: list = []
+        for e in level:
+            if isinstance(e, str):
+                e = {"message": e}
+            if not isinstance(e, dict) or len(out) >= 100:
+                continue
+            out.append(e)
+            for k in _WRAPPERS:
+                v = e.get(k)
+                following += v if isinstance(v, list) else [v] if isinstance(v, dict) or (k == "errors" and v) else []
+        level = following
+    return out
+
+
+def _nested(x: Any, depth: int = 0) -> list[dict]:
+    if depth > 5:
         return []
-    out = [data]
-    errors = data.get("errors")
-    for e in errors if isinstance(errors, list) else [errors]:
-        out.append(e if isinstance(e, dict) else {"message": e} if isinstance(e, str) else {})
-    if isinstance(data.get("error"), dict):
-        out.append(data["error"])
-    return out + [e["extensions"] for e in out if isinstance(e.get("extensions"), dict)]
+    if isinstance(x, list):
+        return [d for v in x[:50] for d in _nested(v, depth + 1)]
+    if isinstance(x, dict):
+        return [x] + [d for v in x.values() for d in _nested(v, depth + 1)]
+    return []
+
+
+def _failed(result: Any) -> bool:
+    """Anything in a change's result that says it didn't work."""
+    return any(r.get("status") == "fail" or r.get("success") is False or r.get("error") or r.get("errors")
+               for r in _nested(result))
 
 
 # --- the owner's commands (on the server, as user ampitools) -------------------------------------------------
