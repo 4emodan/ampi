@@ -93,45 +93,95 @@ DESTRUCTIVE = re.compile(r"delete|cancel|unsubscribe|remove|удалить|от�
 GENERIC = re.compile(r"(yes|ok(ay)?|finish|done|save|confirm|agree|i agree|✓|✔|да|готово|ναι|kyllä|ja|oui)", re.I)
 
 
-# In a session that is signed in to the owner's account almost any button can do something there (renew, transfer, cancel,
-# switch something off). Pressed without asking: only these whole captions, which look around, close something or put into a
-# cart, and dates and times.
+# In a session that is signed in to the owner's account almost any control can do something there (renew, transfer, cancel,
+# switch something off). Pressed without asking: only these whole captions, which look around or put into a cart, whole dates
+# and times, closing a dialog or a cookie banner, and links to places (ACCOUNT_PLACES).
 ACCOUNT_SAFE = re.compile(
     r"(search|find|show results|filters?|apply filters?|clear( all)? filters?|sort( by)?|go back|back|previous|next|"
-    r"(previous|next) (page|month|week|day|slide)|[‹›<>«»←→]|menu|open menu|close( menu)?|×|show more|load more|more|see more|"
-    r"decline( all)?|reject( all)?|accept( all)? cookies|only necessary( cookies)?|necessary cookies only|"
+    r"(previous|next) (page|month|week|day|slide)|menu|open menu|close menu|show more|load more|more|see more|"
     r"add (\d+ )?(items? )?to (my |your |the )?(cart|bag|basket)|view (my |your )?(cart|bag|basket)|"
-    r"hae|lisää (ostoskoriin|koriin)|seuraava|edellinen|sulje|valikko|поиск|найти|назад|вперёд|закрыть|меню|αναζήτηση|πίσω|κλείσιμο)", re.I)
+    r"hae|lisää (ostoskoriin|koriin)|seuraava|edellinen|valikko|поиск|найти|назад|вперёд|меню|αναζήτηση|πίσω)", re.I)
+ACCOUNT_CLOSE = re.compile(r"(close|×|dismiss|decline( all)?|reject( all)?|accept( all)? cookies|(only )?necessary( cookies)?( only)?|sulje|закрыть|κλείσιμο)",
+                           re.I)
+_DAY = r"(mon(day)?|tue(s(day)?)?|wed(nesday)?|thu(r(s(day)?)?)?|fri(day)?|sat(urday)?|sun(day)?)"
+_MONTH = r"(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sept?(ember)?|oct(ober)?|nov(ember)?|dec(ember)?)"
+_TIME = r"\d{1,2}([:.]\d{2})( ?[ap]\.?m\.?)?|\d{1,2} ?[ap]\.?m\.?"
 ACCOUNT_DATE = re.compile(
-    r"(\d{1,2}([:.]\d{2})?( ?[ap]\.?m\.?)?( ?[-–] ?\d{1,2}([:.]\d{2})?( ?[ap]\.?m\.?)?)?|"
-    r"(mon|tue|wed|thu|fri|sat|sun)[a-z]*,? ?\d{0,2}( [a-z]{3,9})?|\d{1,2} [a-z]{3,9}( \d{4})?)", re.I)
-# Links there are followed unless their words or address sound like doing something.
+    rf"(({_TIME})( ?[-–] ?({_TIME}))?|\d{{1,2}}|({_DAY},? ?)?(\d{{1,2}}(st|nd|rd|th)? {_MONTH}|{_MONTH} \d{{1,2}}(st|nd|rd|th)?),?( \d{{4}})?|"
+    rf"{_DAY}(,? \d{{1,2}}(st|nd|rd|th)?)?|\d{{4}}-\d{{2}}-\d{{2}}|\d{{1,2}}[./]\d{{1,2}}([./]\d{{2,4}})?)", re.I)
+# Words of something being done, in a caption or an address.
 ACCOUNT_ACTION = re.compile(
-    r"delete|remove|cancel|unsubscribe|subscribe|renew|upgrade|downgrade|confirm|approve|accept|activate|deactivate|disable|enable|"
-    r"turn (on|off)|switch (on|off)|transfer|withdraw|top ?up|deposit|redeem|\bpay|\bbuy|purchase|\border\b|checkout|\bbook\b|reserve|"
-    r"\bsend|submit|logout|log out|sign out|close account|reset|revoke|generate|create|download data|export|add card|payment method|"
-    r"удалить|отмен|оплат|купить|подтверд|διαγραφή|ακύρωση|πληρωμή|poista|peru|maksa|tilaa|vahvista", re.I)
+    r"delete|remove|cancel|subscri|renew|upgrade|downgrade|confirm|approve|accept|agree|activat|disable|enable|turn[ -]?o|switch|change|"
+    r"transfer|withdraw|top[ -]?up|deposit|redeem|\bpay|autopay|\bbuy|purchase|reorder|\border (now|again)|check ?out|\bbook (now|it|this)|rebook|"
+    r"reserve|\bsend|submit|log[ -]?(out|off)|sign[ -]?(out|off)|close account|reset|revoke|generate|create|export|download data|payment method|"
+    r"trial|premium|free|\bplan\b|credit|points|claim|extend|\bgive|\btip\b|\byes\b|proceed|understand|continue|save|allow|authori[sz]e|grant|connect|"
+    r"verify|trust|forget|opt[ -]?(out|in)|leave|pause|freeze|\bstop|\bend\b|terminate|suspend|quit|unlink|link account|disconnect|drop|swap|default|"
+    r"share|invite|block|archive|undo|mark|enrol|join|waitlist|one-?click|1-?click|oauth|device|set[ -]|update|edit|add card|"
+    r"удалить|отмен|оплат|купить|подтверд|выйти|διαγραφή|ακύρωση|πληρωμή|αποσύνδεση|poista|peru|maksa|tilaa|vahvista", re.I)
+# Where a link may lead without asking: pages about what there is (anything under them), and the owner's own lists (only
+# the list itself, or one thing in it).
+ACCOUNT_PLACES = frozenset({"", "home", "index", "start", "classes", "class", "courses", "course", "lessons", "lesson", "events", "event", "workshops",
+                            "workshop", "schedule", "calendar", "timetable", "booking-calendar", "book-online", "service-page", "services", "service",
+                            "products", "product", "shop", "store", "category", "categories", "collections", "collection", "catalog", "menu", "gallery",
+                            "help", "faq", "about", "about-us", "contact", "blog", "news", "search", "locations", "location", "teachers", "pricing",
+                            "kurssit", "tapahtumat", "aikataulu", "tuotteet", "palvelut"})
+ACCOUNT_OWN = frozenset({"account", "my-account", "profile", "me", "dashboard", "orders", "my-orders", "order-history", "bookings", "my-bookings", "booking",
+                         "reservations", "my-reservations", "my-classes", "my-schedule", "members", "member", "members-area", "membership",
+                         "memberships", "subscriptions", "tickets", "history"})
+ACCOUNT_VIEW = re.compile(r"\d+|[0-9a-f]{6,}(-[0-9a-f]+)*|details?|view|history|upcoming|past|list|overview|orders|bookings|reservations|profile|index", re.I)
+ACCOUNT_QUERY = frozenset({"page", "p", "q", "query", "date", "month", "week", "day", "time", "from", "to", "start", "end", "category", "sort", "lang", "locale",
+                           "view", "id", "tab", "location", "filter", "service", "staff", "duration", "referral"})
+
+
+def _unquoted(text: str) -> str:
+    for _ in range(5):
+        once = urllib.parse.unquote_plus(text)
+        if once == text:
+            break
+        text = once
+    return text
+
+
+def _place(dest: str, here: str, origin: str) -> bool:
+    """A plain address of the same site that shows something: not the page itself, nothing that sounds like doing."""
+    if not dest.startswith(origin + "/"):
+        return False
+    address, page = _unquoted(dest[len(origin):].split("#")[0]), _unquoted(here.split("#")[0].removeprefix(origin))
+    path, _, query = address.partition("?")
+    if address == page or path == page.partition("?")[0] or ".." in path or "//" in path or ACCOUNT_ACTION.search(address.replace("_", " ")):
+        return False
+    parts = [x.lower().removesuffix(".html").removesuffix(".php") for x in path.strip("/").split("/")]
+    if re.fullmatch(r"[a-z]{2}(-[a-z]{2})?", parts[0]) and len(parts) > 1:  # /en/…
+        parts = parts[1:]
+    if parts[0] in ACCOUNT_OWN:
+        if not all(ACCOUNT_VIEW.fullmatch(x) for x in parts[1:]):
+            return False
+    elif parts[0] not in ACCOUNT_PLACES:
+        return False
+    return all(k.partition("=")[0].lower() in ACCOUNT_QUERY for k in query.split("&") if k)
 
 
 def account_acts(g: dict, texts: list[str], raw: list[str], money: bool) -> bool:
     """In a signed-in session: could pressing this do something in the owner's account?"""
-    kind, words = g.get("kind"), " ".join([*raw, str(g.get("ident") or "")])
-    if kind == "link" and g.get("tag") == "a":
-        here = str(g.get("frame_origin") or "?")
-        path = urllib.parse.unquote(str(g.get("dest") or "")).split("#")[0]
-        return not path.startswith(here + "/") or bool(ACCOUNT_ACTION.search(words) or ACCOUNT_ACTION.search(path[len(here):]))
+    kind, words = g.get("kind"), " ".join([*raw, str(g.get("label") or ""), str(g.get("ident") or "")])
+    if g.get("tag") == "a" or kind == "link":
+        return (not texts or not g.get("plain") or bool(ACCOUNT_ACTION.search(" ".join(raw)))
+                or not _place(str(g.get("dest") or ""), str(g.get("href") or ""), str(g.get("frame_origin") or "?")))
     if kind in ("checkbox", "radio"):
-        # A box of a form is sent with it, and shown to the owner then; a switch acts at once.
-        native = g.get("tag") == "input" and not g.get("role") and g.get("in_form")
-        return not native or bool(ACCOUNT_ACTION.search(words) or re.search(r"renew|2-?step|two.?factor|recurring", words, re.I))
+        # A box of a form with a button is sent with it, and shown to the owner then; a switch acts at once.
+        native = g.get("tag") == "input" and not g.get("role") and g.get("form_button")
+        return not native or bool(ACCOUNT_ACTION.search(words) or re.search(r"2-?step|two.?factor|2fa|mfa|recurring|auto|card|public|data", words, re.I))
     if kind == "input":
         return False  # (a click into a text field)
     if not texts:
         return True
-    ok = (ACCOUNT_SAFE,) if g.get("submits") and not g.get("search") else (ACCOUNT_SAFE, ACCOUNT_DATE)
-    if not _all(ok, texts) or (g.get("submits") and not g.get("search") and not _all((re.compile(r"search|find|hae|поиск|найти|αναζήτηση", re.I),), texts)):
-        return True
-    return money and not _all((ACCOUNT_DATE, re.compile(r"(close|×|back|menu|previous|next (month|week|day)|[‹›<>«»←→])", re.I), ADD_TO_CART), texts)
+    if g.get("dialog") and _all((ACCOUNT_CLOSE,), texts) and not g.get("submits"):
+        return False
+    if g.get("submits"):
+        return not (g.get("search") and _all((re.compile(r"search|find|hae|поиск|найти|αναζήτηση", re.I),), texts))
+    if _all((ACCOUNT_DATE, re.compile(r"(back|menu|previous|next (month|week|day))", re.I)), texts):
+        return False
+    return not _all((ACCOUNT_SAFE,), texts) or (money and not _all((ADD_TO_CART,), texts))
 
 
 def caption(text: str) -> str:
@@ -872,6 +922,7 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
     moves_on = _all(known, plain) and priced_ok(captions)
     if any(mixed_scripts(t) for t in captions):
         raise ToolError("the button's text mixes alphabets (a disguise); refusing")
+    box = b.get("box") if b.get("box") in ("checkbox", "radio") else None
     if not moves_on and any(PAY_WORDS.search(t) for t in plain):
         raise ToolError("this would pay or order for money: " + pay)
     if not moves_on and (any(AMOUNT_RE.search(t) for t in captions) or (captions and not plain)):
@@ -883,7 +934,7 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
         raise ToolError("untick the boxes that may add a subscription or cost first (or ask the owner): "
                         + "; ".join(side.scrub(clean(x, 60)) for x in b["risky_checked"][:3]))
     money = money_around(side, b.get("gate_totals") or b.get("totals"), b.get("frames"))
-    if money and not moves_on:
+    if money and not moves_on and not (box and press.get("tag") == "input"):  # (a tick by itself orders nothing)
         raise ToolError(f"the page {money} and this may be the button that orders: {pay}")
     dest = str(press.get("dest") or "")
     m = re.match(r"https?://[^/?#]+", dest)
@@ -894,6 +945,7 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
                          "digest": b.get("digest"), "gen": b.get("gen"), "press": press, "frames": b.get("frames") or [],
                          "seen": b.get("seen"), "priced": bool(b.get("priced")), "dest_origin": m.group() if m else "", "around": side.scrub(clean(b.get("around"), 500)),
                          "what": what, "title": side.scrub(clean(b.get("title"), 100)),
+                         **({"box": box, "checked": b.get("checked") is True} if box else {}),
                          "expires": side.clock() + REQUEST_TTL}}
 
 
@@ -924,7 +976,8 @@ def _shown_form(side: CheckoutSide, form: list[dict]) -> list[str]:
             line = f"{side.scrub(label)} (selected)"
         else:
             own = names.get(" ".join(str(v).split()).casefold())
-            line = f"{side.scrub(label)}: " + (f"[your {own}]" if own else side.scrub(clean(v)))
+            # (What was filled in by a sign-in is cut out of everything the browser says.)
+            line = f"{side.scrub(label)}: " + (f"[your {own}]" if own else side.scrub(clean(v)).replace("•••", "(your login)"))
         lines.append(line + ("" if f.get("shown", True) else " [not visible on the page]"))
     return lines
 
@@ -933,7 +986,8 @@ async def describe_submit(s: Services, a: dict) -> str:
     side = cs(s)
     r = a.get("resolved") or {}
     bd = r.get("button") or {}
-    lines = [f"Press “{clean(bd.get('label'), 80) or '(no text)'}” on {r.get('origin')}",
+    do = "Press" if not r.get("box") else "Choose" if r["box"] == "radio" else "Untick" if r.get("checked") else "Tick"
+    lines = [f"{do} “{clean(bd.get('label'), 80) or '(no text)'}” on {r.get('origin')}",
              *([f"  inside a frame from {bd.get('frame_origin')}"] if bd.get("frame_origin") != r.get("origin") else []),
              f"Page: {clean(r.get('title'), 100)}", f"For (Ampi's words): {clean(r.get('what'), 200)}"]
     if r.get("dest_origin") and r["dest_origin"] != r.get("origin"):
@@ -962,6 +1016,7 @@ async def checkout_submit(s: Services, a: dict) -> Result:
         resp = await side.client.call({"cmd": "submit", "session": r["session"], "origin": r["origin"], "url": r["url"],
                                        "button": r["button"], "digest": r["digest"], "gen": r["gen"],
                                        "press": r["press"], "frames": r["frames"], "seen": r.get("seen"),
+                                       **{k: r[k] for k in ("box", "checked") if k in r},
                                        "expect_totals": [{"amount": t.get("amount"), "currency": t.get("currency")}
                                                          for t in r["totals"]]}, timeout=90)
     except CheckoutRefused:

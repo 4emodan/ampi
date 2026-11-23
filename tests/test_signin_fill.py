@@ -5,6 +5,7 @@ import asyncio
 import html
 import json
 import os
+import shutil
 import subprocess
 import threading
 import urllib.parse
@@ -31,6 +32,8 @@ class Engine(FakeEngine):
     def __init__(self, pages):
         super().__init__(pages)
         self.facts, self.press, self.on_signin, self.after_click, self.keeps = {}, {}, None, None, []
+        self.moved = False     # the page isn't what it was, just before it is filled in
+        self.lose = None       # op: the page goes away while it runs
 
     def login_facts(self, f, a):
         es = [f.els.get(a.get(k)) for k in ("user", "secret") if a.get(k)]
@@ -53,6 +56,7 @@ class Engine(FakeEngine):
         other = f.els.get(a.get("with")) or {}
         return {"connected": True, "tag": e["tag"], "texts": [e["label"]], "ident": e["id"], "submits": e.get("form") is not None,
                 "search": False, "dest": f"{SITE}/login", "to": f"{SITE}/login", "method": "post", "ownMethod": True, "inForm": True,
+                "plain": False, "formButton": e.get("form") is not None, "dialog": False, "leaks": False,
                 "withForm": e.get("form") is not None and e.get("form") == other.get("form"), "around": f.text, **self.press}
 
     def op(self, f, a):
@@ -62,8 +66,8 @@ class Engine(FakeEngine):
             return self.gate(f, a)
         if a["op"] == "signin":
             facts = self.login_facts(f, a)
-            if {k: facts.get(k) for k in a["expect"]} != a["expect"]:
-                return {"ok": False}
+            if {k: facts.get(k) for k in a["expect"]} != a["expect"] or self.moved:
+                return {"ok": False, "set": False}
             for k, name in (("user", "user"), ("secret", "password")):
                 if a.get(k):
                     if f.els[a[k]].get("vanish"):
@@ -73,6 +77,12 @@ class Engine(FakeEngine):
             if self.on_signin:
                 self.on_signin(f)
             return {"ok": True}
+        if a["op"] == self.lose:
+            self.lose = None
+            super().op(f, {"op": "click", "n": a["n"]})
+            self.frames = [Frame("main", f"{SITE}/in", text="Welcome")]
+            self.frames[0].loader = "L-main-2"
+            raise co.CdpProtocolError("Cannot find context")
         if a["op"] == "clickif":
             g = self.gate(f, a)
             if any(json.dumps(g.get(k)) != json.dumps(v) for k, v in a["expect"].items()):
@@ -335,6 +345,71 @@ def test_the_button_is_checked_again_when_it_is_pressed(env, change):
     assert not eng.clicks and (r.get("pressed") is False or "not pressed" in r["error"])
 
 
+def test_a_press_that_takes_the_page_away(env):
+    c, eng, sid, refs = env
+    b = bind(c, sid, refs)
+    eng.lose = "clickif"
+    r = fill(c, sid, b)
+    assert not r["ok"] and r["phase"] == "sent" and "look at it" in r["error"] and eng.clicks == [("main", 3)]
+
+
+def test_a_press_that_is_refused_on_a_page_that_moved_on(env):
+    c, eng, sid, refs = env
+    b = bind(c, sid, refs)
+
+    def swap(f):
+        f.els[3]["label"], f.url = "Place order", f"{SITE}/in"
+    eng.on_signin = swap
+    r = fill(c, sid, b)
+    assert not r["ok"] and r["phase"] == "sent" and not eng.clicks
+
+
+def test_nothing_was_filled_in_after_all(env):
+    c, eng, sid, refs = env
+    b = bind(c, sid, refs)
+    eng.moved = True
+    r = fill(c, sid, b)
+    assert not r["ok"] and r["phase"] == "verify" and not eng.sets and c.session.secrets  # (cut out all the same)
+    assert not c.session.signed_in and not c.session.user_step
+    eng.moved = False
+    assert fill(c, sid, bind(c, sid, refs))["ok"] and c.session.signed_in
+
+
+def test_nothing_was_filled_in_on_the_second_page(env):
+    c, eng, sid, refs = env
+    fill(c, sid, bind(c, sid, refs, user="User name", password=None, press=None), password=None)
+    second_page(eng)
+    b = bind(c, sid, refs, user=None)
+    eng.moved = True
+    assert fill(c, sid, b, user=None)["phase"] == "verify" and c.session.user_step
+    eng.moved = False
+    assert fill(c, sid, bind(c, sid, refs, user=None), user=None)["ok"]
+
+
+def test_a_user_name_in_the_button(env):
+    c, eng, sid, refs = env
+    eng.frames[0].els[3]["id"] = f"go-{ME}"
+    fill(c, sid, bind(c, sid, refs, user="User name", password=None, press=None), password=None)
+    second_page(eng)
+    r = fill(c, sid, bind(c, sid, refs, user=None), user=None)
+    assert r["ok"] and r["pressed"] and eng.clicks == [("main", 3)]
+
+
+def test_a_box_the_owner_approves(env):
+    c, eng, sid, refs = env
+    b = c.handle({"cmd": "bind_submit", "session": sid, "ref": refs["Remember me"]})
+    assert b["ok"] and b["box"] == "checkbox" and b["checked"] is False
+    req = {"cmd": "submit", "session": sid, "origin": b["origin"], "url": b["url"], "button": b["button"], "gen": b["gen"], "press": b["press"],
+           "seen": b["seen"], "expect_totals": b["totals"], "frames": b["frames"], "digest": b["digest"], "box": b["box"], "checked": b["checked"]}
+    for wrong in ({"checked": True}, {"box": "radio"}, {"box": None}):
+        assert "changed" in c.handle({**req, **wrong})["error"] and not eng.clicks
+    b2 = c.handle({"cmd": "bind_submit", "session": sid, "ref": refs["Remember me"]})
+    assert c.handle({**req, "gen": b2["gen"]})["ok"] and eng.clicks == [("main", 7)]
+    eng.frames[0].els[7].update(label="Auto-renew my membership", checked=False)
+    assert "subscription" in c.handle({"cmd": "bind_submit", "session": sid, "ref": refs["Remember me"]})["error"]
+    assert "button" in c.handle({"cmd": "bind_submit", "session": sid, "ref": refs["Email"]})["error"]
+
+
 def test_a_button_that_wakes_up_late(env):
     c, eng, sid, refs = env
     eng.frames[0].els[3]["disabled"] = True
@@ -373,7 +448,7 @@ def test_in_a_signed_in_session_no_other_address_is_opened(env):
     fill(c, sid, bind(c, sid, refs))
     assert "signed in here" in c.handle({"cmd": "open", "url": f"{SITE}/account/cancel?yes=1", "session": sid})["error"]
     g = c.handle({"cmd": "gate", "session": sid, "ref": refs["Log in"]})
-    assert g["signed_in"] is True and g["in_form"] is True
+    assert g["signed_in"] is True and g["form_button"] is True
 
 
 def test_the_sites_a_session_was_on(env):
@@ -382,6 +457,64 @@ def test_the_sites_a_session_was_on(env):
     c.handle({"cmd": "open", "url": f"{SITE}/login", "session": sid})
     refs = {e["label"]: e["ref"] for e in c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["elements"]}
     assert bind(c, sid, refs)["visited"] == ["club.example", "other.example"]
+
+
+def test_a_site_that_forwards_at_once_counts_too(env):
+    c, eng, sid, refs = env
+    eng.pages["https://evil.example/"] = login_page  # (it forwards before anyone looks)
+    c.handle({"cmd": "open", "url": "https://evil.example/", "session": sid})
+    refs = {e["label"]: e["ref"] for e in c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["elements"]}
+    assert bind(c, sid, refs)["visited"] == ["club.example", "evil.example"]
+    for i in range(60):
+        c._visit(c.session, f"https://s{i}.example/")
+    assert "too many sites" in bind(c, sid, refs)["error"]
+
+
+def test_after_the_user_name_it_counts_as_an_account(env):
+    c, eng, sid, refs = env
+    fill(c, sid, bind(c, sid, refs, user="User name", password=None, press=None), password=None)
+    assert c.handle({"cmd": "gate", "session": sid, "ref": refs["Log in"]})["signed_in"] is True
+    assert "signed in here" in c.handle({"cmd": "open", "url": f"{SITE}/x", "session": sid})["error"]
+
+
+def test_fields_that_act_at_once_in_an_account(env):
+    c, eng, sid, refs = env
+    eng.frames[0].els[10] = el("select", label="Plan", options=["Gold", "Free"])
+    refs = {e["label"]: e["ref"] for e in c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["elements"]}
+    assert c.handle({"cmd": "choose", "session": sid, "ref": refs["Plan"], "option": "Free"})["ok"]
+    c.session.typed.clear()
+    fill(c, sid, bind(c, sid, refs, press=None))
+    for req in ({"cmd": "choose", "ref": refs["Plan"], "option": "Gold"}, {"cmd": "type", "ref": refs["Search"], "text": "x"}):
+        assert "may act at once" in c.handle({**req, "session": sid})["error"]
+    assert c.handle({"cmd": "type", "session": sid, "ref": refs["Your comment"], "text": "hello"})["ok"]  # part of a form
+
+
+def test_the_login_never_goes_into_an_address(env):
+    c, eng, sid, refs = env
+    fill(c, sid, bind(c, sid, refs, press=None))
+    eng.press = {"leaks": True}
+    assert "into an address" in c.handle({"cmd": "click", "session": sid, "ref": refs["Log in"]})["error"] and not eng.clicks
+
+
+def test_what_is_to_pay_is_seen_as_it_is(env):
+    c, eng, sid, refs = env
+    fill(c, sid, bind(c, sid, refs, press=None), name="1234567", user="1234567")
+    eng.frames[0].text = "no 1234567. Total: 1234567 €"
+    snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
+    assert snap["priced"] and snap["totals"] == [{"amount": "1234567.00", "currency": "EUR", "label": "total"}] and "1234567" not in snap["text"]
+
+
+def test_a_press_the_owner_approves_after_signing_in(env):
+    c, eng, sid, refs = env
+    fill(c, sid, bind(c, sid, refs, press=None))
+    eng.frames[0].url = f"{SITE}/book?who={urllib.parse.quote(ME)}"
+    eng.frames[0].els[5]["label"] = f"Book as {ME}"
+    b = c.handle({"cmd": "bind_submit", "session": sid, "ref": refs["Place order"]})
+    assert b["ok"] and ME not in json.dumps(b)
+    req = {"cmd": "submit", "session": sid, "origin": b["origin"], "url": b["url"], "button": b["button"], "gen": b["gen"], "press": b["press"],
+           "seen": b["seen"], "expect_totals": b["totals"], "frames": b["frames"], "digest": b["digest"]}
+    r = c.handle(req)
+    assert r["ok"] and r["phase"] == "sent" and eng.clicks[-1] == ("main", 5)
 
 
 def test_an_engine_is_not_used_twice_where_there_are_sign_ins(env):
@@ -488,6 +621,27 @@ def test_only_the_pages_words_are_touched():
     assert co.hidden({"text": "x"}, []) == {"text": "x"}
 
 
+def test_the_beginning_of_one_at_the_end_of_a_cut_text():
+    long = "a" * 40 + " "
+    assert co.hidden({"text": long + "s3cret p"}, [PW]) == {"text": long + "•••"}
+    assert co.hidden({"text": long + "s3c"}, [PW]) == {"text": long + "s3c"} and co.hidden({"text": "s3cret p"}, [PW]) == {"text": "s3cret p"}
+
+
+def test_user_names_that_are_words_or_numbers():
+    h = lambda text, name: co.hidden({"text": text}, [co.Name(name), PW])["text"]
+    assert h("Information for info, INFO!", "info") == "Information for •••, •••!"
+    assert h("savanna anna", "anna") == "savanna •••" and h("Order total: 2400,00 EUR 2400", "2400") == "Order total: 2400,00 EUR 2400"
+    assert h("240000 but 240000,00 and 1240000 or 1.240000", "240000") == "••• but 240000,00 and 1240000 or 1.240000"
+    assert h("?e=me%40x.example&x=%22me%40x.example%22&y=%2522me%2540x.example", ME) == "?e=•••&x=%22•••%22&y=%2522•••"
+    assert h("(me@x.example) x-me@x.example", ME) == "(•••) x-•••" and h("some@x.example", ME) == "some@x.example"
+    assert co.hidden({"text": "1 2+2 is a+b here"}, ["a bc"])["text"] == "1 2+2 is a+b here"
+    assert co.hidden({"text": "one s3cret%2520pa%26ss two"}, [PW])["text"] == "one ••• two"
+
+
+def test_what_the_service_gets_back_is_as_it_is():
+    assert co.hidden({"bound": {"press": {"texts": [ME]}}, "title": ME}, [co.Name(ME)]) == {"bound": {"press": {"texts": [ME]}}, "title": "•••"}
+
+
 def test_a_piece_is_never_left_over(env):
     c, eng, sid, refs = env
     fill(c, sid, bind(c, sid, refs))
@@ -509,71 +663,122 @@ def test_login_host():
 
 def g(text, kind="button", **kw):
     base = {"kind": kind, "texts": [text] if text else [], "tag": "a" if kind == "link" else "input" if kind in ("checkbox", "radio") else "button",
-            "submits": False, "filled": True, "signed_in": True, "frame_origin": SITE, "href": f"{SITE}/a", "dest": f"{SITE}/b" if kind == "link" else "",
-            "totals": [], "frames": [SITE], "priced": False, "role": "", "in_form": True, "search": False, "ident": "", "method": ""}
+            "submits": False, "filled": True, "signed_in": True, "frame_origin": SITE, "href": f"{SITE}/a", "dest": f"{SITE}/classes/5" if kind == "link" else "",
+            "totals": [], "frames": [SITE], "priced": False, "role": "", "form_button": True, "plain": kind == "link", "dialog": False, "search": False,
+            "ident": "", "method": ""}
     return {**base, **kw}
 
 
-@pytest.mark.parametrize("text", ["Renew", "Upgrade plan", "Top up", "Start free trial", "Redeem", "Use credit", "Transfer", "Withdraw", "Cancel membership",
-                                  "Close account", "Deactivate account", "Turn off 2-step verification", "Create API key", "Show recovery codes", "Remove",
-                                  "Accept", "Save", "Change", "Edit", "Choose", "Continue", "Apply", "Yes", "OK", "Confirm", "Book", "Book now", "Use plan",
-                                  "Log out", "", "Add", "Join waitlist", "Accept all", "Checkout", "Use this address"])
+ACTS = ["Renew", "Upgrade plan", "Top up", "Start free trial", "Redeem", "Use credit", "Transfer", "Withdraw", "Cancel membership", "Close account",
+        "Deactivate account", "Turn off 2-step verification", "Create API key", "Show recovery codes", "Remove", "Accept", "Save", "Change", "Edit", "Choose",
+        "Continue", "Apply", "Yes", "OK", "Confirm", "Book", "Book now", "Use plan", "Log out", "", "Add", "Join waitlist", "Accept all", "Checkout",
+        "Use this address", "Go premium", "Try it free", "Switch plan", "Change plan", "Reorder", "Rebook", "Autopay", "Use points", "Claim", "Extend", "Give",
+        "Tip", "Yes, I'm sure", "Proceed", "I understand", "Allow", "Authorize", "Grant access", "Connect app", "Verify", "Trust this device", "Forget device",
+        "Signout", "Log off", "Opt out", "Leave club", "Pause membership", "Freeze", "Stop", "End membership", "Terminate", "Suspend", "Quit", "Unlink",
+        "Disconnect", "Drop class", "Swap", "Set as default", "Share", "Invite", "Block", "Archive", "Undo", "Close", "Decline", "Reject", "Dismiss"]
+
+
+@pytest.mark.parametrize("text", ACTS + ["12 months", "1 month", "10 credits", "50 euros", "5 tickets", "30 days", "Money transfer", "Monthly plan",
+                                         "Monthly billing", "Wedding booking", "Wednesday off", "Mayor", "Saturn", "May I"])
 def test_in_an_account_almost_every_button_asks(text):
     assert oc.commits(g(text)) in ("order", "commit")
-    if text not in ("",):
-        assert oc.commits(g(text, priced=True)) in ("order", "commit")
+    assert oc.commits(g(text, priced=True)) in ("order", "commit")
     assert oc.commits(g(text, kind="checkbox", role="switch")) in ("order", "commit")
 
 
-@pytest.mark.parametrize("text", ["Search", "Filter", "Close", "×", "Back", "Menu", "Next month", "Previous week", "Show more", "Add to cart", "View cart",
-                                  "10:30", "9:00 - 10:00", "Fri 27", "14", "Reject all"])
+@pytest.mark.parametrize("text", ["Search", "Filter", "Back", "Menu", "Next month", "Previous week", "Show more", "Add to cart", "View cart", "10:30",
+                                  "9:00 - 10:00", "10.30 am", "Fri 27", "14", "27 Nov", "Friday, 27 November 2026", "Nov 27", "May 5", "2026-11-27", "27.11."])
 def test_looking_around_does_not(text):
     assert oc.commits(g(text)) is None
-    if text != "14":
-        assert oc.commits(g(text, submits=True)) == ("commit" if text != "Search" else None) or oc.commits(g(text, submits=True)) == "order"
+    assert oc.commits(g(text, submits=True)) in ("order", "commit")  # unless it is a form's button
+
+
+def test_a_search_forms_own_button():
+    assert oc.commits(g("Search", submits=True, search=True)) is None and oc.commits(g("Pay", submits=True, search=True))
+
+
+@pytest.mark.parametrize("text", ["Close", "×", "Decline", "Reject all", "Accept all cookies", "Necessary only"])
+def test_closing_a_dialog(text):
+    assert oc.commits(g(text, dialog=True)) is None
+    assert oc.commits(g(text)) and oc.commits(g(text, dialog=True, submits=True))
 
 
 def test_with_money_around_only_dates_and_moving_about():
-    assert oc.commits(g("10:30", priced=True)) is None and oc.commits(g("Next month", priced=True)) is None
-    for text in ("Search results", "Show more", "Next", "View cart"):
-        assert oc.commits(g(text, totals=[{"amount": "25", "currency": "EUR"}])) in ("order", "commit", None)
-    assert oc.commits(g("Next", priced=True)) == "commit"
+    for text in ("10:30", "Next month", "Back", "Fri 27", "Add to cart"):
+        assert oc.commits(g(text, priced=True)) is None
+    for text in ("Next", "Show more", "Search", "View cart", "More", "Filter"):
+        assert oc.commits(g(text, priced=True)) in ("order", "commit")
 
 
-@pytest.mark.parametrize("dest,text,asks", [
-    (f"{SITE}/classes/5", "Drawing, Friday", False), (f"{SITE}/my-bookings", "My bookings", False), (f"{SITE}/account/cancel?id=5", "Details", True),
-    (f"{SITE}/x", "Cancel booking", True), (f"{SITE}/logout", "Bye", True), ("https://other.example/", "Partner", True), ("javascript:void(0)", "More", True),
-    (f"{SITE}/%63ancel", "More", True), (f"{SITE}/renew", "More", True), (f"{SITE}.evil.example/", "More", True)])
-def test_links_in_an_account(dest, text, asks):
-    assert (oc.commits(g(text, kind="link", dest=dest)) is not None) is asks
+@pytest.mark.parametrize("dest", [f"{SITE}/classes/drawing-for-beginners", f"{SITE}/schedule?date=2026-11-27", f"{SITE}/", f"{SITE}/my-bookings",
+                                  f"{SITE}/bookings/5f3a9c2d", f"{SITE}/en/events/5", f"{SITE}/orders/12/details", f"{SITE}/booking-calendar/life-drawing?referral=x",
+                                  f"{SITE}/account", f"{SITE}/products/blue-pen?page=2"])
+def test_links_to_places(dest):
+    assert oc.commits(g("Drawing, Friday", kind="link", dest=dest)) is None
+
+
+@pytest.mark.parametrize("dest", [
+    f"{SITE}/a#", f"{SITE}/a", f"{SITE}/a?x=1", "javascript:void(0)", "https://other.example/classes/5", f"{SITE}.evil.example/classes", f"{SITE}/signout",
+    f"{SITE}/sign-out", f"{SITE}/logoff", f"{SITE}/leave", f"{SITE}/membership/end", f"{SITE}/pause", f"{SITE}/terminate", f"{SITE}/drop?id=5",
+    f"{SITE}/reorder?id=5", f"{SITE}/rebook/5", f"{SITE}/autopay/on", f"{SITE}/oneclick?sku=5", f"{SITE}/1-click", f"{SITE}/trial/start",
+    f"{SITE}/plan/switch?to=gold", f"{SITE}/oauth/authorize?x=1", f"{SITE}/device?code=5", f"{SITE}/allow/1", f"{SITE}/set-default/2", f"{SITE}/opt-out",
+    f"{SITE}/undo/7", f"{SITE}/mark-paid", f"{SITE}/enroll/5", f"{SITE}/waitlist/join/5", f"{SITE}/claim/5", f"{SITE}/use-credit/5", f"{SITE}/%2564elete/5",
+    f"{SITE}/%63ancel", f"{SITE}/account/close", f"{SITE}/account/cancel?id=5", f"{SITE}/bookings/5/cancel", f"{SITE}/classes/5?action=book",
+    f"{SITE}/classes/../logout", f"{SITE}/classes//x", f"{SITE}/classes/5/cancel_booking", f"{SITE}/profile/x7", f"{SITE}/anything-else", f"{SITE}/me/do-it"])
+def test_links_that_may_do_something(dest):
+    assert oc.commits(g("Drawing, Friday", kind="link", dest=dest)) in ("order", "commit")
+
+
+@pytest.mark.parametrize("text", [x for x in ACTS if x not in (
+    # (words that a plain link to a place may have; the place decides)
+    "Add", "Apply", "Choose", "Book", "Show recovery codes", "OK", "Close", "Dismiss", "Decline", "Reject", "Use this address")])
+def test_links_that_say_they_do_something(text):
+    assert oc.commits(g(text, kind="link")) in ("order", "commit")
+
+
+def test_links_that_are_more_than_links():
+    assert oc.commits(g("Drawing", kind="link", plain=False)) and oc.commits(g("", kind="link"))
+    assert oc.commits(g("Gold", kind="button", tag="a", dest=f"{SITE}/delete/5"))  # an option inside a link
 
 
 def test_boxes_in_an_account():
-    assert oc.commits(g("I agree to the house rules", kind="checkbox")) is None  # part of a form: the owner sees it when it is sent
-    assert oc.commits(g("Auto-renew my plan", kind="checkbox")) and oc.commits(g("Wifi", kind="checkbox", in_form=False))
-    assert oc.commits(g("Morning", kind="radio")) is None and oc.commits(g("x", kind="checkbox", tag="div"))
+    assert oc.commits(g("I agree to the house rules", kind="checkbox"))  # ("agree": the owner's)
+    assert oc.commits(g("Vegetarian", kind="checkbox")) is None  # part of a form: the owner sees it when it is sent
+    for text in ("Auto-renew my plan", "Autopay", "Save card", "2FA", "MFA", "Public profile", "Share my data", "Use my points"):
+        assert oc.commits(g(text, kind="checkbox")), text
+        assert oc.commits(g("", kind="checkbox", label=text)), text  # (a <label> around it isn't its caption)
+    assert oc.commits(g("Vegetarian", kind="checkbox", form_button=False)) and oc.commits(g("x", kind="checkbox", tag="div"))
+    assert oc.commits(g("Morning", kind="radio")) is None
 
 
 def test_outside_an_account_nothing_changed():
     assert oc.commits(g("Continue", signed_in=False, filled=False)) is None and oc.commits(g("Save", signed_in=False, filled=False)) is None
 
 
-# --- the page-side script in a real browser (Edge on the owner's PC; skipped without it) ------------------------
+# --- the page-side script in a real browser (Edge on the owner's PC, Chromium elsewhere; skipped without one) ------
 
 
-EDGE = next((p for p in (Path(os.environ.get("ProgramFiles(x86)", "x")) / "Microsoft/Edge/Application/msedge.exe",
-                         Path(os.environ.get("ProgramFiles", "x")) / "Microsoft/Edge/Application/msedge.exe") if p.exists()), None)
+EDGE = next((str(p) for p in (Path(os.environ.get("ProgramFiles(x86)", "x")) / "Microsoft/Edge/Application/msedge.exe",
+                              Path(os.environ.get("ProgramFiles", "x")) / "Microsoft/Edge/Application/msedge.exe",
+                              *filter(None, map(shutil.which, ("chromium", "google-chrome", "chrome", "msedge", "microsoft-edge")))) if Path(p).exists()), None)
 PAGE = """<!doctype html><meta charset=utf-8><title>t</title><base href="https://base.example/">
 <form id=login method=POST action="/do"><input name=email type=email><input name=p type=password><input type=checkbox name=remember>
  <input type=hidden name=csrf value=x><input name=url style="display:none" value=""><input type=password name=trap tabindex=-1><button>Log in</button>
  <button formaction="https://evil.example/x" id=evil>Log in</button><button formmethod=get id=get>Log in</button></form>
 <form id=plain><input name=user2><input type=password name=p2><button id=b2>Sign in</button></form>
+<form id=traps method=post><input type=email name=e10><input type=password name=p10><input name=website tabindex=-1><input name=hp style="opacity:0">
+ <div style="position:absolute;left:-9999px"><input name=off></div><select name=language><option>en</select><button>Log in</button></form>
+<form id=sel method=post><input type=email name=e11><input type=password name=p11><select name=plan><option>gold</select><button>Log in</button></form>
+<form id=seen method=post><input type=email name=e12><input type=password name=p12><input name=hp2 style="opacity:0" value=x><button>Log in</button></form>
 <form id=reauth><input type=password name=p3><button>Delete my account</button></form>
 <form id=mail method=post><input type=email name=new><input type=password name=p4><input name=other><button>Change</button></form>
 <form id=far method=post></form><input form=far type=email name=e5><input form=far type=password name=p5><input form=far type=password name=p5b><button form=far id=b5>Log in</button>
 <form id=js action="javascript:void(0)"><input type=email name=e6><input type=password name=p6><button>Log in</button></form>
 <form id=getf method=get><input type=email name=e7><input type=password name=p7><button>Log in</button></form>
 <div id=free><div><input type=email name=e8></div><div><input type=password name=p8></div><button id=b8>Log in</button></div><input name=newsletter>
+<a href="/classes/5">Plain</a><a href="/x" onclick="1">Onclick</a><a href="/x" data-method=delete>Method</a><a href="/x" role=button>Role</a>
+<label><input type=checkbox>Loose</label><form><label><input type=checkbox>In form</label><button>Go</button></form>
+<div role=dialog><button type=button>Bye</button></div><div class="my-Cookie-bar"><button type=button>Bye2</button></div>
 <label id=lab><input type=email name=e9><button form=login>x</button></label><pre id=out></pre>"""
 SCRIPT = r"""
 const run = (op) => JSON.parse(JSON.stringify(globalThis.__ampi.run(op)));
@@ -583,9 +788,12 @@ for (const e of all) { if (e.name) byName[e.name] = e.n; if (e.id) byId[e.id] = 
 const out = {}; const login = (u, s) => run({ op: 'login', user: u ? byName[u] : null, secret: s ? byName[s] : null });
 out.login = login('email', 'p'); out.plain = login('user2', 'p2'); out.reauth = login(null, 'p3'); out.mail = login('new', 'p4');
 out.far = login('e5', 'p5'); out.js = login('e6', 'p6'); out.getf = login('e7', 'p7'); out.free = login('e8', 'p8'); out.mixed = login('email', 'p2');
+out.extras = [['e10', 'p10'], ['e11', 'p11'], ['e12', 'p12']].map(x => login(...x).extra);
 const btn = (sel) => all.find(e => e.tag === 'button' && run({ op: 'gate', n: e.n }).connected && q(sel) && e.id === (q(sel).id)).n;
 const gate = (sel, withName) => { const g = run({ op: 'gate', n: byId[sel], with: byName[withName] }); return [g.submits, g.withForm, g.method, g.ownMethod, g.to]; };
 out.evil = gate('evil', 'p'); out.get = gate('get', 'p'); out.b2 = gate('b2', 'p2'); out.b5 = gate('b5', 'p5'); out.b8 = gate('b8', 'p8'); out.wrong = gate('b2', 'p');
+const look = (sel) => { const e = all.find(x => x.label === sel); const g = run({ op: 'gate', n: e.n }); return [g.tag, g.plain, g.formButton, g.dialog]; };
+out.links = ['Plain', 'Onclick', 'Method', 'Role'].map(look); out.boxes = ['Loose', 'In form'].map(look); out.dialogs = ['Bye', 'Bye2'].map(look);
 const expect = (f) => Object.fromEntries(['hasForm','sameForm','passwords','extra','boxes','shown','method','action'].map(k => [k, f[k]]));
 // a page that swaps the password field for a text field while the user name is being filled in
 q('[name=e6]').addEventListener('input', () => { q('[name=p6]').type = 'text'; });
@@ -599,19 +807,24 @@ const g2 = run({ op: 'gate', n: byId.b2, with: byName.p2 }); const press = {}; f
 out.clickWrong = run({ op: 'clickif', n: byId.b2, expect: { ...press, texts: ['Other'] } });
 q('#plain').removeAttribute('method'); out.click = run({ op: 'clickif', n: byId.b2, expect: press }); out.seen = seen;
 out.clickGet = run({ op: 'clickif', n: byId.get, expect: {} });
+const lg = run({ op: 'login', user: byName.email, secret: byName.p }); run({ op: 'signin', user: byName.email, secret: byName.p, values: { user: 'me', password: 'hunter22' }, expect: expect(lg) });
+out.leaks = [run({ op: 'gate', n: byId.get }).leaks, run({ op: 'gate', n: byId.evil }).leaks];
 q('[name=p2]').type = 'text'; out.form = run({ op: 'form' }).fields.filter(f => f.name === 'p2').map(f => f.value);
 q('#out').textContent = 'RESULT' + JSON.stringify(out) + 'END';
 """
 
 
-@pytest.mark.skipif(EDGE is None, reason="needs Edge")
+@pytest.mark.skipif(EDGE is None, reason="needs Edge or Chromium")
 def test_the_page_script_in_a_browser(tmp_path):
     f = tmp_path / "t.html"
     f.write_text(PAGE + "<script>" + co.PAGE_JS + "</script><script>try{" + SCRIPT + "}catch(e){document.querySelector('#out').textContent='RESULT'+"
                  "JSON.stringify({error:String(e&&e.stack||e)})+'END'}</script>", encoding="utf-8")
-    r = subprocess.run([str(EDGE), "--headless=new", "--disable-gpu", "--no-first-run", f"--user-data-dir={tmp_path / 'profile'}", "--dump-dom",
+    r = subprocess.run([EDGE, "--headless=new", "--disable-gpu", "--no-first-run", f"--user-data-dir={tmp_path / 'profile'}", "--dump-dom",
                         f.as_uri()], capture_output=True, timeout=90)
     dom = r.stdout.decode("utf-8", "replace")
+    if not dom.strip():
+        pytest.skip(f"{EDGE} gave no page: {r.stderr.decode('utf-8', 'replace')[-300:]}")
+    assert "RESULT" in dom, (dom[-1000:], r.stderr.decode("utf-8", "replace")[-1000:])
     out = json.loads(html.unescape(dom[dom.index("RESULT") + 6:dom.index("END", dom.index("RESULT"))]))
     assert "error" not in out, out["error"]
     ok = {"connected": True, "hasForm": True, "sameForm": True, "passwords": 1, "extra": False, "shown": True}
@@ -626,9 +839,13 @@ def test_the_page_script_in_a_browser(tmp_path):
     assert out["evil"] == [True, True, "post", True, "https://evil.example/x"] and out["get"][2:4] == ["get", True]
     assert out["b2"] == [True, True, "get", False, ""] and out["b5"][:2] == [True, True] and out["b8"][:2] == [False, False]
     assert out["wrong"][:2] == [True, False]
-    assert out["swap"] == [{"ok": False}, ""] and out["stale"] == {"ok": False}
+    assert [x[:2] for x in out["links"]] == [["a", True], ["a", False], ["a", False], ["a", False]]
+    assert [x[2] for x in out["boxes"]] == [False, True] and [x[3] for x in out["dialogs"]] == [True, True]
+    assert out["extras"] == [False, True, True]  # traps for robots and a language; a plan; a hidden field with something in it
+    assert out["swap"] == [{"ok": False}, ""] and out["stale"] == {"ok": False, "set": False}
     assert out["fill"] == {"ok": True} and out["values"] == ["me", "hunter22", "post"]
     assert out["clickWrong"] == {"ok": False} and out["click"] == {"ok": True} and out["clickGet"] == {"ok": False}
+    assert out["leaks"] == [True, False]  # a button of the form that would send the password in an address
     assert out["seen"] == [["input", 8], ["post", "b2"]]
     assert out["form"] == ["(secret)"]  # also when the page shows it
 
@@ -724,8 +941,9 @@ def test_a_session_that_was_elsewhere(env):
 
 
 def test_related_sites():
-    assert signin.related("a.b.example", "b.example") and signin.related("b.example", "a.b.example") and signin.related("x.y", "x.y")
-    assert not signin.related("evilb.example", "b.example") and not signin.related("a.example", "b.example")
+    assert signin.related("b.example", "a.b.example") and signin.related("x.y", "x.y")
+    for site, host in (("evilb.example", "b.example"), ("a.example", "b.example"), ("evil.blogs.example", "blogs.example"), ("example", "b.example")):
+        assert not signin.related(site, host)
 
 
 def test_two_pages_one_fingerprint(env, monkeypatch):
@@ -1047,3 +1265,26 @@ def test_the_page_cannot_be_read_afterwards(env, tmp_path):
 def test_odd_refs(env, tmp_path):
     fake, r = run_op(env, tmp_path, password_ref="f0:2; rm")
     assert isinstance(r, str) and not fake.calls
+
+
+def test_a_controller_that_is_to_end_takes_no_more_requests(monkeypatch):
+    monkeypatch.setenv("AMPI_CHECKOUT_CLIENT_UIDS", "7")
+    monkeypatch.setenv("AMPI_CHECKOUT_ENGINE_UID", "9")
+    monkeypatch.setattr(co.sys, "argv", ["checkout.py", "serve"])
+
+    class Ctl:
+        retire, session = False, object()
+
+        def __init__(self, **kw):
+            pass
+
+        def expire(self):  # the session ran out; its engine isn't used again
+            self.retire, self.session = True, None
+
+    class Srv:
+        def accept(self):
+            raise AssertionError("accepted a request")
+    monkeypatch.setattr(co, "Controller", Ctl)
+    monkeypatch.setattr(co, "listening_socket", Srv)
+    monkeypatch.setattr(co.select, "select", lambda r, w, x, t: (r, [], []))
+    assert co.main() == 0

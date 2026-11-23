@@ -261,8 +261,10 @@ class Held:
     until: float
 
 
-def related(a: str, b: str) -> bool:
-    return a == b or a.endswith("." + b) or b.endswith("." + a)
+def related(site: str, host: str) -> bool:
+    """`site` is the login's host, or a site above it (club.example for accounts.club.example). Not one below: those can
+    belong to anybody (someone.blogs.example for blogs.example)."""
+    return site == host or (site.count(".") >= 1 and host.endswith("." + site))
 
 
 class Service:
