@@ -723,7 +723,8 @@ async def _resolve_fill(s: Services, a: dict) -> dict:
 
 def grand_total(totals: list[dict], currency: str, card_currency: str) -> Decimal | None:
     """The amount that will be charged: the largest total-like amount in the card's currency, leaving out
-    subtotals, VAT/tax, shipping and discount lines. `kr` counts as the card's currency for SEK/NOK/DKK."""
+    subtotals, VAT/tax, shipping and discount lines. `kr` counts as the card's currency for SEK/NOK/DKK. None when there is
+    none, or one can't be read."""
     best = None
     for t in totals:
         cur = str(t.get("currency") or "").upper()
@@ -733,8 +734,8 @@ def grand_total(totals: list[dict], currency: str, card_currency: str) -> Decima
             continue
         try:
             amount = Decimal(str(t.get("amount")))
-        except InvalidOperation:
-            continue
+        except InvalidOperation:  # it may be the amount charged
+            return None
         best = amount if best is None or amount > best else best
     return best
 
