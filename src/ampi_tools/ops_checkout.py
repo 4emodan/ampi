@@ -124,7 +124,7 @@ def priced_ok(raw: list[str]) -> bool:
 
 def money_around(side: "CheckoutSide | None", totals: Any, frames: Any) -> str:
     """Why money may be in play on this page ("" if not)."""
-    total = next((str(t.get("amount")) for t in totals or [] if _money(t)), None)
+    total = next((str(t.get("amount")) for t in totals or [] if t.get("currency") != "?" and _money(t)), None)
     if total:
         return f"shows a total to pay ({clean(total, 20)})"
     psp = side.rules.psp_origins if side is not None else DEFAULT_PSP
@@ -170,8 +170,12 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
     return None
 
 
-TOTAL_EXCLUDE = re.compile(r"sub|vat|alv|tax|vero|incl|sis\.|shipping|delivery|toimitus|discount|alennus|saved|säästä",
-                           re.I)
+# A total line that isn't the amount charged; what it says it includes (VAT, delivery) doesn't count for that.
+TOTAL_EXCLUDE = re.compile(r"sub|\bvat\b|alv|\btax|vero|mwst|moms|shipping|delivery|toimitus|versand|discount|alennus|rabatt|"
+                           r"sav(e|ed|ings?)\b|säästä|\bexcl|\bbefore\b|\bwithout\b|per (person|night|item|month)", re.I)
+_INCLUDED = re.compile(r"\b(incl\w*|inkl\w*|inc|sis\w*|with|after)\b\.?:?.{0,25}?\b(discounts?|alennu\w*|vat|tax(es)?|alv|mwst|moms|gst|btw|iva|tva|fees?|"
+                       r"shipping|delivery|toimitus\w*|versand\w*)\b|\b(vat|tax(es)?|alv|mwst|moms|gst|btw|iva|tva|shipping|delivery)\b\.? "
+                       r"(incl\w*|inkl\w*|sis\w*)", re.I)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,5}")
 
 
@@ -728,9 +732,13 @@ def grand_total(totals: list[dict], currency: str, card_currency: str) -> Decima
     best = None
     for t in totals:
         cur = str(t.get("currency") or "").upper()
+        if TOTAL_EXCLUDE.search(_INCLUDED.sub(" ", str(t.get("label") or ""))):
+            continue
+        if cur == "?":  # a number without a readable currency on a total line: it may be the amount charged
+            return None
         if cur == "KR" and card_currency in ("SEK", "NOK", "DKK"):
             cur = card_currency
-        if cur != currency or TOTAL_EXCLUDE.search(str(t.get("label") or "")):
+        if cur != currency:
             continue
         try:
             amount = Decimal(str(t.get("amount")))

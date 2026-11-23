@@ -9,7 +9,7 @@ from decimal import Decimal
 import pytest
 
 from ampi_tools.ops import Approvals, Policy, Services, validate
-from ampi_tools.ops_checkout import CheckoutSide, PaymentRules, field_matches, render
+from ampi_tools.ops_checkout import CheckoutSide, PaymentRules, field_matches, grand_total, render
 from ampi_tools.server import Daemon
 from ampi_tools.todoist import ToolError
 from ampi_tools.vault import Vault, check_card, has_card_number, luhn_ok, mask_text
@@ -426,6 +426,20 @@ def test_a_total_that_cannot_be_read_is_not_guessed(tmp_path):
         run(d.run(req("checkout.pay", **PAY), None, origin="private"))
     ctl.totals[1]["label"] = "subtotal"  # (not what is charged)
     assert run(d.run(req("checkout.pay", **PAY), None, origin="private")).get("approval")
+
+
+@pytest.mark.parametrize("text,total", [
+    ("Subtotal €90.00\nTotal €99.00", "99.00"), ("Total incl. VAT: €99.00", "99.00"), ("Total (incl. €20.00 VAT) €99.00", "99.00"),
+    ("Yhteensä (sis. ALV 24%) 99,00 €", "99.00"), ("Gesamtsumme 12 €\nGesamt inkl. MwSt. 99,00 €", "99.00"), ("Total with delivery €99", "99.00"),
+    ("Total €99.00\nTotal savings: €120.00\nTotal tax €200.00", "99.00"), ("Total after discount €99.00", "99.00"), ("Total VAT included €99", "99.00"),
+    ("Total savings: €12.00\nYou pay: €99.00", None), ("Total tax €20.00", None), ("Total excl. VAT €80", None), ("Total per person €8", None),
+    ("Total €50.00\nGrand total 1234.00", None), ("Order total\nIncl. VAT €20.00\n€99.00", None), ("Total €50\nTotal 3 x €40", None),
+    ("Total €50\nTotal weight: 2.5 kg\nTotal items: 3", "50.00"),
+])
+def test_the_total_that_is_charged(text, total):
+    from ampi_tools import checkout as co
+    got = grand_total(co.extract_totals(text), "EUR", "EUR")
+    assert got == (None if total is None else Decimal(total)), co.extract_totals(text)
 
 
 def test_kr_counts_as_the_card_currency(tmp_path):
