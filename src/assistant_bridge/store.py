@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS offsets (
 """
 
 
+MIN_SOCIAL_TEXT = 20  # shorter ones ("Done.") would match ordinary messages
+
+
 def text_hash(text: str) -> str:
     return hashlib.sha256(" ".join(text.split()).encode("utf-8", "replace")).hexdigest()
 
@@ -175,7 +178,7 @@ class Store:
     def add_social_message(self, chat_id: int, message_id: int | None, text: str | None = None) -> None:
         """A message Ampi sent that carries Instagram/Threads text: quoting or forwarding it later must not bring the
         text along (only a hash of the text is kept)."""
-        if text and text.strip():
+        if text and len(text.strip()) >= MIN_SOCIAL_TEXT:
             self._db.execute("INSERT OR IGNORE INTO social_texts VALUES (?)", (text_hash(text),))
             self._db.commit()
         if isinstance(message_id, int):
@@ -183,7 +186,7 @@ class Store:
             self._db.commit()
 
     def is_social_text(self, text: str | None) -> bool:
-        return bool(text and text.strip()) and self._db.execute(
+        return bool(text) and len((text or "").strip()) >= MIN_SOCIAL_TEXT and self._db.execute(
             "SELECT 1 FROM social_texts WHERE hash=?", (text_hash(text or ""),)).fetchone() is not None
 
     def is_social_message(self, chat_id: int, message_id: int | None) -> bool:

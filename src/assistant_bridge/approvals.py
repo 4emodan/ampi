@@ -143,7 +143,10 @@ class ApprovalRelay:
             await self.ask(self.socket, {"cmd": "notices.ack", "id": n["id"]}, timeout=10)
 
     async def tick(self) -> None:
-        await self.send_protected()
+        try:
+            await self.send_protected()
+        except ServiceError as e:  # tried again on the next tick; approval requests never wait for it
+            log.info("telegram.protect: %s", e)
         resp = await self.ask(self.socket, {"cmd": "approvals.pending"})
         if not resp.get("ok"):
             raise ServiceError(resp.get("error", "approvals.pending failed"))

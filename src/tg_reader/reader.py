@@ -215,7 +215,7 @@ class Reader:
             raw = json.loads(path.read_text())
             bots = [int(b) for b in raw["bots"]]
             self._apply(bots, raw["social"] is True)
-            self._told = True
+            self._told = bool(bots) or not required
         except (OSError, ValueError, TypeError, KeyError):
             self._told = not required
 
@@ -225,14 +225,17 @@ class Reader:
         self.deny = frozenset(self.deny | self.own_bots)
 
     def set_own_bots(self, bots: list[int], social: bool) -> None:
-        before = (set(self.own_bots), self.social, self._told)
-        self._apply(bots, social)
-        self._told = True
-        if self._state is not None and before != (self.own_bots, self.social, True):
-            tmp = self._state.with_name(self._state.name + ".tmp")
-            tmp.write_text(json.dumps({"bots": sorted(self.own_bots), "social": self.social}))
+        want = (self.own_bots | set(bots), self.social or social)
+        if not want[0] and self._state is not None:
+            self.social = want[1]
+            return  # the bridge hasn't said yet which bots are its own: that's no answer
+        if self._state is not None and (want != (self.own_bots, self.social) or not self._told):
+            tmp = self._state.with_name(self._state.name + ".tmp")  # saved first: it must hold after a restart too
+            tmp.write_text(json.dumps({"bots": sorted(want[0]), "social": want[1]}))
             os.chmod(tmp, 0o600)
             os.replace(tmp, self._state)
+        self._apply(bots, social)
+        self._told = True
 
     def own_bots_active(self) -> bool:
         return self._told and bool(self.own_bots)

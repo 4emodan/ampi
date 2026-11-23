@@ -324,6 +324,8 @@ class ProfileBot:
                     if (after and (after.session_id, after.social)) == (before and (before.session_id, before.social)):
                         break  # else the conversation changed meanwhile: quotes may no longer belong in it
                 else:
+                    await self._send_text(chat_id, thread_id, "This conversation changed while I was reading your message; "
+                                          "please send it again.", markdown=False)
                     return
             except asyncio.CancelledError:
                 with contextlib.suppress(Exception):

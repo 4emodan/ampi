@@ -265,9 +265,7 @@ class Daemon:
                     self.tg_store.set_protected(ids, request.get("complete") is not False)
                     bots = request.get("bots")
                     if isinstance(bots, list) and all(isinstance(i, int) and not isinstance(i, bool) for i in bots):
-                        self.tg_store.add_own_bots(bots)
-                        with contextlib.suppress(ToolError):
-                            await tell_tg_reader(self.services)
+                        self.tg_store.add_own_bots(bots)  # tg-reader hears it from keep_telling_tg_reader
                 return {"ok": True}
             raise ToolError(f"unknown command {cmd!r}")
         except ToolError as e:
