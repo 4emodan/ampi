@@ -364,6 +364,44 @@ def test_markdown_notify_defangs_outside_text(tmp_path):
     assert "[Approve]" not in sent[0][1] and "`" not in sent[0][1]
 
 
+def test_notify_without_a_format_is_formatted_without_masked_links():
+    from types import SimpleNamespace
+
+    from assistant_bridge.bot import ProfileBot
+    from assistant_bridge.watch.engine import WatchEngine
+
+    sent = []
+
+    class Api:
+        async def send_message(self, chat_id, text, thread_id=None, parse_mode=None):
+            sent.append((text, parse_mode))
+
+    bot = SimpleNamespace(api=Api(), profile=SimpleNamespace(name="p"))
+    bot._send_text = lambda *a, **k: ProfileBot._send_text(bot, *a, **k)
+    eng = SimpleNamespace(bot=bot, profile=SimpleNamespace(name="p", owner_chat_id=1), _social=lambda name: False)
+    text = ("**Top 3**\n1. **Water plants** (due Fri)\n- one\n[Approve](https://evil.example/a_b_c) <i>x</i> "
+            "https://ok.example/_x_/y\x00")
+
+    def run(fmt):
+        sent.clear()
+        asyncio.run(WatchEngine._notify_text(eng, text, fmt, "morning-briefing"))
+        return sent[0]
+
+    out, mode = run("rich")
+    assert mode == "HTML" and out.startswith("🔔 <b>morning-briefing</b>")
+    assert "<b>Top 3</b>" in out and "1. <b>Water plants</b>" in out and "• one" in out
+    assert "<a " not in out and "[Approve](https://evil.example/a_b_c)" in out
+    assert "https://ok.example/_x_/y" in out and "&lt;i&gt;" in out
+    out, mode = run("plain")
+    assert mode is None and "**Top 3**" in out
+
+
+def test_notify_format_defaults_to_rich():
+    from ampi_tools import watch_spec as ws
+    steps = ws.parse(pascal_files(PASCAL)).steps
+    assert [s["format"] for s in steps if s["type"] == "notify"] == ["rich"]
+
+
 def test_acting_agent_step_counts_as_action_before_it_runs(tmp_path):
     toml = PASCAL.replace('schema = { outcome = ["info", "urgent"], summary = "text:200" }',
                           'mode = "agent"\ntools = ["Bash(gmail:*)"]')

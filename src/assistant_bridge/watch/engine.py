@@ -135,10 +135,13 @@ class WatchEngine:
 
     async def _notify_text(self, text: str, fmt: str, name: str | None = None, social: bool = False) -> None:
         social = social or self._social(name)  # the running version's flag (the watcher may be replaced meanwhile)
-        header = f"🔔 {name}\n\n" if name else ""
+        # rich (the default): formatted, but [text](url) stays as written; markdown: links too (the pipeline has
+        # defanged outside text); plain: exactly as written.
+        styled = fmt in ("rich", "markdown")
+        header = (f"🔔 **{name}**\n\n" if styled else f"🔔 {name}\n\n") if name else ""
         try:
-            await self.bot._send_text(self.profile.owner_chat_id, 0, header + text, markdown=(fmt == "markdown"),
-                                      **({"social": True} if social else {}))
+            await self.bot._send_text(self.profile.owner_chat_id, 0, header + text, markdown=styled,
+                                      links=(fmt == "markdown"), **({"social": True} if social else {}))
         except Exception as e:  # noqa: BLE001
             if social:
                 log.warning("[%s] watcher message failed: %s", self.profile.name, type(e).__name__)

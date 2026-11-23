@@ -61,43 +61,45 @@ def split_markdown(text: str, limit: int = CHUNK_LIMIT) -> list[str]:
     return chunks
 
 
-def markdown_to_html(md: str) -> str:
-    """Convert common Markdown to Telegram's HTML subset. Unsupported syntax stays as text."""
+def markdown_to_html(md: str, links: bool = True) -> str:
+    """Convert common Markdown to Telegram's HTML subset. Unsupported syntax stays as text. `links=False` leaves
+    [text](url) as written, so text from outside can't hide an address behind other words."""
+    md = md.replace("\x00", "")  # used as a marker below
     out: list[str] = []
     pos = 0
     for m in _FENCE_BLOCK.finditer(md):
-        out.append(_blocks(md[pos : m.start()]))
+        out.append(_blocks(md[pos : m.start()], links))
         lang, code = m.group(1), m.group(2).rstrip("\n")
         cls = f' class="language-{html.escape(lang)}"' if lang else ""
         out.append(f"<pre><code{cls}>{html.escape(code, quote=False)}</code></pre>")
         pos = m.end()
-    out.append(_blocks(md[pos:]))
+    out.append(_blocks(md[pos:], links))
     return "".join(out).strip()
 
 
-def _blocks(text: str) -> str:
+def _blocks(text: str, links: bool = True) -> str:
     lines = []
     for line in text.split("\n"):
         heading = re.match(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$", line)
         if heading:
-            lines.append(f"<b>{_inline(heading.group(1))}</b>")
+            lines.append(f"<b>{_inline(heading.group(1), links)}</b>")
             continue
         if re.match(r"^\s*([-*_])(\s*\1){2,}\s*$", line):
             lines.append("──────────")
             continue
         bullet = re.match(r"^(\s*)[-*+]\s+(.*)$", line)
         if bullet:
-            lines.append(f"{bullet.group(1)}• {_inline(bullet.group(2))}")
+            lines.append(f"{bullet.group(1)}• {_inline(bullet.group(2), links)}")
             continue
         quote = re.match(r"^\s*>\s?(.*)$", line)
         if quote:
-            lines.append(f"▎{_inline(quote.group(1))}")
+            lines.append(f"▎{_inline(quote.group(1), links)}")
             continue
-        lines.append(_inline(line))
+        lines.append(_inline(line, links))
     return "\n".join(lines)
 
 
-def _inline(s: str) -> str:
+def _inline(s: str, links: bool = True) -> str:
     stash: list[str] = []
 
     def keep(fragment: str) -> str:
@@ -105,13 +107,16 @@ def _inline(s: str) -> str:
         return f"\x00{len(stash) - 1}\x00"
 
     s = re.sub(r"`([^`\n]+)`", lambda m: keep(f"<code>{html.escape(m.group(1), quote=False)}</code>"), s)
-    s = re.sub(
-        r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
-        lambda m: keep(
-            f'<a href="{html.escape(m.group(2), quote=True)}">{_emphasis(html.escape(m.group(1), quote=False))}</a>'
-        ),
-        s,
-    )
+    if links:
+        s = re.sub(
+            r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
+            lambda m: keep(
+                f'<a href="{html.escape(m.group(2), quote=True)}">{_emphasis(html.escape(m.group(1), quote=False))}</a>'
+            ),
+            s,
+        )
+    else:  # addresses stay exactly as written (no emphasis inside them)
+        s = re.sub(r"https?://[^\s*]+", lambda m: keep(html.escape(m.group(0), quote=False)), s)
     s = _emphasis(html.escape(s, quote=False))
     while "\x00" in s:
         s = re.sub(r"\x00(\d+)\x00", lambda m: stash[int(m.group(1))], s)
