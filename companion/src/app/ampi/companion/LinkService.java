@@ -302,10 +302,11 @@ public final class LinkService extends Service {
             this(at, SystemClock.elapsedRealtime());
         }
 
-        /** A message held up on the way says an old time: whichever is further ahead is nearer the truth. Far behind, the
-         *  server's clock was set back. */
-        Clock ahead(double at) {
-            return at > now() || now() - at > 200 ? new Clock(at) : this;
+        /** A message held up on the way says an old time: whichever is further ahead is nearer the truth. Never back, or a
+         *  late request would be done: far behind (or the server's clock was set back), a new connection starts afresh. */
+        Clock ahead(double at) throws IOException {
+            if (now() - at > 200) throw new IOException("an old message from the server");
+            return at > now() ? new Clock(at) : this;
         }
 
         double now() {

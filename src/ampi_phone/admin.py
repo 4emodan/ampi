@@ -78,7 +78,7 @@ def remove(conf: Path, name: str) -> None:
         run("systemctl", "stop", "ampi-phone.service")
     finally:
         (conf / "devices" / f"{name}.json").unlink()
-    apply(conf)
+        apply(conf)
 
 
 def apply(conf: Path) -> None:
