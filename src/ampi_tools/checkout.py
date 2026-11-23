@@ -113,10 +113,15 @@ PAY_HOST = re.compile(r"(^|[./])(stripe|adyen|braintreegateway|paypal|paypalobje
 # The parts of a reply that are the page's words (the rest are this controller's own, and must not be touched).
 PAGE_WORDS = frozenset({"title", "text", "label", "texts", "around", "options", "selected", "risky_checked", "checked", "url", "href",
                         "dest", "name", "id", "ident", "value", "confirmation", "error"})
+_SP = " \u00a0\u2007\u2009\u202f"  # spaces that group digits ("1 234,00")
+_CODE = r"\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr|zł)\b"
+# The whole run of digits and whatever may separate them (norm_amount says what it is, or that it can't be read): a piece of
+# a number must never be taken for the amount.
 AMOUNT = re.compile(
-    rf"(?P<pre>{_CUR}|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr)\b)?\s?"
-    r"(?P<num>\d{1,3}(?:[  .,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)"
-    rf"\s?(?P<post>{_CUR}|\b(?:EUR|USD|GBP|SEK|NOK|DKK|PLN|CHF|CZK|HUF|ISK|CAD|AUD|NZD|JPY|kr|zł)\b)?")
+    rf"(?P<pre>{_CUR}|{_CODE})?\s?"
+    rf"(?P<num>(?<!\d)(?<!\d[.,:'’·])(?:(?<![\d.,:'’·])[.,'’·])?"
+    rf"(?:\d{{1,3}}(?:[{_SP}]\d{{3}})+(?:[.,:'’·]\d+)*(?!\d)|\d+(?:[.,:'’·]\d+)*))"
+    rf"\s?(?P<post>{_CUR}|{_CODE})?")
 CAPTCHA_FRAME = re.compile(r"hcaptcha\.com/captcha/.*frame=challenge|recaptcha/(api2|enterprise)/bframe|"
                            r"challenges\.cloudflare\.com|captcha-delivery\.com|arkoselabs\.com|funcaptcha", re.I)
 THREEDS_FRAME = re.compile(r"3ds|threeds|three-d|/acs\b|acs\.|/challenge|authenticat", re.I)
@@ -167,14 +172,13 @@ def has_card_number(text: str) -> bool:
 
 
 def norm_amount(num: str) -> str | None:
-    s = num.replace(" ", " ").strip()
-    m = re.fullmatch(r"(.*?)([.,](\d{1,2}))?", s)
-    whole, frac = (m.group(1), m.group(3)) if m else (s, None)
-    if frac is not None and re.search(r"[.,]\d{3}$", s):  # "1.234" / "1,234" read as thousands, not decimals
-        whole, frac = s, None
-    whole = re.sub(r"[ .,]", "", whole)
-    if not whole.isdigit():
+    """"1 234,5" -> "1234.50"; None when it can't be read for sure. ("1.234" and "1,234" are thousands.)"""
+    s = re.sub(f"[{_SP}]", " ", num.strip())
+    m = (re.fullmatch(r"(\d+)(?:[.,](\d{1,2}))?", s)
+         or re.fullmatch(r"([1-9]\d{0,2}(?P<sep>[ .,'’])\d{3}(?:(?P=sep)\d{3})*)(?:(?!(?P=sep))[.,](\d{1,2}))?", s))
+    if not m:
         return None
+    whole, frac = re.sub(r"\D", "", m.group(1)), m.group(m.re.groups)
     return f"{int(whole)}.{(frac or '0').ljust(2, '0')}"
 
 
@@ -192,9 +196,7 @@ def extract_totals(text: str, words: "re.Pattern | None" = None) -> list[dict]:
                 cur = m.group("pre") or m.group("post")
                 if not cur:
                     continue
-                amount = norm_amount(m.group("num"))
-                if amount is None:
-                    continue
+                amount = norm_amount(m.group("num")) or f"unreadable ({m.group('num')[:20]})"
                 cur = SYMBOLS.get(cur, cur.upper())
                 item = {"amount": amount, "currency": cur, "label": word.group(1).lower()}
                 if item not in out:
@@ -202,7 +204,7 @@ def extract_totals(text: str, words: "re.Pattern | None" = None) -> list[dict]:
                 found = True
             if found:
                 break
-        if len(out) >= 10:
+        if len(out) >= 50:
             break
     return out
 
