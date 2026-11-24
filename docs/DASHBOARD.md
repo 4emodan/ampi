@@ -8,4 +8,4 @@ The hub's pages (overview, abilities, watchers, activity; not the address book) 
 - **Parts:** nginx (HTTPS) → `ampi-dash` (user `ampidash`, no data, no network) → `ampi-tools`, which checks the session on every
   request and lets that user ask for nothing else.
 - **HTTPS:** a Let's Encrypt certificate for the IP address (about 6 days, renewed by `ampi-cert.timer`; Telegram tells you if not).
-- **Install:** `CERTBOT_VERSION=5.4.0 bash deploy/install-dash.sh HOST`, remove with `--uninstall`.
+- **Install:** `CERTBOT_VERSION=5.10.0 bash deploy/install-dash.sh HOST`, remove with `--uninstall`.

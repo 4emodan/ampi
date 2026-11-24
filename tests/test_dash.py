@@ -219,3 +219,9 @@ def test_the_owner_hears_of_a_certificate_that_isnt_renewed(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         run(watch_cert(URL, told.append, left=lambda h: 3600))
     assert len(told) == 1 and "1 hours" in told[0]
+
+
+def test_one_request_per_connection_and_odd_json(served):
+    req, asked, _ = served
+    assert req("GET", "/api/overview", body={"a": 1})[2].getheader("Connection") == "close"
+    assert req("POST", "/api/set", headers={"Content-Type": "application/json"}, body=None)[0] in (400, 413)

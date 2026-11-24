@@ -673,6 +673,8 @@ class Daemon:
     def web_cmd(self, cmd: Any, req: dict) -> dict:
         """The dashboard service: signing in with the owner's one-time link, and then the hub's pages."""
         if cmd == "web.login":
+            if not self.tg_store:
+                raise ToolError("the dashboard can't tell the owner about a sign-in now")
             session = self.web.login(req.get("key"))
             if self.tg_store:
                 self.tg_store.notice("🔓 Someone signed in to the dashboard with your link. Not you? Send /dashboard off")

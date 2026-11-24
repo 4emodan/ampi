@@ -15,16 +15,45 @@ SITE80=${SITE80:-/etc/nginx/sites-available/dashboard}
 CONF=/home/ampitools/config.toml
 [[ $EUID -eq 0 ]] || { echo "Run as root" >&2; exit 1; }
 
+SITE80=$(readlink -f "$SITE80" 2>/dev/null || echo "$SITE80")
+
+# Writes (or, with "", removes) our own marked lines in config.toml; nothing else there is touched.
+web_config() {
+  [[ -f $CONF ]] || return 0
+  python3 - "$CONF" "$1" <<'PY'
+import os, sys, tomllib
+path, url = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+a, b = "# >>> ampi-dash", "# <<< ampi-dash"
+if text.count(a) == text.count(b) == 1 and text.index(a) < text.index(b):
+    text = text[:text.index(a)].rstrip("\n") + "\n" + text[text.index(b) + len(b):].lstrip("\n")
+elif a in text or b in text:
+    sys.exit(f"{path}: the ampi-dash lines were changed by hand; edit [web] yourself")
+if url:
+    if "web" in tomllib.loads(text):
+        sys.exit(f"{path} already has a [web] section of its own")
+    text = text.rstrip("\n") + f'\n\n{a}\n[web]\nurl = "{url}"\n{b}\n'
+tomllib.loads(text)
+st = os.stat(path)
+tmp = path + ".new"
+with open(tmp, "w", encoding="utf-8") as f:
+    f.write(text)
+os.chmod(tmp, st.st_mode & 0o777)
+os.chown(tmp, st.st_uid, st.st_gid)
+os.replace(tmp, path)
+PY
+}
+
 if [[ ${1:-} == --uninstall ]]; then
   systemctl disable --now ampi-dash.socket ampi-dash.service ampi-cert.timer 2>/dev/null || true
   rm -f /etc/nginx/sites-enabled/ampi /etc/nginx/sites-available/ampi /etc/nginx/conf.d/ampi-limits.conf
   sed -i '\#include /etc/nginx/snippets/ampi-acme.conf;#d' "$SITE80" 2>/dev/null || true
   rm -f /etc/nginx/snippets/ampi-acme.conf
   nginx -t && systemctl reload nginx
-  ufw --force delete allow 443/tcp >/dev/null 2>&1 || true
+  [[ ! -f /etc/ampi-dash/ufw ]] || ufw --force delete allow 443/tcp >/dev/null 2>&1 || true
   rm -f /etc/systemd/system/ampi-dash.s* /etc/systemd/system/ampi-cert.*
   systemctl daemon-reload
-  [[ ! -f $CONF ]] || sed -i '/^\[web\]/,/^url = /d' "$CONF"
+  web_config ""
   rm -rf "$LIB" /etc/ampi-dash /opt/certbot-ampi
   userdel "$DASH" 2>/dev/null || true
   systemctl restart ampi-tools
@@ -35,8 +64,11 @@ fi
 HOST=${1:-}
 [[ $HOST =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "Give this server's public IPv4 address" >&2; exit 1; }
 ip -4 -o addr show | grep -qF " $HOST/" || { echo "$HOST isn't an address of this server" >&2; exit 1; }
-[[ $CERTBOT_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Set CERTBOT_VERSION (5.4.0 or newer)" >&2; exit 1; }
+[[ $CERTBOT_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Set CERTBOT_VERSION (5.10.0 or newer)" >&2; exit 1; }
 [[ -f $SITE80 ]] || { echo "$SITE80 is missing" >&2; exit 1; }
+
+grep -q '^DASH_USER' /home/ampitools/app/src/ampi_tools/server.py || { echo "Install the current ampi-tools first" >&2; exit 1; }
+nginx -t 2>/dev/null || { nginx -t || true; echo "nginx's present configuration has an error: not touching it" >&2; exit 1; }
 
 echo "==> The service"
 getent group "$DASH" >/dev/null || groupadd --system "$DASH"
@@ -58,12 +90,23 @@ echo "==> Port 80: only the path Let's Encrypt checks"
 install -d -o root -g root -m 755 /var/www/acme /var/www/acme/.well-known /var/www/acme/.well-known/acme-challenge
 printf 'location ^~ /.well-known/acme-challenge/ { root /var/www/acme; default_type text/plain; try_files $uri =404; }\n' \
   > /etc/nginx/snippets/ampi-acme.conf
-cp -an "$SITE80" "/root/nginx-site80-before-ampi.conf"
-grep -qF 'include /etc/nginx/snippets/ampi-acme.conf;' "$SITE80" || \
-  sed -i '0,/^[[:space:]]*server_name .*;/s##&\n    include /etc/nginx/snippets/ampi-acme.conf;#' "$SITE80"
-[[ $(grep -cF 'include /etc/nginx/snippets/ampi-acme.conf;' "$SITE80") == 1 ]] || { echo "couldn't change $SITE80" >&2; exit 1; }
-nginx -t 2>/dev/null || { cp -a /root/nginx-site80-before-ampi.conf "$SITE80"; nginx -t; echo "nginx refused it; put back" >&2; exit 1; }
-systemctl reload nginx
+probe=$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+printf '%s' "$probe" > "/var/www/acme/.well-known/acme-challenge/$probe"
+chmod 644 "/var/www/acme/.well-known/acme-challenge/$probe"
+reached() { [[ $(curl -s --max-time 10 "http://$HOST/.well-known/acme-challenge/$probe") == "$probe" ]]; }
+if ! reached; then
+  before=$(mktemp /root/nginx-site80-before-ampi.XXXXXX)
+  cp -a "$SITE80" "$before"
+  put_back() { cat "$before" > "$SITE80"; nginx -t -q && systemctl reload nginx; rm -f "/var/www/acme/.well-known/acme-challenge/$probe"; }
+  grep -qF 'include /etc/nginx/snippets/ampi-acme.conf;' "$SITE80" || \
+    sed -i '0,/^[[:space:]]*server_name .*;/s##&\n    include /etc/nginx/snippets/ampi-acme.conf;#' "$SITE80"
+  nginx -t 2>/dev/null || { put_back; echo "nginx refused the change to $SITE80; put back" >&2; exit 1; }
+  systemctl reload nginx
+  sleep 1
+  reached || { put_back; echo "$SITE80 isn't the site on port 80 (or it sends everything elsewhere); put back" >&2; exit 1; }
+  echo "    $SITE80 changed (one line); before: $before"
+fi
+rm -f "/var/www/acme/.well-known/acme-challenge/$probe"
 
 echo "==> Certbot $CERTBOT_VERSION"
 if [[ $(/opt/certbot-ampi/bin/certbot --version 2>/dev/null) != "certbot $CERTBOT_VERSION" ]]; then
@@ -72,9 +115,11 @@ if [[ $(/opt/certbot-ampi/bin/certbot --version 2>/dev/null) != "certbot $CERTBO
 fi
 get() {
   /opt/certbot-ampi/bin/certbot certonly "${LE[@]}" --non-interactive --agree-tos --register-unsafely-without-email \
-    --preferred-profile shortlived --webroot -w /var/www/acme --cert-name ampi --keep-until-expiring --ip-address "$HOST" "$@"
+    --preferred-profile shortlived --webroot -w /var/www/acme --cert-name ampi --keep-until-expiring --renew-with-new-domains --ip-address "$HOST" "$@"
 }
-if [[ ! -f /etc/letsencrypt-ampi/live/ampi/fullchain.pem ]]; then
+cert=/etc/letsencrypt-ampi/live/ampi/fullchain.pem
+if [[ ! -f $cert ]] || ! openssl x509 -in "$cert" -noout -checkip "$HOST" | grep -q 'does match' \
+    || ! openssl x509 -in "$cert" -noout -checkend 43200 >/dev/null; then
   echo "    a trial first (Let's Encrypt's test server)"
   get --dry-run -q
   get -q
@@ -88,12 +133,13 @@ ln -sfn ../sites-available/ampi /etc/nginx/sites-enabled/ampi
 nginx -t 2>/dev/null || { rm -f /etc/nginx/sites-enabled/ampi; nginx -t; echo "nginx refused the new site; left out" >&2; exit 1; }
 systemctl reload nginx
 systemctl enable --now ampi-cert.timer >/dev/null 2>&1
-ufw allow 443/tcp comment ampi-dash >/dev/null
+if ! ufw status | grep -q '^443/tcp'; then
+  ufw allow 443/tcp comment ampi-dash >/dev/null
+  touch /etc/ampi-dash/ufw  # ours to remove
+fi
 
 echo "==> ampi-tools"
-if ! grep -q '^\[web\]' "$CONF"; then
-  printf '\n[web]\nurl = "https://%s"\n' "$HOST" >> "$CONF"
-fi
+web_config "https://$HOST"
 systemctl restart ampi-tools
 sleep 3
 
