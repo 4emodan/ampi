@@ -586,7 +586,7 @@ class ProfileBot:
         for i, e in list(chosen.items())[:30]:
             if not await self._react(chat_id, [i], e):
                 break
-            done = done or i in mine
+            done = done or (i in mine and bool(e))
         return done
 
     async def _cmd_react(self, chat_id: int, thread_id: int, args: str) -> None:

@@ -108,8 +108,8 @@ def test_only_the_latest_are_kept(setup):  # noqa: F811
     assert not store.is_owner_message("personal", CHAT, 0, 14) and store.is_owner_message("personal", CHAT, 0, 15)
 
 
-@pytest.mark.parametrize("reply,fail", [("REACT 99: 🔥", False), ("REACT: 🔥", True)])
+@pytest.mark.parametrize("reply,fail", [("REACT 99: 🔥", False), ("REACT: 🔥", True), ("REACT: none", False)])
 def test_a_reply_never_vanishes(setup, reply, fail):  # noqa: F811
     bot, api, *_ = setup(api=API(fail=fail), runner=FakeRunner(reply))
     run(bot.handle_message(m(7)))
-    assert [s["text"] for s in api.sent] == ["🔥"]
+    assert [s["text"] for s in api.sent] == ["👌" if "none" in reply else "🔥"]

@@ -355,7 +355,7 @@ def stop(d: Any) -> dict:
                if w["status"] in ("active", "failing")]
     now = d.permissions.get("chat", "changes.*")
     before = d.permissions.remembered("stopped")
-    d.permissions.remember("stopped", {"mode": before["mode"] if before else now,
+    d.permissions.remember("stopped", {"mode": before["mode"] if before and now == "off" else now,
                                        "watchers": sorted({*(before["watchers"] if before else ()), *running})})
     if now != "off":
         d.permissions.apply("chat", {"changes.*": [now, "off"]}, "hub: stop everything")

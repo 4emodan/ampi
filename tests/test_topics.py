@@ -440,3 +440,22 @@ def test_a_run_that_may_not_start_is_forgotten():
 
     out = brun(go())
     assert not out.ok and "nothing was run" in out.error and len(gone) == 1
+
+
+def test_a_second_stop_after_a_manual_change(topic):
+    d, *_ = topic
+    hub_data.answer(d, "hub.stop", {})
+    put(d, "chat", changes___all="ask")
+    hub_data.answer(d, "hub.stop", {})
+    assert d.permissions.remembered("stopped")["mode"] == "ask"
+
+
+def test_a_stale_role_doesnt_spoil_the_next_request(topic):
+    d, *_ = topic
+    put(d, web___all="off")
+    hub_data.answer(d, "hub.role", {"scope": T, "role": "old"})
+    call(d, {"cmd": "topic.set", "scope": T, "role": "new"})
+    hub_data.set_(d, T, {"web.*": ["off", "default"]})
+    (item,) = pending(d)
+    out = call(d, {"cmd": "approvals.decide", "id": item["id"], "approve": True, "nonce": item["nonce"], "message_id": None})
+    assert out["status"] == "done" and d.permissions.role(T) == "new" and d.permissions.get(T, "web.*") == "default"

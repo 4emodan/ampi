@@ -760,7 +760,7 @@ class Daemon:
                 p.apply(scope, {op: [p.get(scope, op), "default"] for op in p.all(scope)}, "Telegram")
                 p.set_role(scope, "", "Telegram")
         return {"ok": True, "role": p.role(scope), "off": p.off(scope), "settings": p.all(scope), "chat": p.all("chat"),
-                "restricted": p.restricted(scope), "limited": p.restricted(scope) or bool(p.all("chat")),
+                "restricted": p.restricted(scope), "limited": p.restricted(scope) or bool(p.off("chat")) or p.get("chat", "changes.*") == "off",
                 "watchers": [w["name"] for w in (self.keeper.list_all() if self.keeper else [])
                              if p.delivery(perms.watcher_scope(w["profile"], w["name"])) == scope]}
 
@@ -772,7 +772,10 @@ class Daemon:
             meta = json.loads(row.get("meta") or "{}") if row.get("kind") == "settings.change" else {}
             if row["status"] == "pending" and meta.get("scope") == scope:
                 changes = {**{op: c for op, c in meta["changes"].items() if self.permissions.get(scope, op) == c[0]}, **changes}
-                old = meta.get("extra") or {}
+                old = dict(meta.get("extra") or {})
+                for k, current in (("role", self.permissions.role), ("deliver", self.permissions.delivery)):
+                    if k in old and current(scope) != old[k][0]:
+                        del old[k]  # changed since: it couldn't be applied any more
                 resume = sorted({*(old.get("resume") or ()), *((extra or {}).get("resume") or ())})
                 extra = {**old, **(extra or {}), **({"resume": resume} if resume else {})}
                 replaced.append(row["id"])
