@@ -125,13 +125,23 @@ public final class SessionActivity extends Activity {
     }
 
     private void key() {
-        try {
-            key = Handover.create();
-        } catch (GeneralSecurityException | RuntimeException e) {
-            Log.e("Ampi", "session key", e);
-            note = "The phone couldn't make the key: " + Texts.line(String.valueOf(e.getMessage()), 150);
-        }
-        draw();
+        Ui.small(page("The extension's key"), "Making the key…");
+        new Thread(() -> {  // the secure hardware takes its time
+            String made = "", problem = "";
+            try {
+                made = Handover.create();
+            } catch (GeneralSecurityException | RuntimeException e) {
+                Log.e("Ampi", "session key", e);
+                problem = "The phone couldn't make the key: " + Texts.line(String.valueOf(e.getMessage()), 150);
+            }
+            String k = made, p = problem;
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                key = k;
+                note = p;
+                draw();
+            });
+        }, "ampi-key").start();
     }
 
     private void hideKey() {
@@ -148,6 +158,11 @@ public final class SessionActivity extends Activity {
         LinearLayout page = page("The extension's key");
         LinearLayout card = Ui.card(page);
         Ui.body(card, "Copy it, then in Firefox open the Ampi button and paste it there, and come back here. It is shown only now.");
+        try {
+            Ui.body(card, "The extension then shows this check code: " + SessionBox.check(key) + ". If it shows another one, make a new key.");
+        } catch (GeneralSecurityException e) {
+            Log.e("Ampi", "check code", e);
+        }
         TextView t = Ui.small(card, key);
         t.setTypeface(android.graphics.Typeface.MONOSPACE);
         ClipboardManager board = getSystemService(ClipboardManager.class);

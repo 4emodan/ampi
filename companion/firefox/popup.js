@@ -52,6 +52,7 @@
     await store('readwrite', (s) => s.put(k, 'key'));
     key = k;
     show();
+    say('Saved. Check code: ' + k.check + '. The Ampi app must show the same one.');
   });
 
   $('reset').addEventListener('click', async () => {

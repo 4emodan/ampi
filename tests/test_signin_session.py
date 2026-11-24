@@ -80,7 +80,7 @@ def test_a_session_opens_signed_in(env):
     g = c.handle({"cmd": "gate", "session": r["session"], "ref": snap["elements"][0]["ref"]})
     assert g["signed_in"] is True
     assert "signed in here" in c.handle({"cmd": "open", "session": r["session"], "url": f"https://{HOST}/x"})["error"]
-    assert "a code goes in only in a session" in c.handle({"cmd": "bind_code", "session": r["session"], "code": snap["elements"][1]["ref"]}, signin=True)["error"]
+    assert "a code goes in only where a sign-in itself led" in c.handle({"cmd": "bind_code", "session": r["session"], "code": snap["elements"][1]["ref"]}, signin=True)["error"]
     c.handle({"cmd": "close", "session": r["session"]})
     assert c.retire  # the engine goes with it
 
@@ -118,7 +118,7 @@ def test_odd_requests(env, kw):
     assert not give(c, **kw)["ok"] and not eng.cookies and c.session is None
 
 
-@pytest.mark.parametrize("name", ["cf_clearance", "__cf_bm", "_abck", "bm_sz", "datadome", "_px3", "reese84", "incap_ses_1_2", "aws-waf-token", "CF_CLEARANCE", "___utmvc", "sbsd_o", "_vcrcs",
+@pytest.mark.parametrize("name", ["cf_clearance", "__cf_bm", "_abck", "bm_sz", "datadome", "_px3", "_pxmvid", "_pxCaptcha", "_px_x", "reese84", "incap_ses_1_2", "aws-waf-token", "CF_CLEARANCE", "___utmvc", "sbsd_o", "_vcrcs",
                                   "__uzma", "rbzid", "sucuri_cloudproxy_uuid_1", "within.website-x-cmd-anubis-auth", "acw_sc__v2", "_fs_ch_st_1", "qrator_jsr"])
 def test_nothing_that_vouches_for_a_person(env, name):
     c, eng = env
@@ -162,6 +162,14 @@ def test_what_is_cut_out(env, value, cut):
     if "%" in value:
         eng.frames[0].text = "It is " + co.urllib.parse.unquote(value)
         assert "•••" in c.handle({"cmd": "snapshot", "session": r["session"]})["snapshot"]["text"]
+
+
+@pytest.mark.parametrize("value", [f"12345|{TOKEN}", f"sess-web-{TOKEN}", '{"t":"%s"}' % TOKEN, f"jane@{HOST}.{TOKEN}", f"user%7C{TOKEN}%7Cx"])
+def test_the_random_part_of_one_is_cut_out(env, value):
+    c, eng = env
+    r = give(c, [ck("sid", value)])
+    eng.frames[0].text = "It is " + co.urllib.parse.unquote(value)
+    assert TOKEN not in c.handle({"cmd": "snapshot", "session": r["session"]})["snapshot"]["text"]
 
 
 def test_the_longer_one_goes_first(env):
@@ -221,6 +229,9 @@ SCRIPT = r"""
   out.real = Ampi.pick(['_gallery_session', '_gat_session', '_hjem_session', 'bm_session', '_ga', '_ga_X1', '_hjSession_1', '__utma'].map(n => c(n)), 'www.club.example').map(x => x.n);
   const key = await Ampi.readKey('  pasted: ampi-key2.""" + SECRET + r""".PUBLIC \n');
   out.key = [key.mac.extractable, key.mac.usages.join(), key.wrap.usages.join(), key.wrap.type];
+  out.check = out.x = null;
+  { const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('ampi-key2.""" + SECRET + r""".x')));
+    out.check = Array.from(h.slice(0, 8), (b, i) => (i === 4 ? ' ' : '') + 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[b & 31]).join(''); out.x = key.check; }
   out.noKey = [await Ampi.readKey('ampi-key2.short.x'), await Ampi.readKey('ampi-key2.""" + SECRET + r""".' + 'A'.repeat(392))];
   out.sealed = await Ampi.seal(key, 'www.club.example', '/my', p, 1700000000000);
   out.again = (await Ampi.seal(key, 'www.club.example', '/my', p, 1700000000000)) !== out.sealed;
@@ -257,7 +268,8 @@ def test_the_extension_seals_what_the_app_opens(tmp_path, request, pair):
     def opened(text, secret=SECRET):
         return subprocess.run([JAVA, "-cp", str(cp), "app.ampi.companion.LogicTest", "open", pair[0], secret, text, "1700000000000"], capture_output=True, text=True)
     r = opened(out["sealed"])
-    head, body = r.stdout.splitlines()
+    head, check, body = r.stdout.splitlines()
+    assert check == out["check"] and re.fullmatch(r"[A-Z2-9]{4} [A-Z2-9]{4}", check)
     cookies = json.loads(body)["c"]
     assert head == "www.club.example 3 club.example" and json.loads(body)["p"] == "/my" and [x["n"] for x in cookies] == out["picked"]
     assert "/my" not in co.base64.urlsafe_b64decode(out["sealed"].split(".")[1] + "==").decode()  # where they were isn't readable
@@ -304,7 +316,8 @@ DRIVE = r"""
   await wait(() => !$('setup').hidden); out.left = removed.slice();
   $('key').value = 'nonsense'; $('save').click(); await wait(() => $('note').textContent); out.bad = $('note').textContent;
   $('key').value = 'ampi-key2.""" + SECRET + r""".PUBLIC'; $('save').click(); await wait(() => !$('give').hidden);
-  out.host = $('host').textContent; out.typed = $('key').value;
+  await wait(() => $('note').textContent.startsWith('Saved')); out.saved = $('note').textContent;
+  out.host = $('host').textContent; out.typed = $('key').value; $('note').textContent = '';
   window.allow = false; $('go').click(); await wait(() => $('note').textContent); out.no = [$('note').textContent, asked.length];
   window.allow = true; $('go').click(); await wait(() => !$('hand').hidden);
   out.done = $('done').textContent; out.asked = asked.slice(1); out.removed = removed.slice(1);
@@ -333,6 +346,7 @@ def test_the_popup(tmp_path, pair):
     out = json.JSONDecoder().raw_decode(html.unescape(dom[dom.index("<pre>RESULT") + 11:]))[0]
     assert "error" not in out, out["error"]
     assert out["left"] == [["https://left.example/*"]] and "isn't the key" in out["bad"] and out["host"] == "www.club.example" and out["typed"] == ""
+    assert re.fullmatch(r"Saved\. Check code: [A-Z2-9]{4} [A-Z2-9]{4}\. The Ampi app must show the same one\.", out["saved"])
     assert out["no"] == ["Not given.", 1] and out["done"] == "Ready: 1 cookies of www.club.example." and out["copied"] == "ampi-session2." and out["html"] is False
     assert out["asked"] == [["https://www.club.example/*"], {"url": "https://www.club.example/", "storeId": "firefox-default"}, {"url": "https://www.club.example/my", "storeId": "firefox-default"}]
     assert out["removed"] == [["https://www.club.example/*"]] * 2 and out["reset"] is True

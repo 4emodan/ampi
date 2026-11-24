@@ -578,7 +578,8 @@ for one task. Once:
    ("Submit a new add-on", **On your own**: signed, not listed), and download the signed file to the phone. (A later version needs a higher
    `version` in `manifest.json`.)
 2. Firefox on the phone: Settings, About Firefox, tap the logo five times; then Settings, Install extension from file. Allow it nothing else.
-3. Ampi app: Sessions from Firefox, Make a key, Copy. Firefox: the Ampi button in the menu, paste, Save. Back in the Ampi app: Done.
+3. Ampi app: Sessions from Firefox, Make a key, Copy. Firefox: the Ampi button in the menu, paste, Save: it shows the same check code as the
+   app. Back in the Ampi app: Done.
 
 Then, for a site: sign in there in Firefox, the Ampi button, Give, Send to the Ampi app; ask Ampi to use your session on exactly that
 address, and confirm with your fingerprint. Some sites sign you out in Firefox when their session is used elsewhere, or don't accept it.

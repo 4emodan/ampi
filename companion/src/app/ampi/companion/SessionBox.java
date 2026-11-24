@@ -58,6 +58,14 @@ record SessionBox(String host, long at, String id, int count, String scope, byte
                 Arrays.copyOfRange(sealed, RSA + 12, sealed.length), (TAG + "\n" + head).getBytes(StandardCharsets.UTF_8));
     }
 
+    /** A short code of the pasted key: the same in the app and in the extension, when nothing changed it on the way. */
+    static String check(String key) throws GeneralSecurityException {
+        byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.US_ASCII));
+        var out = new StringBuilder();
+        for (int i = 0; i < 8; i++) out.append(i == 4 ? " " : "").append("ABCDEFGHJKLMNPQRSTUVWXYZ23456789".charAt(h[i] & 31));
+        return out.toString();
+    }
+
     static String site(String host) {
         return host.startsWith("www.") ? host.substring(4) : host;
     }

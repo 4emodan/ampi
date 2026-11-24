@@ -342,8 +342,8 @@ final class Unlock {
             if (!allowed(c)) return "limit";
             if (box == null) {
                 // Asking for sites to find out which one was given doesn't go unnoticed.
-                Notes.change(c, "signin-missing", "Ampi asked for a session you didn't give",
-                        "If you didn't expect that, ask Ampi what it was for.", null, null);
+                Notes.change(c, "signin-missing", "Ampi asked for a session that isn't here",
+                        "None was given for that address. If you didn't expect that, ask Ampi what it was for.", null, null);
                 return "no_session";
             }
             try {

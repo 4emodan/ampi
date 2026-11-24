@@ -151,7 +151,7 @@ def test_anything_else_in_between_ends_it(env, what):
         assert c.handle({"cmd": "click", "session": sid, "ref": r["Accept all cookies"]})["ok"]
         eng.press = {}
     b = bind_code(c, sid, r)
-    assert not b["ok"] and "nothing done in it" in b["error"]
+    assert not b["ok"] and "where a sign-in itself led" in b["error"]
 
 
 def test_steps_of_a_sign_in_do_not(env):
@@ -197,7 +197,10 @@ def test_what_to_pay_ends_it(env):
 
 
 @pytest.mark.parametrize("url,ok", [(f"{SITE}/login?next=%2Faccount", True), (f"{SITE}/login?next=%2Fsettings%2Fsecurity", False),
-                                    (f"{SITE}/login?a=1#/x", True), (f"{SITE}/payment/login", False), (f"{SITE}/login?to=security-settings", False)])
+                                    (f"{SITE}/login?a=1#/x", True), (f"{SITE}/payment/login", False), (f"{SITE}/login?to=security-settings", False),
+                                    (f"{SITE}/Account/Login?ReturnUrl=%2Fconnect%2Fauthorize%2Fcallback%3Fclient_id%3Dweb%26scope%3Dopenid%2520profile%2520email%26state%3Dx", True),
+                                    (f"{SITE}/auth/realms/x?client_id=web&response_type=code&scope=openid+profile+email&redirect_uri=https%3A%2F%2Fwww.club.example%2Fsignin-oidc", True),
+                                    (f"{SITE}/Account/Login?ReturnUrl=%2Fconnect%2Fauthorize%3Fredirect_uri%3D%2Fwallet%2Fsend", False)])
 def test_where_the_sites_own_sign_in_page_leads(env, url, ok):
     c, eng, sid, refs = env
     eng.frames[0].url = url
@@ -209,7 +212,11 @@ def test_where_the_sites_own_sign_in_page_leads(env, url, ok):
     (f"{SITE}/", True), (f"{SITE}/en", True), (f"{SITE}/login", True), (f"{SITE}/account/login", True), (f"{SITE}/wp-login.php", True), (f"{SITE}/users/sign_in", True),
     (f"{SITE}/#/login", True), (f"{SITE}/en/log-in?lang=en", True), (f"{SITE}/?utm_source=x", True), (f"{SITE}/en-gb/", True), (f"{SITE}/me", False), (f"{SITE}/my", False), (f"{SITE}/go?x=1", False),
     (f"{SITE}/tx?to=evil&amount=500", False), (f"{SITE}/?do=sendmoney&to=evil", False), (f"{SITE}/login?next=L3NlY3VyaXR5", False), (f"{SITE}/login?returnTo=billing", False),
-    (f"{SITE}/login?user_code=ABCD-EFGH", False), (f"{SITE}/login?token=MAGIC", False), (f"{SITE}/#send?to=evil", False), (f"{SITE}/#x", False), (f"{SITE}/index.html", True), (f"{SITE}/account", False), (f"{SITE}/settings/security", False),
+    (f"{SITE}/login?user_code=ABCD-EFGH", False), (f"{SITE}/login?token=MAGIC", False), (f"{SITE}/#send?to=evil", False), (f"{SITE}/#x", False), (f"{SITE}/index.html", True), (f"{SITE}/account", True), (f"{SITE}/my-account/", True), (f"{SITE}/session/new", True), (f"{SITE}/member-login", True),
+    (f"{SITE}/shop/login", True), (f"{SITE}/user-login", True), (f"{SITE}/index.php?route=account/login", True), (f"{SITE}/login?next=/", True), (f"{SITE}/login/email", True),
+    (f"{SITE}/login?callbackUrl={SITE}/", True), (f"{SITE}/login?callbackUrl=https://evil.example/", False), (f"{SITE}/login?next=//evil.example/", False),
+    (f"{SITE}/login?next=/account?do=x", False), (f"{SITE}/login?go=/", False), (f"{SITE}/wallet/account", False), (f"{SITE}/transfer-login", False), (f"{SITE}/x9/login", False),
+    (f"{SITE}/settings/security", False),
     (f"{SITE}/login?next=/x", False), (f"{SITE}/login/return/security", False), (f"{SITE}/wallet", False), (f"{SITE}/login?return=security-settings", False),
     (f"{SITE}/#/wallet/send", False), (f"{SITE}/login#x?next=/y", False), (f"{SITE}/oauth/authorize?client_id=1", False), ("http://www.club.example/login", False),
     (f"{SITE}/classes", False), (f"{SITE}/login/confirm", False)])
@@ -232,7 +239,8 @@ def started(env, url=f"{SITE}/"):
 
 @pytest.mark.parametrize("n,press,ok", [
     (1, {"plain": True, "dest": f"{SITE}/login", "submits": False}, True), (2, {"dest": f"{SITE}/settings/security", "submits": False}, False),
-    (3, {"submits": False}, True), (3, {"submits": True}, False), (4, {"dest": f"{SITE}/login?next=/transfer/confirm", "submits": False}, False),
+    (3, {"submits": False}, True), (3, {"submits": True}, False), (3, {"submits": False, "texts": ["Open login dialog", "☰"]}, True), (3, {"submits": False, "texts": ["Sign in / Register"]}, True),
+    (1, {"dest": "javascript:void(0)", "submits": False}, True), (2, {"dest": "javascript:void(0)", "submits": False}, False), (8, {"dialog": "cookies", "submits": False, "texts": ["Got it"]}, True), (4, {"dest": f"{SITE}/login?next=/transfer/confirm", "submits": False}, False),
     (5, {"submits": False}, False), (7, {"dest": "https://evil.example/login", "submits": False}, False),
     (1, {"plain": True, "dest": f"{SITE}/login?state=abc", "submits": False}, True), (2, {"plain": True, "dest": f"{SITE}/login", "submits": False}, True),
     (2, {"plain": False, "dest": f"{SITE}/login", "submits": False}, False), (2, {"plain": True, "dest": f"{SITE}/login?state=abc", "submits": False}, False),
@@ -315,8 +323,9 @@ def test_another_route_of_the_same_page_is_another_place(env):
     for url in (f"{SITE}/app?a=1#/wallet/send/verify", f"{SITE}/app?a=1&b=2#/login/verify"):
         eng.frames[0].url = url
         assert "first code went" in bind_code(c, sid, r, press=None)["error"]
-    eng.frames[0].url = f"{SITE}/app?a=2#/login/verify"
-    assert bind_code(c, sid, r, press=None)["ok"]
+    for url in (f"{SITE}/app?a=2#/login/verify", f"{SITE}/app?a=1&error=invalid_code#/login/verify"):
+        eng.frames[0].url = url
+        assert bind_code(c, sid, r, press=None)["ok"]
 
 
 @pytest.mark.parametrize("facts", [{"captions": ["Pay now"]}, {"captions": ["Verify https://www.club.example/transfer"]}, {"action": f"{SITE}/transfer/confirm"}])
@@ -334,19 +343,22 @@ def test_the_fields_own_name_counts_too(env):
     assert not bind_code(c, sid, r)["ok"]
 
 
-@pytest.mark.parametrize("how,ok", [("link", True), ("button", True), ("text", False)])
+@pytest.mark.parametrize("how,ok", [("link", True), ("button", True), ("text", False), ("both", False)])
 def test_a_page_that_offers_to_sign_out_is_an_account(env, how, ok):
     c, eng, sid, refs = env
     if how == "text":
         eng.frames[0].text = "Log out"
     else:
-        eng.frames[0].els[20] = el(how, label="Log out")
+        eng.frames[0].els[20] = el("link" if how == "both" else how, label="Log out")
+        eng.frames[0].els[3]["label"] = "Log in" if how == "both" else "Enter"
     c.handle({"cmd": "snapshot", "session": sid})
     assert c.session.account is ok
 
 
 @pytest.mark.parametrize("words,kw,ok", [
-    ("Enter the code we sent to your email", {"label": "Enter it here"}, False), ("Check your inbox", {"label": "", "name": "x1"}, False), ("Check your inbox", {"label": "Email"}, True),
+    ("Enter the code we sent to your email", {"label": "Enter it here"}, False), ("Check your inbox for a code", {"label": "", "name": "x1"}, False), ("Enter the code from your email", {"label": "Email"}, True),
+    ("Please check your email address", {"label": "Member number"}, True), ("Your confirmation will be sent to your email. Phone number", {"label": "Emergency contact"}, True),
+    ("Security code", {"label": "Apartment"}, True), ("Código de descuento", {"label": "Cupón"}, True),
     ("Verification code", {"name": "search"}, True), ("Find a class", {"label": "Enter it here"}, True), ("We have emailed you a code", {"label": "Promo code"}, True),
     ("Código de verificación", {"label": "Aquí"}, False)])
 def test_where_the_page_asks_for_a_code_ampi_types_only_plain_fields(env, words, kw, ok):
@@ -646,7 +658,32 @@ def test_which_way_the_code_should_come(env):
     assert not bind_code(c, sid, r)["ok"]
 
 
-@pytest.mark.parametrize("label,ok", [("Text message", True), ("Email", True), ("Email j•••@x.example", True), ("Authenticator app", True), ("SMS", True), ("Backup code", True),
+def test_words_go_into_any_field_there(env):
+    c, eng, sid, refs = env
+    eng.words = "Enter the code we sent to your email"
+    eng.frames[0].els[10] = el("input", label="Allergies")
+    snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
+    ref = next(e["ref"] for e in snap["elements"] if e["ref"].endswith(":10"))
+    assert c.handle({"cmd": "type", "session": sid, "ref": ref, "text": "nuts and shellfish"})["ok"]
+    assert not c.handle({"cmd": "type", "session": sid, "ref": ref, "text": "482 913"})["ok"]
+    b = c.handle({"cmd": "bind", "session": sid, "refs": [ref]})
+    assert c.handle({"cmd": "fill", "session": sid, "origin": b["origin"], "fields": [{"ref": ref, "binding": b["bindings"][0], "value": "00100"}]})["ok"]
+
+
+def test_why_no_code_can_be_filled_in(env):
+    c, eng, sid, _ = env
+    assert c.handle({"cmd": "status"})["codes"] is True
+    r = signed_in(env)
+    c.handle({"cmd": "click", "session": sid, "ref": r["Try another way"]})
+    assert c.handle({"cmd": "status"})["codes"] is False and "`checkout click` did something" in bind_code(c, sid, r)["error"]
+    c.handle({"cmd": "close", "session": sid})
+    c.retire = False
+    eng.pages[f"{SITE}/classes"] = eng.pages[f"{SITE}/login"]
+    c.handle({"cmd": "open", "url": f"{SITE}/classes"})
+    assert c.session.broke.startswith("the session began at") and c.handle({"cmd": "status"})["codes"] is False
+
+
+@pytest.mark.parametrize("label,ok", [("Send code to •••12", True), ("Send money to •••12", False), ("Text message", True), ("Email", True), ("Email j•••@x.example", True), ("Authenticator app", True), ("SMS", True), ("Backup code", True),
                                       ("Email me offers", False), ("Text editor", False), ("Phone settings", False)])
 def test_ways_as_buttons(env, label, ok):
     c, eng, sid, _ = env
@@ -668,6 +705,7 @@ def test_ways_only_as_buttons(env):
 def test_nothing_is_a_step_before_the_login_was_used(env):
     c, eng, sid, refs = env
     eng.frames[0].els[20] = el("link", label="Log out")
+    eng.frames[0].els[3]["label"] = "Enter"
     c.handle({"cmd": "snapshot", "session": sid})
     assert c.session.account and c.session.chain == c.session.gen
     eng.frames[0].els[9]["label"] = "Continue"
@@ -716,7 +754,7 @@ def test_a_wrong_code_shown_where_the_form_went(env):
     assert not bind_code(c, sid, r, press=None)["ok"]
 
 
-@pytest.mark.parametrize("what,ok", [("zero", True), ("stripe", True), ("short", True), ("robot", False), ("total", False), ("advice", True), ("heading", False), ("failed", True)])
+@pytest.mark.parametrize("what,ok", [("zero", True), ("stripe", True), ("short", True), ("robot", False), ("total", False), ("advice", True), ("orders", True), ("heading", False), ("failed", True)])
 def test_ordinary_things_on_such_pages(env, what, ok):
     c, eng, sid, _ = env
     r = signed_in(env)
@@ -733,7 +771,7 @@ def test_ordinary_things_on_such_pages(env, what, ok):
     elif what == "failed":
         eng.words = "Не удалось войти. Введите код. Maksuton tekstiviesti"
     else:
-        eng.words = "If this wasn't you, change your password immediately"
+        eng.words = "Track your order and checkout faster" if what == "orders" else "If this wasn't you, change your password immediately"
         if what == "heading":
             real = eng.op
             eng.op = lambda f, a: {**real(f, a), "heads": eng.words} if a["op"] == "code" else real(f, a)
@@ -823,7 +861,7 @@ def test_other_fields_are_as_before(env, kw):
 
 
 @pytest.mark.parametrize("text,ok", [
-    ("Send code", True), ("Resend", True), ("Text me", True), ("Email me a code", True), ("Try another way", True), ("Use authenticator app", True),
+    ("Send code", True), ("Send a code to j***@x.example", True), ("Resend", True), ("Text me", True), ("Email me a code", True), ("Try another way", True), ("Use authenticator app", True),
     ("Continue", False), ("Get a new verification code", True), ("Use a backup code", True), ("Use another method", True), ("Send a text message", True),
     ("Send", False), ("Request", False), ("Send money", False), ("Delete account", False), ("Confirm", False), ("Change number", False), ("Yes", False),
     ("Add phone number", False), ("Disable two-factor", False), ("Send code and pay", False), ("Continue to payment", False)])

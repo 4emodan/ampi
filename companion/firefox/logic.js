@@ -5,7 +5,7 @@ var Ampi = (function () {
   const MAX = 80, MAX_VALUE = 4096, MAX_PLAIN = 30000;
   // Cookies that vouch for "a person in this very browser" (the known ones). Handing them on would get around a site's bot check: not
   // for this. (CLEARANCE in src/ampi_tools/checkout.py is the same.)
-  const CLEARANCE = /^(cf_clearance|__cf_bm|__cflb|__cfruid|_cfuvid|cf_chl_.*|_abck|ak_bmsc|bm_(sz|sv|mi|so|s|ss|lso)|sbsd(_.*)?|sec_cpt|datadome|_px(\d|hd|vid|de|ff.*)?|pxcts|reese84|___utmv.*|incap_ses_.*|visid_incap_.*|nlbi_.*|aws-waf-token|kp_uid.*|x-kpsdk-.*|__ddg.*|_grecaptcha|rc::.*|frcaptcha.*|h-captcha.*|_vcrcs|__uzm.*|uzm.*|rbzid.*|rbzsessionid|sucuri_.*|.*anubis-auth.*|acw_sc__.*|acw_tc|_fs_ch_.*|qrator_.*|d_[a-z]id|arkose.*|_iidt|geetest.*)$/i;
+  const CLEARANCE = /^(cf_clearance|__cf_bm|__cflb|__cfruid|_cfuvid|cf_chl_.*|_abck|ak_bmsc|bm_(sz|sv|mi|so|s|ss|lso)|sbsd(_.*)?|sec_cpt|datadome|_px(\d|hd|m?vid|de|cts|captcha|ff.*|_.*)?|pxcts|reese84|___utmv.*|incap_ses_.*|visid_incap_.*|nlbi_.*|aws-waf-token|kp_uid.*|x-kpsdk-.*|__ddg.*|_grecaptcha|rc::.*|frcaptcha.*|h-captcha.*|_vcrcs|__uzm.*|uzm.*|rbzid.*|rbzsessionid|sucuri_.*|.*anubis-auth.*|acw_sc__.*|acw_tc|_fs_ch_.*|qrator_.*|d_[a-z]id|arkose.*|_iidt|geetest.*)$/i;
   const TRACKING = /^(_ga(_.*)?|_gid|_gat(_.*)?|_gcl_.*|_fbp|_fbc|_hj[A-Z].*|_clck|_clsk|_uet(sid|vid)|_pin_unauth|_scid(_r)?|_tt_enable_cookie|_ttp|__utm[abcz]|__utmt)$/;
   const b64 = (bytes) => { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
   const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
@@ -46,19 +46,21 @@ var Ampi = (function () {
     return wide.length ? wide[0] : '';
   }
 
+  const bytes = (s) => new TextEncoder().encode(s);
+
   // What the app gave: its public key, and a secret that only this extension has. With them one can be sealed, none can be opened.
   async function readKey(text) {
     const m = /ampi-key2\.([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{300,800})(?![A-Za-z0-9_-])/.exec(text || '');
     if (!m) return null;
     try {
-      return { mac: await crypto.subtle.importKey('raw', unb64(m[1]), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']),
+      const h = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes(m[0])));
+      const check = Array.from(h.slice(0, 8), (b, i) => (i === 4 ? ' ' : '') + 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[b & 31]).join('');
+      return { check: check, mac: await crypto.subtle.importKey('raw', unb64(m[1]), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']),
         wrap: await crypto.subtle.importKey('spki', unb64(m[2]), { name: 'RSA-OAEP', hash: 'SHA-1' }, false, ['encrypt']) };
     } catch (e) { return null; }
   }
 
   const join = (...parts) => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let at = 0; for (const p of parts) { out.set(p, at); at += p.length; } return out; };
-  const bytes = (s) => new TextEncoder().encode(s);
-
   async function seal(key, host, path, picked, now) {
     const plain = bytes(JSON.stringify({ p: path, c: picked }));
     if (!picked.length || plain.length > MAX_PLAIN) return null;

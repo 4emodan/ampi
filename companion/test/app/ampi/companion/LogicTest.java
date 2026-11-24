@@ -197,6 +197,7 @@ final class LogicTest {
         mac.init(new javax.crypto.spec.SecretKeySpec(d.decode(secret), "HmacSHA256"));
         byte[] plain = b.open(mac.doFinal(b.forKey(c.doFinal(b.wrapped()))));
         System.out.println(b.host() + " " + b.count() + " " + b.scope());
+        System.out.println(SessionBox.check("ampi-key2." + secret + ".x"));
         System.out.println(new String(plain, java.nio.charset.StandardCharsets.UTF_8));
     }
 

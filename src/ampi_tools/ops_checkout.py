@@ -248,7 +248,7 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
         return "order"
     origin = str(g.get("frame_origin") or "?")
     dest = str(g.get("dest") or "")
-    if any("•••" in str(x) for x in (*raw, g.get("label"), g.get("ident"), dest)):
+    if g.get("signed_in") and g.get("kind") != "radio" and any("•••" in str(x) for x in (*raw, g.get("label"), g.get("ident"), dest)):
         return "commit"  # something was cut out of it: what it really says isn't known here
     if g.get("submits") and dest and not dest.startswith((origin + "/", origin + "?")) and dest != origin:
         return "commit"  # sends what is entered to another site
@@ -965,7 +965,7 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
     captions = [str(t) for t in [*([a["option"]] if opt else press.get("texts") or []), str(button.get("label") or "")] if t]
     plain = [c for c in (caption(t) for t in captions) if c]
     known = (HARMLESS, STEP, MINOR, OPTION)
-    moves_on = _all(known, plain) and priced_ok(captions)
+    moves_on = _all(known, plain) and priced_ok(captions) and not any("•••" in t for t in captions)  # (something was cut out of it)
     if any(mixed_scripts(t) for t in captions):
         raise ToolError("the button's text mixes alphabets (a disguise); refusing")
     box = b.get("box") if b.get("box") in ("checkbox", "radio") else None
