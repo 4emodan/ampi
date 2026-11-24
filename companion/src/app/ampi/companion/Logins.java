@@ -40,11 +40,12 @@ final class Logins {
 
     private Logins() {}
 
-    /** @param server which sign-in service it was saved for (hash of its certificate) */
-    record Login(String id, String label, List<String> hosts, String server, byte[] iv, byte[] data) {
+    /** @param server which sign-in service it was saved for (hash of its certificate)
+     *  @param totp   an authenticator key is in it */
+    record Login(String id, String label, List<String> hosts, String server, boolean totp, byte[] iv, byte[] data) {
         byte[] bound() {
-            return ("ampi-login-v1\n" + id + "\n" + server + "\n" + String.join(" ", hosts) + "\n" + label + "\n")
-                    .getBytes(StandardCharsets.UTF_8);
+            return ((totp ? "ampi-login-v2 totp\n" : "ampi-login-v1\n") + id + "\n" + server + "\n" + String.join(" ", hosts) + "\n"
+                    + label + "\n").getBytes(StandardCharsets.UTF_8);
         }
     }
 
@@ -141,13 +142,15 @@ final class Logins {
     }
 
     /** After the fingerprint ({@code cipher} is the one it was given for). */
-    static Login sealed(Cipher cipher, String label, List<String> hosts, String server, String user, String secret)
+    static Login sealed(Cipher cipher, String label, List<String> hosts, String server, String user, String secret, Totp totp)
             throws GeneralSecurityException, JSONException {
-        Login l = new Login(newId(), label, List.copyOf(hosts), server, cipher.getIV(), new byte[0]);
+        Login l = new Login(newId(), label, List.copyOf(hosts), server, totp != null, cipher.getIV(), new byte[0]);
         cipher.updateAAD(l.bound());
-        byte[] plain = new JSONObject().put("user", user).put("secret", secret).toString().getBytes(StandardCharsets.UTF_8);
+        JSONObject o = new JSONObject().put("user", user).put("secret", secret);
+        if (totp != null) o.put("totp", totp.save());
+        byte[] plain = o.toString().getBytes(StandardCharsets.UTF_8);
         try {
-            return new Login(l.id, l.label, l.hosts, l.server, l.iv, cipher.doFinal(plain));
+            return new Login(l.id, l.label, l.hosts, l.server, l.totp, l.iv, cipher.doFinal(plain));
         } finally {
             java.util.Arrays.fill(plain, (byte) 0);
         }
@@ -185,7 +188,7 @@ final class Logins {
                     if (!Hosts.valid(h.getString(j))) throw new JSONException("host");
                     hosts.add(h.getString(j));
                 }
-                out.add(new Login(o.getString("id"), o.getString("label"), List.copyOf(hosts), o.getString("server"),
+                out.add(new Login(o.getString("id"), o.getString("label"), List.copyOf(hosts), o.getString("server"), o.optBoolean("totp"),
                         Base64.decode(o.getString("iv"), Base64.NO_WRAP), Base64.decode(o.getString("data"), Base64.NO_WRAP)));
             }
         } catch (JSONException | RuntimeException e) {
@@ -217,7 +220,7 @@ final class Logins {
             JSONArray a = new JSONArray();
             for (Login l : all) {
                 a.put(new JSONObject().put("id", l.id).put("label", l.label).put("hosts", new JSONArray(l.hosts))
-                        .put("server", l.server).put("iv", Base64.encodeToString(l.iv, Base64.NO_WRAP))
+                        .put("server", l.server).put("totp", l.totp).put("iv", Base64.encodeToString(l.iv, Base64.NO_WRAP))
                         .put("data", Base64.encodeToString(l.data, Base64.NO_WRAP)));
             }
             AlarmStore.save(file(c), a.toString().getBytes(StandardCharsets.UTF_8));

@@ -49,7 +49,7 @@ CONTROLS, VAULT_CALLS = 16, 4  # connections to the control socket, and to the s
 MAX_CONTROL = 64 * 1024
 VAULT_SOCKET = "ampi-phone-vault.socket"
 # Sign-in channels: how many, how long the phone has to open its connection, how long and how much one may carry.
-VAULT_PER_MINUTE, VAULT_PER_HOUR, VAULT_DIAL, VAULT_LIFE, VAULT_BYTES = 6, 40, 12.0, 130.0, 64 * 1024
+VAULT_PER_MINUTE, VAULT_PER_HOUR, VAULT_DIAL, VAULT_LIFE, VAULT_BYTES = 6, 40, 12.0, 175.0, 64 * 1024
 
 
 class Closed(Exception):

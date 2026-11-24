@@ -20,7 +20,7 @@ from .todoist import ToolError
 
 SOCKET = "/run/ampi-signin.sock"
 TIMEOUT = 106  # the service ends by itself after 100 s; Claude Code's commands after 120 s
-FILL_TIMEOUT = 200  # the phone, and the browser before and after it (the skill runs it with a longer timeout)
+FILL_TIMEOUT, CODE_TIMEOUT = 200, 250  # the phone, and the browser before and after it (the skill runs it with a longer timeout)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 HOST_RE = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])")
 AGAIN = "try again later"
@@ -50,6 +50,9 @@ WORDS = {
     "other_target": "that page sends the login to another site than the ones the owner saved it for",
     "other_sites": "this browser session was on a site that isn't part of that login: close it, and open the sign-in page in a new "
                    "one (a sign-in over two sites: the owner saves both addresses with the login)",
+    "refused_site": "saved logins aren't used on that site (mail, sign-in providers, banks and the like): the owner signs in there",
+    "no_signin": "the phone only gives a code for a login it unlocked in the last 10 minutes, for a site of that login (at most three "
+                 "times): start again with `signin fill`",
     "unknown": "the browser stopped answering while the login was being filled in: it MAY have been sent. Look at the page (`checkout "
                "snapshot`) before trying again",
 }
@@ -110,7 +113,7 @@ def _ref(v: Any) -> str:
     return v
 
 
-FIELDS.update({"site_host": _site, "user_ref": _ref, "password_ref": _ref, "press_ref": _ref})
+FIELDS.update({"site_host": _site, "user_ref": _ref, "password_ref": _ref, "press_ref": _ref, "code_ref": _ref})
 
 
 async def si_test(s: Services, a: dict) -> Result:
@@ -127,19 +130,19 @@ def _client(s: Services) -> Any:
     return s.signin_client
 
 
-def _why(r: dict) -> str:
+def _why(r: dict, what: str = "login") -> str:
     code = r.get("code")
     if code == "page":  # the controller's own words about the form
         said = clean(r.get("error"), 200) or "the page isn't as expected"
-        return said + {"sent": ". The login WAS sent, and it may have worked: look with `checkout snapshot`, don't just try again",
+        return said + {"sent": f". The {what} WAS sent, and it may have worked: look with `checkout snapshot`, don't just try again",
                        "filled": ". Something was filled in already"}.get(r.get("phase"), "")
     return WORDS.get(code, "something went wrong") if isinstance(code, str) else "something went wrong"
 
 
 async def si_fill(s: Services, a: dict) -> Result:
-    from .ops_checkout import _show, cs
+    from .ops_checkout import cs
 
-    refs = {k: a.get(f"{k}_ref") for k in ("user", "password", "press")}
+    refs = {k: a.get(f"{k}_ref") for k in ("user", "password", "code", "press")}
     if not refs["user"] and not refs["password"]:
         raise ToolError("give the user name field (--user), the password field (--password), or both")
     client = _client(s)
@@ -147,7 +150,8 @@ async def si_fill(s: Services, a: dict) -> Result:
     st = await side.client.call({"cmd": "status"})
     if not st.get("session"):
         raise ToolError("no checkout session; open the site's sign-in page with `checkout open URL`")
-    r = await client.call({"cmd": "fill", "session": st["session"], **{k: v for k, v in refs.items() if v}}, timeout=FILL_TIMEOUT)
+    r = await client.call({"cmd": "fill", "session": st["session"], **{k: v for k, v in refs.items() if v}},
+                          timeout=CODE_TIMEOUT if refs["code"] else FILL_TIMEOUT)
     if r.get("ok") is not True:
         raise ToolError(("unclear: " if r.get("phase") == "sent" or r.get("code") == "unknown" else "not signed in: ") + _why(r))
     if not r.get("pressed"):
@@ -158,6 +162,15 @@ async def si_fill(s: Services, a: dict) -> Result:
         done = "The user name was filled in and sent. For the password page, run `signin fill` again within 3 minutes."
     if r.get("pressed") and not r.get("moved", True):
         done += " The page hasn't changed yet: take a snapshot in a few seconds, and don't sign in again before that."
+    if r.get("password"):
+        done += (" If it asks for a one-time code now: `signin code --code REF`, right away (doing anything else first, even a "
+                 "click, ends that).")
+    return await _then(s, side, st, done)
+
+
+async def _then(s: Services, side: Any, st: dict, done: str) -> str:
+    from .ops_checkout import _show
+
     try:
         page = await side.client.call({"cmd": "snapshot", "session": st["session"]}, timeout=60)
         shown = await _show(s, page)
@@ -166,5 +179,24 @@ async def si_fill(s: Services, a: dict) -> Result:
     return done + "\n\n" + shown
 
 
+async def si_code(s: Services, a: dict) -> Result:
+    from .ops_checkout import cs
+
+    ref, = need(a, "code_ref")
+    client = _client(s)
+    side = cs(s)
+    st = await side.client.call({"cmd": "status"})
+    if not st.get("session"):
+        raise ToolError("no checkout session; a code goes in right after `signin fill`")
+    r = await client.call({"cmd": "code", "session": st["session"], "code": ref,
+                           **({"press": a["press_ref"]} if a.get("press_ref") else {})}, timeout=CODE_TIMEOUT)
+    if r.get("ok") is not True:
+        raise ToolError(("unclear: " if r.get("phase") == "sent" or r.get("code") == "unknown" else "no code was filled in: ") + _why(r, "code"))
+    done = ("The code was filled in" + (" and its button pressed" if r.get("pressed") else "") + ". Check below whether the site accepted it"
+            + ("" if r.get("moved") else " (the page hasn't changed yet: if nothing happens, look again in a few seconds)") + ".")
+    return await _then(s, side, st, done)
+
+
 OPS["signin.test"] = Op("signin.test", False, si_test)
+OPS["signin.code"] = Op("signin.code", False, si_code)
 OPS["signin.fill"] = Op("signin.fill", False, si_fill)

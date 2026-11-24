@@ -107,7 +107,7 @@ public final class LoginsActivity extends Activity {
         for (Logins.Login l : all) {
             LinearLayout card = Ui.card(page);
             Ui.body(card, String.join("\n", l.hosts()));
-            Ui.small(card, l.label());
+            Ui.small(card, l.label() + (l.totp() ? " · with authenticator key" : ""));
             if (signin.length > 0 && !l.server().equals(server)) Ui.small(card, "Saved for another server: can't be used with this one.");
             Ui.button(card, "Delete", false, v -> show(new AlertDialog.Builder(this).setTitle("Delete this login?")
                     .setMessage(String.join(", ", l.hosts()) + " · " + l.label()).setNegativeButton("Keep", null)
@@ -201,8 +201,12 @@ public final class LoginsActivity extends Activity {
             secret.setSelection(Math.max(0, at));
         });
         card.addView(show);
+        EditText totp = field(card, "Authenticator key, if you want the codes from here (as the site shows it, or its otpauth:// link)",
+                TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        Ui.small(card, "Password and codes are then on one phone, behind your fingerprint. Without a key you type the codes when a "
+                + "site asks for them.");
         TextView problem = Ui.body(card, "");
-        Button save = Ui.button(page, "Save with fingerprint", true, v -> save(site, label, user, secret, problem));
+        Button save = Ui.button(page, "Save with fingerprint", true, v -> save(site, label, user, secret, totp, problem));
         save.setFilterTouchesWhenObscured(true);
         Ui.small(page, "The clipboard is emptied after saving. Your keyboard may keep a clipboard history of its own: clear it there.");
         Ui.button(page, "Cancel", false, v -> list());
@@ -220,8 +224,9 @@ public final class LoginsActivity extends Activity {
         return e;
     }
 
-    private void save(EditText site, EditText label, EditText user, EditText secret, TextView problem) {
+    private void save(EditText site, EditText label, EditText user, EditText secret, EditText totp, TextView problem) {
         List<String> hosts;
+        Totp key;
         String name = Texts.line(label.getText().toString(), 40), u = user.getText().toString().strip(), s = secret.getText().toString();
         byte[] signin = signin(this);
         Cipher cipher;
@@ -230,6 +235,7 @@ public final class LoginsActivity extends Activity {
             if (name.isEmpty()) throw new IllegalArgumentException("Give it a name");
             if (u.isEmpty() || s.isEmpty()) throw new IllegalArgumentException("Enter the user name and the password");
             if (u.length() > 200 || s.length() > 200) throw new IllegalArgumentException("At most 200 characters each");
+            key = Totp.parse(totp.getText().toString());
             if (signin.length == 0) throw new IllegalArgumentException("Pair this phone first");
             cipher = Logins.toSave(this);
         } catch (IllegalArgumentException | Logins.Gone | IOException e) {
@@ -253,13 +259,15 @@ public final class LoginsActivity extends Activity {
                             public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult r) {
                                 try {
                                     Logins.add(LoginsActivity.this, Logins.sealed(r.getCryptoObject().getCipher(), name, hosts,
-                                            Logins.serverId(signin), u, s));
+                                            Logins.serverId(signin), u, s, key));
                                 } catch (GeneralSecurityException | JSONException | IOException | RuntimeException e) {
                                     Log.e("Ampi", "save", e);
                                     problem.setText("It wasn't saved. Try again. (" + Texts.line(String.valueOf(e.getMessage()), 150) + ")");
                                     return;
                                 }
                                 secret.setText("");
+                                totp.setText("");
+                                if (key != null) key.wipe();
                                 try {
                                     getSystemService(ClipboardManager.class).clearPrimaryClip();
                                 } catch (RuntimeException e) {

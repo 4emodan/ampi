@@ -541,13 +541,19 @@ def signin_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("fill", help="sign in on the page open in the checkout browser: the owner unlocks the login for that site")
     s.add_argument("--user", metavar="REF", help="the user name or email field (ref from the snapshot)")
     s.add_argument("--password", metavar="REF", help="the password field")
+    s.add_argument("--code", metavar="REF", help="a one-time code's field in the same form")
     s.add_argument("--press", metavar="REF", help="the form's sign-in button, pressed right after filling")
+    s = sub.add_parser("code", help="the one-time code the site asks for right after `signin fill`: the owner gives it on the phone")
+    s.add_argument("--code", metavar="REF", required=True, help="its field (the first one, when there is one box per digit)")
+    s.add_argument("--press", metavar="REF", help="the button that sends it (many pages send it by themselves)")
     return p
 
 
 def signin_ops(a: argparse.Namespace) -> list[dict]:
     if a.cmd == "fill":
-        return _op("signin.fill", user_ref=a.user, password_ref=a.password, press_ref=a.press)
+        return _op("signin.fill", user_ref=a.user, password_ref=a.password, code_ref=a.code, press_ref=a.press)
+    if a.cmd == "code":
+        return _op("signin.code", code_ref=a.code, press_ref=a.press)
     return _op("signin.test", site_host=a.site)
 
 

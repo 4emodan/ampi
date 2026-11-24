@@ -129,10 +129,43 @@ final class LogicTest {
         eq("newline at the end", false, Hosts.valid("example.com\n"));
     }
 
+    static String code(String key, long t) throws Exception {
+        try {
+            Totp x = Totp.parse(key);
+            Totp again = Totp.parse(x.save());  // what is kept in a login
+            eq("kept key", x.code(x.window(t)), again.code(again.window(t)));
+            return x.code(x.window(t));
+        } catch (IllegalArgumentException e) {
+            return "no";
+        }
+    }
+
+    static void codes() throws Exception {
+        // RFC 6238, appendix B
+        String k20 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", k32 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZA",
+                k64 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQGEZDGNA";
+        for (long[] x : new long[][] {{59, 94287082}, {1111111109, 7081804}, {1234567890, 89005924}, {20000000000L, 65353130}}) {
+            eq("SHA1 at " + x[0], String.format("%08d", x[1]), code("otpauth://totp/a?secret=" + k20 + "&digits=8", x[0]));
+        }
+        eq("SHA256", "46119246", code("otpauth://totp/a%20b:c?digits=8&secret=" + k32 + "&algorithm=sha256&issuer=x", 59));
+        eq("SHA512", "90693936", code("otpauth://totp/a?digits=8&algorithm=SHA512&secret=" + k64, 59));
+        eq("only letters", "287082", code("gezd gnbv gy3t qojq-gezd gnbv gy3t qojq", 59));
+        eq("longer period", "287082", code("otpauth://totp/a?period=60&secret=" + k20, 100));
+        for (String bad : new String[] {"otpauth://hotp/a?secret=" + k20 + "&counter=1", "otpauth://totp/a", "GEZDGNBV", "not a key!", "otpauth://totp/a?secret=" + k20 + "&digits=5",
+                "otpauth://totp/a?algorithm=MD5&secret=" + k20, "otpauth://totp/a?period=0&secret=" + k20, "steam://x"}) eq("key " + bad, "no", code(bad, 59));
+        eq("none", true, Totp.parse("  ") == null);
+        for (String[] x : new String[][] {{" 123 456 ", "123456"}, {"G-123456", "G-123456"}, {"abcd\u2013efgh", "abcd-efgh"}, {"123", null}, {"12 34!", null},
+                {"-1234", null}, {"", null}, {"1234567890abcdef", "1234567890abcdef"}, {"1234567890abcdefg", null}}) {
+            eq("typed " + x[0], String.valueOf(x[1]), String.valueOf(Totp.typed(x[0])));
+        }
+    }
+
     public static void main(String[] a) throws Exception {
         if (a.length > 0) {
             System.out.println(Texts.pairCode("server".getBytes(), "phone".getBytes(), null));
             System.out.println(Texts.pairCode("server".getBytes(), "phone".getBytes(), "key".getBytes()));
+            System.out.println(String.join(" ", Hosts.NOT));
+            for (int i = 2; i < a.length; i++) System.out.println(Hosts.refused(a[i]));
             return;
         }
         alarmTimes();
@@ -140,6 +173,7 @@ final class LogicTest {
         frames();
         texts();
         sites();
+        codes();
         System.out.println(failed == 0 ? "ok" : failed + " failed");
         System.exit(failed == 0 ? 0 : 1);
     }

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ampi_phone import trust
+from ampi_phone import signin, trust
 
 ROOT = Path(__file__).resolve().parent.parent / "companion"
 JBR = Path("C:/Program Files/Android/Android Studio/jbr/bin")
@@ -26,7 +26,7 @@ def classes(tmp_path_factory):
     out = tmp_path_factory.mktemp("classes")
     src = ROOT / "src/app/ampi/companion"
     subprocess.run([JAVAC, "-encoding", "UTF-8", "--release", "17", "-d", str(out), *(str(src / f) for f in (
-        "Frames.java", "AlarmTimes.java", "Texts.java", "Tls.java", "Hosts.java")), *map(str, (ROOT / "test").rglob("*.java"))], check=True)
+        "Frames.java", "AlarmTimes.java", "Texts.java", "Tls.java", "Hosts.java", "Totp.java")), *map(str, (ROOT / "test").rglob("*.java"))], check=True)
     return out
 
 
@@ -37,7 +37,17 @@ def test_logic(classes):
 
 def test_pairing_code_is_the_same_on_both_sides(classes):
     r = subprocess.run([JAVA, "-cp", str(classes), "app.ampi.companion.LogicTest", "code"], capture_output=True, text=True)
-    assert r.stdout.splitlines() == [trust.pair_code(b"server", b"phone"), trust.pair_code(b"server", b"phone", b"key")]
+    assert r.stdout.splitlines()[:2] == [trust.pair_code(b"server", b"phone"), trust.pair_code(b"server", b"phone", b"key")]
+
+
+def test_both_sides_refuse_the_same_sites(classes):
+    sites = ["google.com", "accounts.google.com", "notgoogle.com", "x.com", "fox.com", "mybank.example", "bank.example", "example.bank", "a.pankki.example",
+             "github.com", "gist.github.com", "club.example", "web.telegram.org"]
+    r = subprocess.run([JAVA, "-cp", str(classes), "app.ampi.companion.LogicTest", "code", "x", *sites], capture_output=True, text=True)
+    _, _, listed, *said = r.stdout.splitlines()
+    assert set(listed.split()) == signin.NOT and "" not in listed.split(" ")
+    assert [x == "true" for x in said] == [signin.refused(s) for s in sites]
+    assert [s for s in sites if not signin.refused(s)] == ["notgoogle.com", "fox.com", "example.bank", "club.example"]
 
 
 def cert(folder, name):

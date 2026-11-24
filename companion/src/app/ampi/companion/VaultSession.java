@@ -24,8 +24,8 @@ import javax.net.ssl.SSLSocket;
  * per channel, and everything about a channel ends at a fixed moment: the gateway can't keep one for later either.
  */
 final class VaultSession implements Runnable {
-    private static final long LIFE = 110_000, SETUP = 20_000, REQUEST = 10_000;
-    private static final int MAX_FRAME = 8192, MAX_WAIT = 75, PER_MINUTE = 6, PER_HOUR = 40;
+    private static final long LIFE = 110_000, CODE_LIFE = 155_000, SETUP = 20_000, REQUEST = 10_000;
+    private static final int MAX_FRAME = 8192, MAX_WAIT = 75, MAX_CODE_WAIT = 120, PER_MINUTE = 6, PER_HOUR = 40;
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static final ArrayDeque<Long> opened = new ArrayDeque<>();  // elapsedRealtime
     private static VaultSession current;
@@ -120,11 +120,13 @@ final class VaultSession implements Runnable {
             String f = Frames.read(tls.input(), MAX_FRAME);
             if (f == null) return;
             if (SystemClock.elapsedRealtime() - proved > REQUEST) throw new IOException("a request held back on the way");
-            lock.acquire(LIFE);
+            JSONObject m = new JSONObject(f);
+            long life = kind(m) == Unlock.Kind.CODE || kind(m) == Unlock.Kind.FILL_CODE ? CODE_LIFE : LIFE;
+            lock.acquire(life);
             main.removeCallbacks(end);
-            main.postDelayed(end, LIFE);
-            s.setSoTimeout((int) LIFE);
-            handle(new JSONObject(f));
+            main.postDelayed(end, life);
+            s.setSoTimeout((int) life);
+            handle(m);
             // Nothing more is asked on this channel; its end means nobody is waiting any more.
             if (Frames.read(tls.input(), MAX_FRAME) != null) throw new IOException("a second request");
         } catch (IOException | GeneralSecurityException | JSONException e) {
@@ -153,16 +155,27 @@ final class VaultSession implements Runnable {
         }
     }
 
+    private static Unlock.Kind kind(JSONObject m) {
+        if (m.optInt("v") != 1) return null;
+        return switch (m.optString("op") + " " + m.optString("purpose")) {
+            case "get test" -> Unlock.Kind.TEST;
+            case "get fill" -> m.optBoolean("code") ? Unlock.Kind.FILL_CODE : Unlock.Kind.FILL;
+            case "code " -> Unlock.Kind.CODE;
+            default -> null;
+        };
+    }
+
     private void handle(JSONObject m) {
         String host = m.optString("host");
-        String purpose = m.optString("purpose");
-        if (m.optInt("v") != 1 || !"get".equals(m.optString("op")) || !(purpose.equals("test") || purpose.equals("fill"))) {
+        Unlock.Kind kind = kind(m);
+        if (kind == null) {
             send(Unlock.result("unsupported"));
         } else if (!Hosts.valid(host)) {
             send(Unlock.result("bad_request"));
         } else {
-            int wait = Math.max(5, Math.min(MAX_WAIT, m.optInt("wait", MAX_WAIT)));
-            ask = Unlock.request(c, host, purpose.equals("fill"), wait * 1000L, cfg.signin(), this::stillPaired, this::send);
+            int most = kind == Unlock.Kind.CODE || kind == Unlock.Kind.FILL_CODE ? MAX_CODE_WAIT : MAX_WAIT;
+            int wait = Math.max(5, Math.min(most, m.optInt("wait", most)));
+            ask = Unlock.request(c, host, kind, wait * 1000L, cfg.signin(), this::stillPaired, this::send);
         }
     }
 

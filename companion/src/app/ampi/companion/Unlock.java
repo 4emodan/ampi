@@ -30,7 +30,8 @@ import java.util.function.Consumer;
  */
 final class Unlock {
     private static final int NOTE = 3;
-    private static final int PER_10_MIN = 6, PER_DAY = 30;
+    private static final int PER_10_MIN = 6, PER_DAY = 30, CODES = 3;
+    private static final long CODE_WINDOW = 10 * 60_000;
     private static final long[] PAUSE = {60_000, 5 * 60_000, 30 * 60_000};  // after one refusal, two in a row, more
 
     private static final Handler main = new Handler(Looper.getMainLooper());
@@ -38,13 +39,30 @@ final class Unlock {
     private static Runnable watcher;
     private static long refused;  // elapsedRealtime of the last refusal
     private static int refusals;  // in a row
+    private static Last last;
 
     private Unlock() {}
+
+    /** TEST: nothing of the login is sent. FILL: it goes to the sign-in service. CODE: the one-time code a site asks for after
+     *  that. FILL_CODE: both at once. */
+    enum Kind { TEST, FILL, CODE, FILL_CODE }
+
+    /** The login that was sent last: codes are only for it, for a few minutes (guarded by Unlock.class). */
+    private static final class Last {
+        final Logins.Login login;
+        final long at = SystemClock.elapsedRealtime();
+        int codes;
+        long window = -1;  // of the last code worked out here: the same one twice is no good
+
+        Last(Logins.Login login) {
+            this.login = login;
+        }
+    }
 
     /** One request. What it is about never changes. */
     static final class Ask {
         final String host, nonce;
-        final boolean fill;  // the login goes to the sign-in service (else only a test: nothing of it is sent)
+        final Kind kind;
         final List<Logins.Login> choices;
         final long deadline;  // elapsedRealtime
         private final Context app;
@@ -52,11 +70,11 @@ final class Unlock {
         private final Consumer<JSONObject> send;
         private boolean over;  // guarded by Unlock.class
 
-        private Ask(Context c, String host, boolean fill, List<Logins.Login> choices, long deadline, BooleanSupplier paired,
+        private Ask(Context c, String host, Kind kind, List<Logins.Login> choices, long deadline, BooleanSupplier paired,
                     Consumer<JSONObject> send) {
             this.app = c.getApplicationContext();
             this.host = host;
-            this.fill = fill;
+            this.kind = kind;
             this.nonce = Logins.newId();
             this.choices = choices;
             this.deadline = deadline;
@@ -99,21 +117,66 @@ final class Unlock {
         }
 
         /** The fingerprint was given and the login opened. Nothing of it is in an answer unless this decided the request,
-         *  in time, for a login that is still saved and the server it is paired with. */
-        void unlocked(Logins.Login l, byte[] plain) {
+         *  in time, for a login that is still saved and the server it is paired with. `typed`: the code, where the owner
+         *  typed one instead of having it worked out here. */
+        void unlocked(Logins.Login l, byte[] plain, String typed) {
             String no = left() <= 0 ? "expired" : paired.getAsBoolean() && stillSaved(l) ? null : "interrupted";
             if (!end()) return;
-            if (no != null || !fill) {
+            if (no != null || kind == Kind.TEST) {
                 if (no == null) calm();
                 answer(result(no));
                 return;
             }
             try {
                 JSONObject p = new JSONObject(new String(plain, StandardCharsets.UTF_8));
-                JSONObject o = result(null).put("user", p.getString("user")).put("secret", p.getString("secret"))
-                        .put("hosts", new JSONArray(l.hosts()));
+                JSONObject o = result(null).put("hosts", new JSONArray(l.hosts()));
+                if (kind != Kind.CODE) o.put("user", p.getString("user")).put("secret", p.getString("secret"));
+                Totp totp = kind == Kind.FILL || typed != null ? null : Totp.parse(p.getString("totp"));
+                if (typed != null && kind != Kind.FILL) o.put("code", typed);
                 calm();
-                answer(o);
+                Last now;
+                synchronized (Unlock.class) {
+                    if (kind != Kind.CODE) last = new Last(l);
+                    now = last;
+                    if (kind != Kind.FILL && now != null) now.codes++;
+                }
+                if (totp == null) answer(o);
+                else new Thread(() -> workOut(o, totp, now), "ampi-code").start();
+            } catch (JSONException | IllegalArgumentException e) {
+                answer(result("failed"));
+            }
+        }
+
+        /** The code of now; a moment later where this one is about to end or was used already. */
+        private void workOut(JSONObject o, Totp totp, Last of) {
+            try {
+                long now = System.currentTimeMillis() / 1000, w = totp.window(now);
+                if (of != null && of.window == w || (w + 1) * totp.period - now < 4) {
+                    Thread.sleep(Math.max(0, (w + 1) * totp.period * 1000 - System.currentTimeMillis()) + 300);
+                    w = totp.window(System.currentTimeMillis() / 1000);
+                }
+                if (of != null) of.window = w;
+                send.accept(o.put("code", totp.code(w)));
+            } catch (GeneralSecurityException | JSONException | InterruptedException e) {
+                Log.e("Ampi", "code", e);
+                send.accept(result("failed"));
+            } finally {
+                totp.wipe();
+            }
+        }
+
+        /** The owner typed the code (no login is opened for that). */
+        void typed(Logins.Login l, String code) {
+            String no = left() <= 0 ? "expired" : paired.getAsBoolean() && stillSaved(l) ? null : "interrupted";
+            if (kind != Kind.CODE || !end()) return;
+            try {
+                if (no == null) {
+                    calm();
+                    synchronized (Unlock.class) {
+                        if (last != null) last.codes++;
+                    }
+                }
+                answer(no != null ? result(no) : result(null).put("code", code).put("hosts", new JSONArray(l.hosts())));
             } catch (JSONException e) {
                 answer(result("failed"));
             }
@@ -133,6 +196,7 @@ final class Unlock {
                 if (!over) {
                     refused = SystemClock.elapsedRealtime();
                     refusals++;
+                    last = null;  // and no more codes for it
                 }
             }
             end("denied");
@@ -194,18 +258,18 @@ final class Unlock {
     }
 
     /** Shows a request: answers why not, or "asking" and later the outcome. Not on the main thread. */
-    static Ask request(Context c, String host, boolean fill, long waitMs, byte[] signin, BooleanSupplier paired,
+    static Ask request(Context c, String host, Kind kind, long waitMs, byte[] signin, BooleanSupplier paired,
                        Consumer<JSONObject> send) {
         Ask ask = null;
         String no;
         try {
             List<Logins.Login> choices = new ArrayList<>();
-            no = whyNot(c, host, Logins.serverId(signin), choices);
+            no = whyNot(c, host, kind, Logins.serverId(signin), choices);
             if (no == null && !paired.getAsBoolean()) no = "interrupted";
             if (no == null) {
                 synchronized (Unlock.class) {
                     if (current != null) no = "busy";
-                    else current = ask = new Ask(c, host, fill, List.copyOf(choices), SystemClock.elapsedRealtime() + waitMs, paired, send);
+                    else current = ask = new Ask(c, host, kind, List.copyOf(choices), SystemClock.elapsedRealtime() + waitMs, paired, send);
                 }
             }
         } catch (Logins.Gone e) {
@@ -239,7 +303,7 @@ final class Unlock {
 
     /** First what doesn't depend on the site, and one limit for all sites: the answers must not tell which ones are saved
      *  without the owner being shown something. */
-    private static String whyNot(Context c, String host, String server, List<Logins.Login> choices)
+    private static String whyNot(Context c, String host, Kind kind, String server, List<Logins.Login> choices)
             throws IOException, GeneralSecurityException, Logins.Gone {
         synchronized (Unlock.class) {
             if (current != null) return "busy";
@@ -252,6 +316,15 @@ final class Unlock {
         List<Logins.Login> all = Logins.all(c);
         if (!all.isEmpty()) Logins.toOpen(all.get(0));  // is the key still there?
         if (!allowed(c)) return "limit";
+        if (kind == Kind.CODE) {
+            // Only for the login that was just used, whatever site asks.
+            synchronized (Unlock.class) {
+                if (last == null || SystemClock.elapsedRealtime() - last.at > CODE_WINDOW || last.codes >= CODES
+                        || !last.login.hosts().contains(host) || !last.login.server().equals(server)) return "no_signin";
+                choices.add(last.login);
+            }
+            return null;
+        }
         for (Logins.Login l : all) if (l.hosts().contains(host) && l.server().equals(server)) choices.add(l);
         if (choices.isEmpty()) {
             // Asking for sites to find out which ones are saved doesn't go unnoticed.
@@ -290,7 +363,8 @@ final class Unlock {
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         PendingIntent open = PendingIntent.getActivity(c, 1, new Intent(c, UnlockActivity.class), PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder b = new Notification.Builder(c, App.SIGNIN).setSmallIcon(R.drawable.ic_ampi)
-                .setContentTitle("Ampi wants to use a saved login").setContentText("Tap to see which one")
+                .setContentTitle(a.kind == Kind.CODE ? "A sign-in asks for a code" : "Ampi wants to use a saved login")
+                .setContentText("Tap to see which one")
                 .setContentIntent(open).setAutoCancel(false).setOnlyAlertOnce(true).setLocalOnly(true)
                 .setTimeoutAfter(Math.max(1000, a.left())).setVisibility(Notification.VISIBILITY_PRIVATE)
                 .setAllowSystemGeneratedContextualActions(false);

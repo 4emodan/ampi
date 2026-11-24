@@ -27,6 +27,8 @@ card, code or hidden fields), for the owner's approval message; any change of th
 `bind_login` and `fill_login` are only for ampi-signin (another uid, and it may ask for nothing else): they say which site
 the sign-in form is really on, and fill in a login the owner unlocked on their phone for exactly that site. The password
 goes only into a password field of that site's own page, and is cut out of everything this answers afterwards.
+`bind_code` and `fill_code` do the same with the one-time code a site asks for next: only where that sign-in itself led (see
+Session.chain), because such codes also confirm payments and changes of an account.
 
 No arbitrary JavaScript from the assistant, no other reading of input values, no console/network events forwarded,
 no downloads, no file:// pages, no stealth and no captcha solving.
@@ -80,6 +82,49 @@ CALL_TIMEOUT = 30
 SECRET_FIELD = re.compile(r"cc-|card|cvc|cvv|csc|password|passcode|passwd|otp|one-time|onetime|\bpin\b|pincode|"
                           r"iban|account|security.?code", re.I)
 TEXT_TYPES = {"", "text", "email", "tel", "search", "url", "number"}
+# A field for a one-time code. Ampi never types into one (it reads the owner's email, where some of them arrive).
+CODE_WORDS = re.compile(
+    r"one.?time|\bt?otp|\bmfa|\b2fa|two.?factor|two.?step|\b2.?step|\bpasscode|"
+    r"\b(verif\w*|auth\w*|security|sms|log.?in|sign.?in|backup|recovery|e-?mail(ed)?|text(ed)?) (code|token|pin)\b|"
+    r"vahvistuskoodi|kertakäyttö|todennuskoodi|turvakoodi|engångskod|verifieringskod|säkerhetskod|bestätigungscode|"
+    r"sicherheitscode|einmal.?code|код подтверждения|код из (sms|смс|письма)|одноразов|κωδικός (επαλήθευσης|επιβεβαίωσης)|μιας χρήσης", re.I)
+NOT_CODE = re.compile(
+    r"promo|coupon|voucher|gift|discount|referral|invit|postal|\bpost|\bzip|area|country|dial|product|course|class|lesson|event|booking|"
+    r"reservation|order|tracking|group|sku|barcode|iban|bic|swift|\btax|\bvat|\bqr\b|initial|alennus|kampanja|lahja|rabatt|gutschein|"
+    r"промокод|купон|индекс|έκπτωση|ταχυδρομικ", re.I)
+CODE_BARE = re.compile(r"(please )?(enter |type )?(the |your )?(\d.?digit )?(code|token|pin|pin code|koodi|kod|код|κωδικός)( here)?( ?\d{1,2})?", re.I)
+# Also asked for to find a booking, so not refused when Ampi types; enough where a sign-in asks for a code.
+CODE_LOOSE = re.compile(r"\b(confirm\w*|access|digit|character) ?(code|\d)|\b(code|koodi|kod|код|κωδικό\w*)\b", re.I)
+CODE_TYPES = {"", "text", "tel", "number", "password"}
+CODE_MAX = 16
+CODE_WINDOW, CODE_STEPS, CODE_TRIES = 600, 4, 3
+# What the buttons and links on the way to a code say, whole (login_caption).
+CODE_STEP = re.compile(
+    r"continue|next|resend|(text|e-?mail|call) me( (a|the|my)( new)? code)?|((re)?send|get|request)( me)?( (a|an|the|my|another))?( new)?"
+    r"( (verification|security|login|one.?time|sms))? ?(code|sms|text|e-?mail|text message)( again| via sms| by (sms|text|e-?mail|phone))?|"
+    r"(try|use|choose|show)( (a|an))?( different|another|other)( (way|method|option|verification method))( to (sign|log) in)?|"
+    r"(use|try|enter)( (a|an|my|your|the))? ((authenticator|authentication)( app)?|backup code|recovery code|sms|text message|e-?mail|verification code|security code|code)( instead)?|"
+    r"didn.?t (get|receive) (a|the|your) code|jatka|seuraava|lähetä( uusi)? koodi|skicka( ny)? kod|fortsätt|nästa|code senden|weiter|"
+    r"отправить код|далее|продолжить|αποστολή κωδικού|συνέχεια", re.I)
+CODE_WAY = re.compile(r"\b(sms|text|e-?mail|phone|call|whatsapp|authenticator|app|code|koodi|kod|tekstiviesti|sähköposti|смс|почт\w*|κωδικό\w*)\b|•|\*\*", re.I)
+CODE_CAPTION = re.compile(
+    r"(verify|confirm|submit|check|send|enter)( (the )?code)?|(verify|confirm)( and| &)? ?(continue|sign ?in|log ?in)|done|ok|vahvista( koodi)?|lähetä|"
+    r"bekräfta|verifiera|bestätigen|prüfen|bekreft|bekræft|bevestigen|vérifier|valider|verificar|confirmar|verifica|conferma|"
+    r"potwierdź|zweryfikuj|подтвердить|проверить|отправить|επιβεβαίωση|επαλήθευση|υποβολή", re.I)
+# A page where a code would confirm something else than a sign-in.
+CODE_DANGER = re.compile(
+    r"\bpay(ing|ments?|able|ee)?\b|purchase|transfer|withdraw|checkout|refund|\biban\b|beneficiary|recipient|\b(your|the|this|place an?) order\b|"
+    r"(credit|debit|bank|payment) card|3-?d ?secure|verified by visa|securecode|\bid check\b|subscription|"
+    r"\b(new|change|update|replace|remove|add|reset)( (a|an|your|my|the|new))? (e-?mail|phone|mobile|number|address|password|passkey|authenticator|device key)|"
+    r"delete|deactivat|disable|turn off|close (your|my|the) account|"
+    r"maksu\w*|maksa\w*|tilisiirto|poista|uusi (puhelin\w*|sähköposti\w*|salasana\w*)|vaihda|betal\w*|överför\w*|ta bort|nytt lösenord|"
+    r"bezahl\w*|zahlung\w*|überweis\w*|lösch\w*|neue[sn]? (passwort|telefon\w*|nummer|e-?mail)|"
+    r"оплат\w*|плат[её]ж\w*|перевод\w*|удал\w*|нов\w+ (парол\w*|телефон\w*|номер\w*|почт\w*)|смен[аи]\w*|"
+    r"πληρωμ\w*|μεταφορ\w*|διαγραφ\w*|νέο\w* (κωδικό\w* πρόσβασης|τηλέφωνο|email)", re.I)
+# An address that leads further than to a sign-in.
+CODE_DEEP = re.compile(CODE_DANGER.pattern + r"|\b(settings?|preferences|security|2fa|mfa|two.?factor|password|confirm\w*|approv\w*|authori[sz]e|edit)\b", re.I)
+CODE_FRAME = re.compile(r"3-?ds|threeds|three-d|/acs\b|acs\.", re.I)
+COOKIE_CAPTION = re.compile(r"(decline|reject|deny|accept|allow)( all)?( cookies)?|(only )?necessary( cookies)?( only)?|close|×|dismiss", re.I)
 RISKY = re.compile(r"subscri|recurring|membership|auto-?renew|save (my )?card|remember (this |my )?card|\blink\b|"
                    r"tilaus|jäsenyys|kestotilaus", re.I)
 TOTAL_WORDS = re.compile(r"\b(grand total|order total|total|subtotal|to pay|amount due|summa|yhteensä|maksettava|"
@@ -258,6 +303,54 @@ def login_host(url: str) -> str:
     return host if ok else ""
 
 
+def _spaced(d: dict, *keys: str) -> str:
+    """Names as words: "verificationCode" and "verification_code" are both "verification code"."""
+    text = " ".join(str(d.get(k) or "") for k in keys)
+    return re.sub(r"[_\-.\[\]:]+", " ", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text))
+
+
+def code_field(d: dict, loose: bool = False) -> bool:
+    """Is that a field for a one-time code? `loose`: where a sign-in is known to ask for one."""
+    if "one-time-code" in str(d.get("autocomplete") or "").lower():
+        return True
+    words = _spaced(d, "name", "id", "label")
+    if CODE_WORDS.search(words):
+        return True
+    if NOT_CODE.search(words):
+        return False
+    return (any(CODE_BARE.fullmatch(_spaced(d, k).strip(" *:")) for k in ("name", "id", "label"))
+            or d.get("max") == 1 and d.get("type") in CODE_TYPES or loose and bool(CODE_LOOSE.search(words)))
+
+
+def a_code(v: Any) -> bool:
+    return isinstance(v, str) and bool(re.fullmatch(rf"[A-Za-z0-9](?:[A-Za-z0-9-]{{2,{CODE_MAX - 2}}})[A-Za-z0-9]", v))
+
+
+def _as_words(address: str) -> str:
+    """(A part of) an address as words, for CODE_DANGER."""
+    for _ in range(3):
+        address = urllib.parse.unquote_plus(address)
+    return re.sub(r"[^\w.]+|_+", " ", re.sub(r"(?<=[a-z])(?=[A-Z])", " ", address))
+
+
+def address_words(url: str) -> str:
+    u = urllib.parse.urlsplit(url)
+    return _as_words(f"{u.path} {u.query} {u.fragment}")
+
+
+def nested(url: str) -> list[str]:
+    """The addresses inside an address (`?next=/security/…`): where signing in there leads."""
+    u = urllib.parse.urlsplit(url)
+    inside = u.fragment.partition("?")[2] or ("" if u.fragment.startswith(("/", "!")) else u.fragment)  # ("#/login" is a page)
+    out = []
+    for _, text in urllib.parse.parse_qsl(f"{u.query}&{inside}", keep_blank_values=True):
+        for _ in range(3):
+            text = urllib.parse.unquote(text)
+        if "/" in text or "\\" in text or re.search(r"https?:", text, re.I):
+            out.append(text)
+    return out
+
+
 def fillable(v: Any) -> bool:
     """A user name or password that can be filled in (and cut out again): ordinary characters."""
     return isinstance(v, str) and 0 < len(v) <= 200 and not any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in v)
@@ -272,13 +365,17 @@ class Name(str):
     when it could be any number ("info", "2400")."""
 
 
+class Code(Name):
+    """A one-time code: only where it is a whole number or word."""
+
+
 def hider(secrets_: list[str], cut_off: bool = False) -> "re.Pattern | None":
     """Finds the login that was filled in: as it is, or as a URL (once or twice), HTML or JSON writes it. `cut_off`: at the
     end also the beginning of one (of a text that was cut to a length)."""
     parts: list[tuple[int, str]] = []
     for s in secrets_:
         name = isinstance(s, Name)
-        if name and s.isdigit() and len(s) < 6:
+        if name and s.isdigit() and len(s) < 6 and not isinstance(s, Code):
             continue
         forms: set[str] = set()
         plain = {str(s), unicodedata.normalize("NFC", s), unicodedata.normalize("NFD", s), " ".join(s.split())}
@@ -292,7 +389,7 @@ def hider(secrets_: list[str], cut_off: bool = False) -> "re.Pattern | None":
         for f in forms:
             if len(f) >= MIN_HIDE:
                 parts.append((len(f), before + re.escape(f) + after))
-                if cut_off and f in plain:
+                if cut_off and f in plain and not isinstance(s, Code):
                     parts += [(k, before + re.escape(f[:k]) + r"\Z") for k in range(MIN_HIDE, len(f))]
     return re.compile("|".join(p for _, p in sorted(set(parts), reverse=True)), re.I) if parts else None
 
@@ -515,6 +612,7 @@ PAGE_JS = r"""
       while (n && n.nodeType === 1 && depth < 40) { if (!shown(n)) return false; n = n.parentElement; depth++; }
       return true;
     };
+    const maxOf = (el) => parseInt(el.getAttribute('maxlength') || '', 10) || 0;  // (one engine has no el.maxLength)
     const disabledOf = (el) => !!el.disabled || el.getAttribute('aria-disabled') === 'true';
     const kindOf = (el) => {
       const t = el.tagName, ty = (el.type || '').toLowerCase(), role = el.getAttribute('role');
@@ -550,7 +648,7 @@ PAGE_JS = r"""
       const d = { n: idOf(el), kind: kind, tag: el.tagName.toLowerCase(), type: (el.type || '').toLowerCase(),
         autocomplete: txt(el.getAttribute('autocomplete'), 60), name: txt(el.getAttribute('name'), 80),
         id: txt(el.id, 80), label: labelOf(el, kind), required: !!el.required, checked: null, filled: false,
-        disabled: disabledOf(el), visible: visible(el),
+        disabled: disabledOf(el), visible: visible(el), max: maxOf(el),
         role: txt(el.getAttribute('role'), 30) };
       for (const k of ['aria-selected', 'aria-pressed', 'aria-checked'])
         if (kind === 'button' && el.hasAttribute(k)) d.checked = el.getAttribute(k) === 'true' || !!d.checked;
@@ -581,7 +679,7 @@ PAGE_JS = r"""
       try { inner = f.contentDocument; } catch (e) {}
       return !!inner && (depth > 3 || boxed(inner, depth + 1));
     }) || Array.from(doc.querySelectorAll('*')).some(e => e.shadowRoot && (depth > 8 || boxed(e.shadowRoot, depth + 1)));
-    const loginFacts = (U, S) => {
+    const loginFacts = (U, S, C) => {  // C: a one-time code in the same form
       const F = formOf(S || U);
       let box = F;
       if (!F) { box = S || U; while (box && !(box.contains(S || U) && box.contains(U || S))) box = box.parentElement; box = box || document; }
@@ -594,10 +692,10 @@ PAGE_JS = r"""
         if (F && formOf(e) !== F && e.form !== undefined) continue;
         const ty = e.tagName === 'INPUT' ? (e.type || '').toLowerCase() : '';
         // A field nobody sees or reaches, left empty: a trap for robots.
-        const trap = e !== S && e !== U && e.tagName === 'INPUT' && ['password', 'text', 'email', 'tel', 'url', ''].includes(ty) && !e.value &&
+        const trap = e !== S && e !== U && e !== C && e.tagName === 'INPUT' && ['password', 'text', 'email', 'tel', 'url', ''].includes(ty) && !e.value &&
           (e.getAttribute('tabindex') === '-1' || !!(e.closest && e.closest('[aria-hidden=true]')) || offside(e));
-        if (ty === 'password' && visible(e) && !trap) passwords++;
-        if (e === U || e === S || ['hidden', 'submit', 'button', 'image', 'reset'].includes(ty)) continue;
+        if (ty === 'password' && visible(e) && !trap && e !== C) passwords++;
+        if (e === U || e === S || e === C || ['hidden', 'submit', 'button', 'image', 'reset'].includes(ty)) continue;
         if (ty === 'password') { if ((!visible(e) || trap) && !e.value) continue; }
         else if (ty === 'checkbox') { boxes++; continue; }
         else if (trap) continue;
@@ -607,12 +705,59 @@ PAGE_JS = r"""
         else if (e.tagName === 'SELECT' || e.tagName === 'TEXTAREA') { if (!visible(e)) continue; }
         extra = true;
       }
-      return { connected: true, hasForm: !!F, sameForm: [U, S].every(e => !e || formOf(e) === F), passwords: passwords, extra: extra, boxes: boxes,
-        shown: [U, S].every(e => !e || visible(e)), method: F ? (F.getAttribute('method') || '').toLowerCase().trim() : '',
+      return { connected: true, hasForm: !!F, sameForm: [U, S, C].every(e => !e || formOf(e) === F) && (!C || !!F || box.contains(C)), passwords: passwords, extra: extra, boxes: boxes,
+        shown: [U, S, C].every(e => !e || visible(e)), method: F ? (F.getAttribute('method') || '').toLowerCase().trim() : '',
         action: F ? actionOf(F) : '', boxed: boxed(document, 0) };
     };
     // Where a form goes: '' = nowhere or the page itself (an empty action means the page, whatever its <base> says).
     const actionOf = (F) => { const raw = (F.getAttribute('action') || '').trim(); return !raw || /^javascript:/i.test(raw) ? '' : resolve(raw).slice(0, 1000); };
+    // A one-time code: one field, or 4 to 10 of one character each. `box`: the form, or what holds the field and a button.
+    const codeBox = (C) => {
+      const F = formOf(C); if (F) return F;
+      let b = C.parentElement, i = 0;
+      while (b && b !== document.body && i < 8 && !b.querySelector('button,input[type=submit],[role=button]')) { b = b.parentElement; i++; }
+      return b || C.parentElement || document.body;
+    };
+    const codeInputs = (C) => {
+      const F = formOf(C), box = codeBox(C);
+      const all = Array.from(box.querySelectorAll('input,select,textarea,[contenteditable=""],[contenteditable=true]'));
+      if (F && F.id) for (const e of document.querySelectorAll('input[form],select[form],textarea[form]')) if (formOf(e) === F && !all.includes(e)) all.push(e);
+      return all.filter(e => !F || e.form === undefined || formOf(e) === F);
+    };
+    const oneChar = (e) => maxOf(e) === 1 || e.getAttribute('max') === '9' || /^(\\d|\[0-9\])(\{1\})?\*?$/.test(e.getAttribute('pattern') || '') ||
+      /(digit|character|number) ?\d/i.test(e.getAttribute('aria-label') || '');
+    const codeFields = (C, all) => {
+      const ty = (C.type || '').toLowerCase();
+      const c = all.filter(e => e.tagName === 'INPUT' && (e.type || '').toLowerCase() === ty && visible(e) && !e.disabled && !e.readOnly);
+      return c.length >= 4 && c.length <= 10 && c[0] === C && c.filter(oneChar).length >= c.length - 1 ? c : [C];
+    };
+    const codeFacts = (C, P) => {
+      const F = formOf(C), box = codeBox(C), all = codeInputs(C), cs = codeFields(C, all);
+      let extra = false, boxes = 0;
+      for (const e of all) {
+        const ty = e.tagName === 'INPUT' ? (e.type || '').toLowerCase() : '';
+        if (cs.includes(e) || ['hidden', 'submit', 'button', 'image', 'reset'].includes(ty)) continue;
+        if (ty === 'checkbox') { boxes++; continue; }
+        if (e.tagName === 'INPUT' && !['radio', 'file'].includes(ty) && (!visible(e) || e.readOnly || e.disabled || offside(e) || e.getAttribute('tabindex') === '-1')) continue;
+        if (!visible(e)) continue;
+        extra = true;
+      }
+      let press = '';
+      if (P) {
+        const g = gateOf(P, C);
+        press = g.submits && g.withForm ? 'form' : !F && !g.inForm && box.contains(P) && ['button', 'input'].includes(g.tag) ? 'box' : '';
+      }
+      return { connected: true, hasForm: !!F, count: cs.length, max: cs.length > 1 ? cs.length : maxOf(C), type: (C.type || '').toLowerCase(),
+        extra: extra, boxes: boxes, shown: cs.every(visible), method: F ? (F.getAttribute('method') || '').toLowerCase().trim() : '',
+        action: F ? actionOf(F) : '', boxed: boxed(document, 0), press: press };
+    };
+    // The words around it, without what links and buttons say ("Change number" next to a code is not what it is for).
+    const codeWords = (C) => {
+      const b = codeBox(C).cloneNode(true);
+      b.querySelectorAll('a,button,[role=button],script,style,noscript,template,select,input').forEach(n => n.remove());
+      const heads = Array.from(document.querySelectorAll('h1,h2,h3')).filter(visible).slice(0, 8).map(h => txt(h.textContent, 200));
+      return txt([document.title].concat(heads).join(' \n '), 800) + ' \n ' + txt(b.textContent, 1500);
+    };
     const setValue = (el, v) => {
       const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
@@ -728,11 +873,11 @@ PAGE_JS = r"""
       }
       if (a.op === 'inspect') { const el = get(a.n); return el ? Object.assign({ connected: true }, describe(el)) : { connected: false }; }
       if (a.op === 'login' || a.op === 'signin') {  // what the fields of a sign-in form belong to; signin: and fill them
-        const U = a.user ? get(a.user) : null, S = a.secret ? get(a.secret) : null;
-        if ((a.user && !U) || (a.secret && !S)) return { connected: false };
-        const facts = loginFacts(U, S);
+        const U = a.user ? get(a.user) : null, S = a.secret ? get(a.secret) : null, C = a.code ? get(a.code) : null;
+        if ((a.user && !U) || (a.secret && !S) || (a.code && !C)) return { connected: false };
+        const facts = loginFacts(U, S, C);
         if (a.op === 'login') return facts;  // (below: set = whether anything was put in)
-        const same = () => JSON.stringify(Object.keys(a.expect).map(k => loginFacts(U, S)[k])) === JSON.stringify(Object.values(a.expect));
+        const same = () => JSON.stringify(Object.keys(a.expect).map(k => loginFacts(U, S, C)[k])) === JSON.stringify(Object.values(a.expect));
         if (!same()) return { ok: false, set: false };
         if (U) setValue(U, a.values.user);  // the page's own scripts run here
         if (S) {
@@ -740,13 +885,36 @@ PAGE_JS = r"""
           kept.add(S);
           setValue(S, a.values.password);
         }
+        if (C) {
+          if (!C.isConnected || !same()) return { ok: false };
+          kept.add(C);
+          setValue(C, a.values.code);
+        }
         // A form that names no method would be sent with GET, the login in its address, should its script not run here.
         const F = formOf(S || U);
         if (F && !F.getAttribute('method')) F.setAttribute('method', 'post');
         return { ok: true };
       }
+      if (a.op === 'code') {  // what the field for a one-time code belongs to
+        const C = get(a.n), P = a.press ? get(a.press) : null;
+        return !C || (a.press && !P) ? { connected: false } : Object.assign(codeFacts(C, P), { words: codeWords(C) });
+      }
+      if (a.op === 'setcode') {  // one field, or one box after the other (a page's script sees each before the next)
+        const C = get(a.n), P = a.press ? get(a.press) : null;
+        if (!C || (a.press && !P)) return { ok: false, set: a.i > 0 };
+        if (a.i === 0) {
+          const f = codeFacts(C, P);
+          for (const k of Object.keys(a.expect)) if (JSON.stringify(f[k]) !== JSON.stringify(a.expect[k])) return { ok: false, set: false };
+          const F = formOf(C); if (F && !F.getAttribute('method')) F.setAttribute('method', 'post');
+          G.__ampi.boxes = codeFields(C, codeInputs(C));
+        }
+        const e = (G.__ampi.boxes || [])[a.i];
+        if (!e || !e.isConnected || !visible(e)) return { ok: false, set: a.i > 0 };
+        kept.add(e); setValue(e, a.value); return { ok: true };
+      }
       if (a.op === 'clickif') {  // press it only if it still is what was decided about
         const el = get(a.n); if (!el) return { ok: false };
+        if (a.filled) { const c = get(a.filled); if (!c || !visible(c) || !c.value) return { ok: false }; }
         const g = gateOf(el, null);
         for (const k of Object.keys(a.expect)) if (k !== 'method' && JSON.stringify(g[k]) !== JSON.stringify(a.expect[k])) return { ok: false };
         const b = el.closest('button,input') || el, F = formOf(b), m = F ? (b.getAttribute('formmethod') || F.getAttribute('method') || '').trim().toLowerCase() : 'post';
@@ -790,6 +958,15 @@ class Session:
         self.gen = 0         # counts everything done in the session: an approved press needs it unchanged
         self.filled = False  # the owner's details were filled in
         self.secrets: list[str] = []  # the login filled in: cut out of every reply
+        self.code: tuple[Code, str] | None = None  # the one-time code filled in, and the document it is in
+        # A one-time code goes in only where a sign-in itself led: `chain` is `gen` as it was after the login was filled in, carried on
+        # by the few presses that belong to a sign-in (_carries). Anything else that was done breaks it, for good.
+        self.chain: int | None = None
+        self.chain_at = 0.0
+        self.steps = self.codes = 0
+        self.step_form: tuple[str, int] = ("", 0)  # (document, number) of the field filled in last: its form's button is a step
+        self.code_place: list | None = None  # where the first code went: another try only there
+        self.deep = False  # Ampi opened an address with another one in it
         self.user_step = False  # the first page of a sign-in was filled in (its user name)
         self.signed_in = False  # a password was filled in
         self.full = False  # it was on more sites than are counted
@@ -802,6 +979,10 @@ class Session:
     def account(self) -> bool:
         """Perhaps signed in to the owner's account (some sites need no more than the name)."""
         return self.signed_in or self.user_step
+
+    @property
+    def hide(self) -> list[str]:
+        return [*self.secrets, *([self.code[0]] if self.code else [])]
 
     def name(self, frame_id: str) -> str:
         if frame_id not in self.frame_names:
@@ -835,7 +1016,7 @@ class Controller:
         self._phase: str | None = None
 
     CHANGES = ("open", "click", "type", "choose", "back", "fill", "pay")
-    SIGNIN = ("bind_login", "fill_login")  # for ampi-signin, and nothing else is
+    SIGNIN = ("bind_login", "fill_login", "bind_code", "fill_code")  # for ampi-signin, and nothing else is
 
     # --- request entry -------------------------------------------------------------------
 
@@ -849,7 +1030,7 @@ class Controller:
         """`signin`: the caller is ampi-signin."""
         s = self.session
         out = self._handle(req, signin)
-        secrets_ = [x for session in {s, self.session} if session is not None for x in session.secrets]
+        secrets_ = [x for session in {s, self.session} if session is not None for x in session.hide]
         try:
             return hidden(out, secrets_) if secrets_ else out
         except Exception:
@@ -866,7 +1047,7 @@ class Controller:
             cmd = req["cmd"]
             if signin is not (cmd in self.SIGNIN):
                 raise Refused("unknown command")
-            fn = {"bind_login": self.bind_login, "fill_login": self.fill_login,
+            fn = {"bind_login": self.bind_login, "fill_login": self.fill_login, "bind_code": self.bind_code, "fill_code": self.fill_code,
                   "status": self.status, "open": self.open, "snapshot": self.snapshot_cmd, "click": self.click,
                   "type": self.type_text, "choose": self.choose, "back": self.back, "close": self.close,
                   "bind": self.bind, "gate": self.gate, "bind_submit": self.bind_submit, "submit": self.submit, "fill": self.fill, "pay": self.pay, "hold": self.hold}.get(cmd)
@@ -990,6 +1171,7 @@ class Controller:
         else:
             s = self._new_session(engine or "obscura")
         self._visit(s, url)  # (also when it forwards at once)
+        s.deep = s.deep or bool(nested(url) or CODE_DEEP.search(address_words(url)))
         s.cdp.call("Page.navigate", {"url": url}, s.cdp_session)
         self._settle(s, NAV_TIMEOUT)
         return self._reply(s)
@@ -1064,7 +1246,7 @@ class Controller:
         s.worlds[frame["frame_id"]] = (frame["loader"], ctx)
         return ctx
 
-    ELEMENT_OPS = ("inspect", "gate", "set", "click", "choose", "login", "signin", "clickif")
+    ELEMENT_OPS = ("inspect", "gate", "set", "click", "choose", "login", "signin", "clickif", "code", "setcode")
 
     def _eval(self, s: Session, frame: dict, op: dict) -> dict | None:
         ctx = self._world(s, frame)
@@ -1102,11 +1284,13 @@ class Controller:
     @staticmethod
     def _m(s: Session, text: Any) -> str:
         """As a reply says it (handle() does the same to everything of the page in it)."""
-        return hidden({"text": str(text or "")}, s.secrets)["text"]
+        return hidden({"text": str(text or "")}, s.hide)["text"]
 
     def snapshot(self, s: Session) -> dict:
         frames = self._frames(s)
         top = frames[0]
+        if s.code and s.code[1] != top["loader"]:  # used up; a few digits are cut out no longer than they have to be
+            s.code = None
         snap: dict[str, Any] = {"url": self._m(s, top["url"])[:500], "origin": top["origin"], "title": "", "text": "",
                                 "frames": [], "elements": [], "readonly": s.readonly}
         frame_urls = []
@@ -1194,8 +1378,12 @@ class Controller:
             raise Refused("that element can't be clicked")
         if d.get("disabled"):
             raise Refused("that element is disabled right now (the page may want something filled first)")
-        if s.secrets and self._gate(s, frame, n)["leaks"]:
-            raise Refused("that would put the login that was filled in into an address")
+        if s.secrets:
+            g = self._gate(s, frame, n)
+            if g["leaks"]:
+                raise Refused("that would put the login that was filled in into an address")
+            if s.chain == s.gen - 1 and frame["parent"] is None and self._harmless_step(s, d, g):
+                s.chain, s.steps = s.gen, s.steps + 1
         r = self._run(s, frame, {"op": "click", "n": n}) or {}
         if not r.get("ok"):
             raise Refused("that element is gone (the page changed); take a new snapshot")
@@ -1215,6 +1403,9 @@ class Controller:
             raise Refused("that field is disabled right now")
         if any(SECRET_FIELD.search(str(d.get(k) or "")) for k in ("type", "autocomplete", "name", "id")):
             raise Refused("that field is for card, password or code details; those are only filled with approval")
+        if code_field(d):
+            raise Refused("that field is for a one-time code: only the owner enters one, on the phone (`signin code`, right after "
+                          "`signin fill`)")
         self._part_of_a_form(s, frame, n, d)
         ident = re.sub(r"[_\-.\[\]]+", " ", " ".join(str(d.get(k) or "") for k in ("name", "label", "id")))
         if d.get("type") != "search" and not (d.get("type") == "number" and QUANTITY.search(ident)):
@@ -1246,6 +1437,8 @@ class Controller:
             raise Refused("only a list or a text field can be set")
         if any(SECRET_FIELD.search(str(d.get(k) or "")) for k in ("type", "autocomplete", "name", "id")):
             raise Refused("that field is for card, password or code details")
+        if code_field(d):
+            raise Refused("that field is for a one-time code: only the owner enters one, on the phone (`signin code`)")
 
     def choose(self, req: dict) -> dict:
         s = self._session(req)
@@ -1393,7 +1586,7 @@ class Controller:
             self._settable(d, req["option"])
             op = {"op": "choose", "n": n, "option": req["option"]} if d["kind"] == "select" else {"op": "set", "n": n, "value": req["option"]}
         g = self._gate(s, bframe, n)
-        if hidden(self._press(g), s.secrets) != req.get("press"):
+        if hidden(self._press(g), s.hide) != req.get("press"):
             raise changed
         if g["leaks"]:
             raise Refused("that would put the login that was filled in into an address; nothing was pressed")
@@ -1405,8 +1598,11 @@ class Controller:
             raise changed
         if self._form(s, frames, bframe)[1] != req.get("digest"):
             raise changed
+        carries = op["op"] == "click" and self._carries(s, frames, bframe, d, n, g, snap)
         # Whatever happens from here on, the press may have happened: never a definite refusal.
         s.gen += 1  # an approval is good for one press
+        if carries:
+            s.chain, s.steps = s.gen, s.steps + 1
         self._phase = "sent"
         try:
             if op["op"] != "click":
@@ -1453,6 +1649,8 @@ class Controller:
                 raise changed
             if d.get("kind") not in ("input", "textarea"):
                 raise changed
+            if not f.get("card") and code_field(d):
+                raise Refused("that field is for a one-time code; nothing was filled")
             if f.get("card"):
                 if not allow_card:
                     raise Refused("card details are only filled as part of a payment")
@@ -1494,7 +1692,7 @@ class Controller:
         if top["loader"] in s.typed:
             raise Refused("something was typed into this page; open it again and leave the filling to the sign-in")
         els: dict[str, tuple[dict, int]] = {}
-        for k in ("user", "password", "press"):
+        for k in ("user", "password", "code", "press"):
             if req.get(k) is None:
                 continue
             frame, d, n = self._element(s, req[k], frames)
@@ -1503,8 +1701,14 @@ class Controller:
             if d.get("disabled") and k != "press":  # (the button often wakes up when the fields are filled)
                 raise Refused(f"the {k} field is disabled")
             els[k] = (d, n)
-        if not els or set(els) == {"press"}:
+        if not {"user", "password"} & set(els):
             raise Refused("give the user field, the password field, or both")
+        if "code" in els:
+            if "password" not in els:
+                raise Refused("a code next to a user name alone isn't supported")
+            self._code_element(els["code"][0])
+            if els["code"][0].get("max") == 1:
+                raise Refused("a code in several boxes next to a password isn't supported")
         # A lone password field is how sites ask "is it really you?" before something important. It is a sign-in only as the
         # second page of one.
         if "user" not in els and not s.user_step:
@@ -1525,7 +1729,8 @@ class Controller:
             if d.get("type") not in ("email", "tel") and not USER_FIELD.search(words):
                 raise Refused("that doesn't look like the field for a user name or email")
         facts = self._run(s, top, {"op": "login", "user": els["user"][1] if "user" in els else None,
-                                   "secret": els["password"][1] if "password" in els else None}) or {}
+                                   "secret": els["password"][1] if "password" in els else None,
+                                   **({"code": els["code"][1]} if "code" in els else {})}) or {}
         if not facts.get("connected"):
             raise Refused(PAGE_CHANGED)
         facts = {k: facts.get(k) for k in self.LOGIN_FACTS}
@@ -1602,10 +1807,16 @@ class Controller:
                 or {k: {"ref": bound["elements"][k].get("ref"), **{b: str(d.get(b) or "")[:120] for b in self.BOUND}}
                     for k, (d, _) in els.items()} != bound["elements"]):
             raise changed
-        values = {k: req.get(k) for k in ("user", "password") if k in els}
-        if any(not fillable(v) for v in values.values()) or not fillable(req.get("name")):
+        values = {k: req.get(k) for k in ("user", "password", "code") if k in els}
+        if any(not fillable(v) for v in values.values()) or not fillable(req.get("name")) or "code" in values and not a_code(values["code"]):
             raise Refused("bad request")
+        if "code" in values:
+            values["code"] = self._code_fits(values["code"], els["code"][0].get("max"), els["code"][0].get("type"))
+            s.code = (Code(values["code"]), top["loader"])
         s.gen += 1
+        leads = [_as_words(x) for x in nested(top["url"])]
+        s.chain = None if s.deep or s.full or CODE_DANGER.search(address_words(top["url"])) or any(CODE_DEEP.search(x) for x in leads) else s.gen
+        s.chain_at, s.steps, s.step_form = self.clock(), 0, (top["loader"], next(els[k][1] for k in ("password", "user") if k in els))
         s.filled, before = True, (s.signed_in, s.user_step)
         s.secrets += [Name(req["name"]), *([values["password"]] if "password" in values else [])]
         if "password" in values:
@@ -1616,10 +1827,12 @@ class Controller:
         # Checked and set in one go: page scripts run while the first field is set, and nothing else gets in between.
         r = self._run(s, top, {"op": "signin", "user": els["user"][1] if "user" in els else None,
                                "secret": els["password"][1] if "password" in els else None, "values": values,
+                               **({"code": els["code"][1]} if "code" in els else {}),
                                "expect": {k: v for k, v in facts.items() if k != "targets"}}) or {}
         if not r.get("ok"):
             if r.get("set") is False:  # nothing was put in yet
                 s.signed_in, s.user_step = before
+                s.chain = s.code = None
                 self._phase = "verify"
                 raise changed
             raise Refused("the page changed while it was being filled in; close the session and start again")
@@ -1660,6 +1873,197 @@ class Controller:
                 return True
         self._check_top(s)
         return False
+
+    # --- the one-time code of a sign-in (only ampi-signin) ---------------------------------------
+
+    CODE_FACTS = ("hasForm", "count", "max", "type", "extra", "boxes", "shown", "method", "action", "boxed", "press")
+
+    @staticmethod
+    def _harmless_step(s: Session, d: dict, g: dict) -> bool:
+        """A plain click that may come between a sign-in and its code: a cookie banner, or which way to get the code."""
+        texts = [t for t in (login_caption(t) for t in g["texts"]) if t]
+        if s.steps >= CODE_STEPS or not texts:
+            return False
+        if g["dialog"] == "cookies" and not g["submits"] and all(COOKIE_CAPTION.fullmatch(t) for t in texts):
+            return True
+        return d.get("kind") == "radio" and g["tag"] == "input" and all(CODE_WAY.search(t) and not CODE_DANGER.search(t) for t in texts)
+
+    def _carries(self, s: Session, frames: list[dict], bframe: dict, d: dict, n: int, g: dict, snap: dict) -> bool:
+        """Does this press (the owner approved it) belong to a sign-in, so that its code may still be filled in after it?"""
+        if s.chain is None or s.chain != s.gen or s.steps >= CODE_STEPS or bframe is not frames[0]:
+            return False
+        if snap["gate_totals"] or any(PAY_HOST.search(f["origin"]) for f in frames):
+            return False
+        if bframe["loader"] == s.step_form[0] and d.get("kind") == "button":
+            r = self._run(s, bframe, {"op": "gate", "n": n, "with": s.step_form[1]}) or {}
+            if r.get("submits") and r.get("withForm"):  # the button of the form that was filled in
+                return True
+        texts = [t for t in (login_caption(t) for t in g["texts"]) if t]
+        if d.get("kind") in ("button", "link"):
+            return bool(texts) and all(CODE_STEP.fullmatch(t) for t in texts)
+        return self._harmless_step(s, d, g)
+
+    @staticmethod
+    def _code_element(d: dict) -> None:
+        if d.get("tag") != "input" or d.get("type") not in CODE_TYPES or not code_field(d, loose=True) \
+                or re.search(r"\bcc-|card|cvc|cvv|csc|iban", _spaced(d, "autocomplete", "name", "id", "label"), re.I):
+            raise Refused("that doesn't look like the field for a one-time code")
+
+    @staticmethod
+    def _code_fits(code: str, length: Any, type_: Any, count: int = 1) -> str:
+        plain = code.replace("-", "")
+        if count > 1:
+            if len(plain) != count:
+                raise Refused(f"the code has {len(plain)} characters, the page has {count} boxes; nothing was filled in")
+            code = plain
+        elif type_ == "number" or isinstance(length, int) and 0 < length < len(code):
+            if isinstance(length, int) and 0 < length < len(plain):
+                raise Refused(f"the code has {len(plain)} characters, the field takes {length}; nothing was filled in")
+            code = plain
+        if type_ == "number" and not code.isdigit():
+            raise Refused("the field takes digits only; nothing was filled in")
+        return code
+
+    def _code(self, s: Session, req: dict) -> tuple[dict, dict, int, dict, dict | None, int, list]:
+        """(top frame, the field, its number, facts, what the press would press, the button's number, where it is): a page of
+        this sign-in that asks for its code, or a refusal."""
+        if s.chain is None or s.chain != s.gen:
+            raise Refused("a code goes in only right after `signin fill` and what belongs to signing in; something else was done in "
+                          "between, or the sign-in page was one that can lead elsewhere. Close the session, open the site's plain "
+                          "sign-in page and start again")
+        if self.clock() - s.chain_at > CODE_WINDOW:
+            raise Refused("the sign-in was too long ago; close the session and start again")
+        if s.codes >= CODE_TRIES:
+            raise Refused("three codes were tried already; close the session and start again")
+        if s.full:
+            raise Refused("this session was on too many sites")
+        frames = self._frames(s)
+        top = frames[0]
+        host = login_host(top["url"])
+        if not host or top["origin"] != f"https://{urllib.parse.urlsplit(top['url']).netloc.lower().removesuffix(':443')}":
+            raise Refused("this isn't an https page a login can be used on")
+        frame, d, n = self._element(s, req.get("code"), frames)
+        if frame is not top:
+            raise Refused("the code's field is inside a frame; that isn't supported, the owner does that")
+        if d.get("disabled"):
+            raise Refused("the field for the code is disabled")
+        self._code_element(d)
+        place = [urllib.parse.urlsplit(top["url"]).path, *(str(d.get(b) or "")[:120] for b in self.BOUND)]
+        if s.codes and place != s.code_place:
+            raise Refused("that isn't where the first code went; the owner does that")
+        button = bd = None
+        if req.get("press") is not None:
+            bframe, bd, button = self._element(s, req["press"], frames)
+            if bframe is not top or bd.get("kind") != "button":
+                raise Refused("that isn't the button of that form; fill in without --press and use `checkout submit` for it")
+        facts = self._run(s, top, {"op": "code", "n": n, "press": button}) or {}
+        if not facts.get("connected"):
+            raise Refused(PAGE_CHANGED)
+        words = br.clean(str(facts.get("words") or ""))
+        facts = {k: facts.get(k) for k in self.CODE_FACTS}
+        if facts["boxed"] is not False:
+            raise Refused("that page shows content of others inside it (a sandboxed frame); signing in there is for the owner")
+        if not facts["shown"]:
+            raise Refused("that field isn't visible on the page")
+        if facts["extra"] or not isinstance(facts["boxes"], int) or facts["boxes"] > 2 or not isinstance(facts["count"], int):
+            raise Refused("that form asks for more than a code; the owner does that")
+        if facts["method"] not in ("", "post"):
+            raise Refused("that form would put the code into the address of a page; refusing")
+        snap = self.snapshot(s)
+        if snap["captcha"]:
+            raise Refused("the page has a captcha; signing in there is for the owner")
+        if snap["gate_totals"] or snap["risky_checked"] or PRICE.search(words) or any(PAY_HOST.search(f["origin"]) for f in frames):
+            raise Refused("there is something to pay on this page; the owner does that")
+        if CODE_DANGER.search(words) or CODE_DANGER.search(address_words(top["url"])) or any(CODE_FRAME.search(f["url"]) for f in frames[1:]):
+            raise Refused("this page seems to ask for a code to confirm something else than a sign-in; the owner does that")
+        press = self._code_press(s, top, button, n, facts) if button is not None else None
+        facts["targets"] = sorted({host, *(login_host(u) for u in (facts["action"], press["to"] if press else "") if u)})
+        if "" in facts["targets"]:
+            raise Refused("that form sends the code to something that isn't an https site; refusing")
+        return top, d, n, facts, press, button, place
+
+    def _code_press(self, s: Session, top: dict, button: int, n: int, facts: dict) -> dict:
+        instead = "; fill in without --press and use `checkout submit` for the button, which asks the owner"
+        g = self._run(s, top, {"op": "gate", "n": button, "with": n}) or {}
+        if not g.get("connected") or g.get("tag") not in ("button", "input") or facts["press"] not in ("form", "box"):
+            raise Refused("that isn't the button of that form" + instead)
+        texts = [login_caption(t) for t in g.get("texts") or []]
+        if not texts or not all(LOGIN_CAPTION.fullmatch(t) or CODE_CAPTION.fullmatch(t) for t in texts):
+            raise Refused("that button doesn't say it sends the code" + instead)
+        if facts["press"] == "form" and str(g.get("method") or "") not in ("", "post", "get" if not g.get("ownMethod") else "post"):
+            raise Refused("that button would put the code into the address of a page; refusing")
+        return {k: g.get(k) for k in ("tag", "texts", "to", "submits", "ident")}
+
+    def bind_code(self, req: dict) -> dict:
+        """Which site asks for a code (the owner is asked for exactly that one), and what the form is, to check it again."""
+        s = self._session(req)
+        top, d, _, facts, press, _, place = self._code(s, req)
+        return {"ok": True, "session": s.id, "host": login_host(top["url"]), "visited": sorted(s.visited), "targets": facts["targets"],
+                "bound": {"gen": s.gen, "frame_id": top["frame_id"], "origin": top["origin"], "loader": top["loader"], "facts": facts,
+                          "press": press, "place": place, "refs": {k: req[k] for k in ("code", "press") if req.get(k) is not None}}}
+
+    def fill_code(self, req: dict) -> dict:
+        """Fills in the code the owner gave, into exactly what was bound, and presses the button if one was given."""
+        s = self._session(req)
+        self._phase = "verify"
+        changed = Refused("the page changed meanwhile; nothing was filled in")
+        bound = req.get("bound")
+        if not isinstance(bound, dict) or not isinstance(bound.get("refs"), dict) or not a_code(req.get("code")):
+            raise Refused("bad request")
+        if bound.get("gen") != s.gen:
+            raise changed
+        try:
+            top, d, n, facts, press, button, place = self._code(s, bound["refs"])
+        except Refused:
+            raise changed from None
+        if (top["frame_id"] != bound.get("frame_id") or top["origin"] != bound.get("origin") or top["loader"] != bound.get("loader")
+                or facts != bound.get("facts") or press != bound.get("press") or place != bound.get("place")
+                or login_host(top["url"]) != req.get("host")):
+            raise changed
+        code = self._code_fits(req["code"], facts["max"], d.get("type"), facts["count"])
+        s.gen += 1
+        s.filled, s.code = True, (Code(code), top["loader"])
+        s.chain, s.codes, s.code_place, s.step_form = s.gen, s.codes + 1, place, (top["loader"], n)
+        expect = {k: v for k, v in facts.items() if k != "targets"}
+        # Many pages send it on the last digit: from the first one on it may have been sent.
+        self._phase = "sent"
+        parts = list(code) if facts["count"] > 1 else [code]
+        gone = {"ok": True, "session": s.id, "pressed": False, "moved": True}
+        for i, part in enumerate(parts):
+            try:
+                r = self._run(s, top, {"op": "setcode", "n": n, "i": i, "value": part, "press": button, "expect": expect}) or {}
+            except (Refused, CdpProtocolError):
+                r = {"ok": False, "set": True}
+            if r.get("ok"):
+                continue
+            if r.get("set") is False and i == 0:
+                s.codes, s.code = s.codes - 1, None
+                self._phase = "verify"
+                raise changed
+            return self._error("the page changed while the code was being filled in; look at it before trying again")
+        try:
+            if self._moved(s, top):
+                self._settle(s, NAV_TIMEOUT)
+                return gone
+            if press is None:
+                return {"ok": True, "session": s.id, "pressed": False, "moved": self._after_signin(s, top, {"user": (d, n)})}
+            for _ in range(6):  # forms enable their button when the code is complete, some after a moment
+                self.sleep(0.5)
+                if self._moved(s, top):
+                    self._settle(s, NAV_TIMEOUT)
+                    return gone
+                cur = self._run(s, top, {"op": "inspect", "n": button}, quiet=True) or {}
+                if not cur.get("connected") or not cur.get("disabled"):
+                    break
+            r = self._run(s, top, {"op": "clickif", "n": button, "expect": press, "filled": n}, quiet=True) or {}
+            return {"ok": True, "session": s.id, "pressed": bool(r.get("ok")), "moved": self._after_signin(s, top, {"user": (d, n)})}
+        except (Refused, CdpProtocolError):
+            return self._error("after the code was filled in, the page changed or went somewhere this browser doesn't open; look at it "
+                               "before trying again")
+
+    def _moved(self, s: Session, top: dict) -> bool:
+        now = self._frames(s)[0]
+        return now["url"] != top["url"] or now["loader"] != top["loader"]
 
     def _set_all(self, s: Session, plan: list[tuple]) -> None:
         for frame, n, value in plan:

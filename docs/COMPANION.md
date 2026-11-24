@@ -145,10 +145,11 @@ Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-si
   unlock). A newly added one, none left or no screen lock destroys the key (then the logins are entered again: they belong in
   a password manager too; the app says to look for fingerprints that aren't the owner's first). Bound into every login: its id, sites, label, and the sign-in service it was saved for,
   so re-pairing the phone with another server makes them useless there. Nothing can be shown again. Sites are exact https
-  host names (ASCII; `www.` is the same site), up to 5 per login; big providers (Google, Apple, Facebook, Microsoft, Yahoo) are
-  refused: their password opens much more than one site.
+  host names (ASCII; `www.` is the same site), up to 5 per login. Refused, on the phone and by ampi-signin: mail and sign-in
+  providers, servers and code, password managers, Telegram and Anthropic, banks and payment services (`NOT`, the same list on both
+  sides): one of those opens much more than one site, is how Ampi itself is controlled, or is about money.
 - **Asking** (`Unlock`, `UnlockActivity`): a notification without the site -> tap -> the screen with the site, which login, and
-  "Use fingerprint" / "Refuse". One at a time, 75 s at most (monotonic), 6 in 10 minutes, 30 a day for all sites together, saved
+  "Use fingerprint" / "Refuse". One at a time, 75 s at most (monotonic; 120 s where a code has to be looked up), 6 in 10 minutes, 30 a day for all sites together, saved
   or not; after a refusal none for a minute. What doesn't depend on the site is checked first, and asking for one that isn't saved
   shows a notice: nobody finds out unseen which sites there are. All words are the app's own. While it is open, Ampi's messages, alarms and cancellations are refused
   (`signin_open`); if something rings, the request ends ("interrupted"); while something rings, none starts. When the server or
@@ -158,7 +159,8 @@ Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-si
   random number). The phone opens a second connection to the same port, says that number, and inside it starts TLS 1.3 with
   ampi-signin: the phone's certificate is its connection key, the service's is the one fixed while pairing. Nothing is
   looked at before both are proved, so the gateway can neither ask, nor read, nor change anything: it can only not pass it on.
-  One request per channel, which must come within 10 s of the handshake; the phone ends a channel after 110 s whatever arrives.
+  One request per channel, which must come within 10 s of the handshake; the phone ends a channel after 110 s (155 s for a code)
+  whatever arrives.
   One channel at a time, 6 a minute, 40 an hour (both sides count for themselves), 64 KB each way. Unpairing ends it.
 - **ampi-signin** (`src/ampi_phone/signin.py`, standard library): socket-activated, only ampi-tools may call it (uid checked), one
   request at a time (others are told "busy" at once, never queued), ends when the command that asked is gone or after 100 s,
@@ -169,8 +171,8 @@ Ampi -- `signin` --> ampi-tools (signin.test, private chat only) -- /run/ampi-si
   sentences about a form).
 
 Inside the channel (4-byte length + JSON, 8 KB): `{"v":1,"op":"get","purpose":"test"|"fill","host","wait"}` -> `{"asking":true}`
-then `{"ok":true}` (fill: with `user`, `secret` and the login's `hosts`) or `{"ok":false,"error":CODE}`; anything else is answered
-`unsupported`.
+then `{"ok":true}` (fill: with `user`, `secret` and the login's `hosts`) or `{"ok":false,"error":CODE}`; with `"code":true` also `code`.
+`{"v":1,"op":"code","host","wait"}` -> `{"ok":true,"code","hosts"}`. Anything else is answered `unsupported`.
 
 ### Signing in on a page
 
@@ -202,15 +204,44 @@ Who could do what: the gateway (reached from the internet): delay. ampi-tools, o
 it shows the site), learn whether a login was unlocked, and, when the owner approves, use the signed-in page: a tricked Ampi within
 the rules above; ampi-tools itself applies the rules, so a compromised one could do in that account what the session can. ampi-signin or root: get the one login the owner approves, at that moment. Someone with the unlocked phone but not the finger: see sites and labels, delete.
 
+### One-time codes (two-factor)
+
+`signin code --code f0:7 [--press f0:8]`, right after `signin fill`. The owner types the code on the phone (message, email, another
+app, backup code), or the phone works it out from an authenticator key saved with the login (`Totp`: optional, in the same encrypted
+record, with a fingerprint of its own; the key stays on the phone). Ampi and ampi-tools never see it.
+
+Such codes also confirm payments, new phone numbers and the like, and Ampi may be tricked by a page. So a code goes in only where the
+sign-in itself led, without anyone judging what a page says:
+
+- **The controller's chain** (`Session.chain`): `gen` counts everything that is done in a session. Filling a login in sets `chain = gen`;
+  the owner-approved press of that form's own button, or of a button or link whose whole caption is a known step ("Send code", "Try another
+  way", …), carries it on (4 at most, nothing to pay on the page), and so do a click on a cookie banner and on a radio button that says which
+  way the code should come. Anything else that was done ends it for that session. Codes: 10 minutes, three tries, all in the same field.
+- Never after Ampi opened an address with another one in it (`?next=…`), or of a settings, security or payment page; nor where the
+  sign-in page's own address leads to one: signing in there could lead straight to such a confirmation.
+- Never on a page with a total, a payment frame or a captcha, nor where title, headings or the form speak of paying, transferring, deleting,
+  a new number or email, a password (`CODE_DANGER`): more of a net than a wall.
+- The field must look like one for a code (or 4 to 10 boxes of one character), in the main frame, with nothing else to fill in; the
+  form goes where the login's sites are, never with GET.
+- **The phone** gives a code only for the login it sent within the last 10 minutes, only for a site of that login, three times at most, not
+  after a refusal; the screen says to read the message the code came in. It returns the login's sites, and ampi-signin compares them
+  again with where this session was and where the form sends it.
+- **Ampi never types into a code's field** (`code_field`, also in `checkout type`, `fill` and `submit --option`): it reads the owner's
+  email, where some codes arrive.
+- "Approve it on your other device": Ampi says to open the app, never which number to pick there: a hostile page could make the owner
+  approve somebody else's sign-in.
+
+ampi-tools applies the approvals, so a compromised one could press those known steps without asking; it can't get a code anywhere else.
+
 ### Not yet
 
-One-time codes (an operation of their own, where the owner types the code on the phone), sign-in forms inside frames, Google and
-the like, passkeys. Never a CAPTCHA.
+Sign-in forms and codes inside frames, several boxes for a code next to a password, links by email as a sign-in (Ampi reads that mail:
+never), Google and the like, passkeys. Never a CAPTCHA.
 
 ## Order
 
 A. Gateway, `phone` command, app with notifications, alarms, timers, pairing (live). B. Saving and unlocking logins.
-C1. Signing in on a page. C2. Lightpanda engine, prepaid bookings. D. Card payments on Lightpanda, confirmed in the app.
+C1. Signing in on a page, one-time codes. C2. Lightpanda engine, prepaid bookings. D. Card payments on Lightpanda, confirmed in the app.
 Each phase: skeptic review of the plan, build, security and correctness reviews, fixes, then the owner deploys.
 
 ## Release key
