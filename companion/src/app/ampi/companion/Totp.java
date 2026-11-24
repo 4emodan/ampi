@@ -49,7 +49,12 @@ final class Totp {
             for (String p : (q < 0 ? "" : s.substring(q + 1)).split("&")) {
                 int eq = p.indexOf('=');
                 if (eq < 0) continue;
-                String v = URLDecoder.decode(p.substring(eq + 1), StandardCharsets.UTF_8);
+                String v;
+                try {
+                    v = URLDecoder.decode(p.substring(eq + 1), StandardCharsets.UTF_8);
+                } catch (IllegalArgumentException e) {
+                    v = "";  // a bare % (in a name, most likely)
+                }
                 switch (p.substring(0, eq).toLowerCase(Locale.ROOT)) {
                     case "secret" -> secret = v;
                     case "algorithm" -> hash = v.toUpperCase(Locale.ROOT).replace("-", "");

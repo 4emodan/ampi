@@ -151,8 +151,14 @@ final class Unlock {
         private void workOut(JSONObject o, Totp totp, Last of) {
             try {
                 long now = System.currentTimeMillis() / 1000, w = totp.window(now);
-                if (of != null && of.window == w || (w + 1) * totp.period - now < 4) {
-                    Thread.sleep(Math.max(0, (w + 1) * totp.period * 1000 - System.currentTimeMillis()) + 300);
+                boolean used = of != null && of.window == w;
+                if (used || (w + 1) * totp.period - now < 4) {
+                    long wait = Math.max(0, (w + 1) * totp.period * 1000 - System.currentTimeMillis()) + 300;
+                    if (wait > Math.max(0, left()) + 10_000) {  // nobody waits that long any more
+                        send.accept(result("expired"));
+                        return;
+                    }
+                    Thread.sleep(wait);
                     w = totp.window(System.currentTimeMillis() / 1000);
                 }
                 if (of != null) of.window = w;
@@ -325,7 +331,7 @@ final class Unlock {
             }
             return null;
         }
-        for (Logins.Login l : all) if (l.hosts().contains(host) && l.server().equals(server)) choices.add(l);
+        if (!Hosts.refused(host)) for (Logins.Login l : all) if (l.hosts().contains(host) && l.server().equals(server)) choices.add(l);
         if (choices.isEmpty()) {
             // Asking for sites to find out which ones are saved doesn't go unnoticed.
             Notes.change(c, "signin-missing", "Ampi asked for a login that isn't saved",

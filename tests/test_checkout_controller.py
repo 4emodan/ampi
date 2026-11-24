@@ -154,6 +154,8 @@ class FakeEngine:
             return {"ok": True}
         if a["op"] == "state":
             return {"href": f.url, "ready": "complete"}
+        if a["op"] == "code":  # what the page says around a field
+            return {"connected": bool(get(a["n"])), "words": f.__dict__.get("words", "")}
         if a["op"] == "back":
             return {"ok": True}
         raise AssertionError(a)

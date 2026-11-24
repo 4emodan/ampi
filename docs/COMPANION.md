@@ -213,21 +213,24 @@ record, with a fingerprint of its own; the key stays on the phone). Ampi and amp
 Such codes also confirm payments, new phone numbers and the like, and Ampi may be tricked by a page. So a code goes in only where the
 sign-in itself led, without anyone judging what a page says:
 
-- **The controller's chain** (`Session.chain`): `gen` counts everything that is done in a session. Filling a login in sets `chain = gen`;
-  the owner-approved press of that form's own button, or of a button or link whose whole caption is a known step ("Send code", "Try another
-  way", …), carries it on (4 at most, nothing to pay on the page), and so do a click on a cookie banner and on a radio button that says which
-  way the code should come. Anything else that was done ends it for that session. Codes: 10 minutes, three tries, all in the same field.
-- Never after Ampi opened an address with another one in it (`?next=…`), or of a settings, security or payment page; nor where the
-  sign-in page's own address leads to one: signing in there could lead straight to such a confirmation.
-- Never on a page with a total, a payment frame or a captcha, nor where title, headings or the form speak of paying, transferring, deleting,
-  a new number or email, a password (`CODE_DANGER`): more of a net than a wall.
+- **The controller's chain** (`Session.chain`): `gen` counts everything that is done in a session. A session that begins at a site's start
+  page or an address that is plainly its sign-in page (`plain_entry`) has `chain = gen`, and only what belongs to signing in carries it on:
+  a link to such a page or a button that opens the sign-in form, a cookie banner, filling the login in, the owner-approved press of that
+  form's own button, or of a button or link whose whole caption is a known step ("Send code", "Try another way", …) and that stays on the
+  same site with nothing new in its address (5 at most, nothing to pay on the page). After a code was filled in: only its own button, or
+  "send a new one". Anything else that was done ends it for that session, also before the sign-in: a site remembers where one wanted to
+  go, and may lead there (to a transfer, a settings page) right after it. Nor where the sign-in page's own address leads to such a page.
+  What was refused was not done. Codes: 10 minutes, three tries, all in one place.
+- Never on a page with a total, a payment frame or a captcha, nor where title, headings, the form, its buttons or its address speak of paying,
+  transferring, deleting, a new number or email, a password (`CODE_DANGER`): more of a net than a wall.
 - The field must look like one for a code (or 4 to 10 boxes of one character), in the main frame, with nothing else to fill in; the
   form goes where the login's sites are, never with GET.
 - **The phone** gives a code only for the login it sent within the last 10 minutes, only for a site of that login, three times at most, not
   after a refusal; the screen says to read the message the code came in. It returns the login's sites, and ampi-signin compares them
   again with where this session was and where the form sends it.
-- **Ampi never types into a code's field** (`code_field`, also in `checkout type`, `fill` and `submit --option`): it reads the owner's
-  email, where some codes arrive.
+- **Ampi never types into a code's field** (`code_field`, also in `checkout type`, `fill` and `submit --option`; where the page around it
+  asks for a code, only into fields that plainly are for something else): it reads the owner's email, where some codes arrive. And a session whose
+  page offers to sign out is an account, however that came about (a link from an email, say).
 - "Approve it on your other device": Ampi says to open the app, never which number to pick there: a hostile page could make the owner
   approve somebody else's sign-in.
 

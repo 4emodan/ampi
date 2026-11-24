@@ -149,6 +149,7 @@ final class LogicTest {
         }
         eq("SHA256", "46119246", code("otpauth://totp/a%20b:c?digits=8&secret=" + k32 + "&algorithm=sha256&issuer=x", 59));
         eq("SHA512", "90693936", code("otpauth://totp/a?digits=8&algorithm=SHA512&secret=" + k64, 59));
+        eq("a bare percent", "287082", code("otpauth://totp/a?issuer=100%&secret=" + k20, 59));
         eq("only letters", "287082", code("gezd gnbv gy3t qojq-gezd gnbv gy3t qojq", 59));
         eq("longer period", "287082", code("otpauth://totp/a?period=60&secret=" + k20, 100));
         for (String bad : new String[] {"otpauth://hotp/a?secret=" + k20 + "&counter=1", "otpauth://totp/a", "GEZDGNBV", "not a key!", "otpauth://totp/a?secret=" + k20 + "&digits=5",

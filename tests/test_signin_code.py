@@ -34,14 +34,21 @@ class CodeEngine(Engine):
             p = f.els.get(a.get("press"))
             facts = {**CODE_FACTS, "press": "" if p is None else "form" if p.get("form") == e.get("form") is not None else "", **self.code_facts}
             if a["op"] == "code":
-                return {**facts, "words": self.words}
+                return {**facts, "words": self.words, "heads": self.words}
             if a["i"] == 0 and {k: facts.get(k) for k in a["expect"]} != a["expect"]:
                 return {"ok": False, "set": False}
+            if a.get("look"):
+                return {"ok": True, "full": sorted(e.get("boxes", {}))}
             if e.get("vanish") == a["i"]:
                 return {"ok": False, "set": a["i"] > 0}
+            if facts["count"] > 1:
+                e.setdefault("boxes", {})[a["i"]] = a["value"]
+                if not a["value"]:
+                    del e["boxes"][a["i"]]
+                self.posts += [x for x in ["".join(e["boxes"].get(i, "") for i in range(facts["count"]))] if len(x) == facts["count"]]
             e["value"] += a["value"]
             self.sets.append((f.id, a["n"], a["value"]))
-            if self.auto and a["i"] == facts["count"] - 1:
+            if self.auto and a["i"] == facts["count"] - 1 and a["value"]:
                 self.navigate(self.auto)
             return {"ok": True}
         return super().op(f, a)
@@ -63,7 +70,9 @@ def code_page(url=f"{SITE}/verify"):
 def env(login_env):  # noqa: F811
     c, eng, sid, refs = login_env
     eng.__class__ = CodeEngine
-    eng.auto, eng.code_facts = None, {}
+    eng.auto, eng.code_facts, eng.posts = None, {}, []
+    real = eng.describe
+    eng.describe = lambda n, e: {**real(n, e), "visible": not e.get("hidden")}
     page = code_page()
     page[0].loader = "L-verify"
     eng.pages[f"{SITE}/verify"] = lambda: page
@@ -126,21 +135,23 @@ def test_anything_else_in_between_ends_it(env, what):
     c, eng, sid, _ = env
     r = signed_in(env)
     if what == "click":
-        c.handle({"cmd": "click", "session": sid, "ref": r["Try another way"]})
+        assert c.handle({"cmd": "click", "session": sid, "ref": r["Try another way"]})["ok"]
     elif what == "type":
-        c.handle({"cmd": "type", "session": sid, "ref": r["Nickname"], "text": "x"})
+        eng.words = "Your profile"
+        assert c.handle({"cmd": "type", "session": sid, "ref": r["Nickname"], "text": "x"})["ok"]
+        eng.words = CodeEngine.words
     elif what == "back":
-        c.handle({"cmd": "back", "session": sid})
+        assert c.handle({"cmd": "back", "session": sid})["ok"]
     elif what == "save":
         assert submit(c, sid, r["Save"])["ok"]
     elif what == "box":
         assert submit(c, sid, r["Remember this device"])["ok"]
     else:
         eng.press = {"dialog": "cookies", "submits": True}
-        c.handle({"cmd": "click", "session": sid, "ref": r["Accept all cookies"]})
+        assert c.handle({"cmd": "click", "session": sid, "ref": r["Accept all cookies"]})["ok"]
         eng.press = {}
     b = bind_code(c, sid, r)
-    assert not b["ok"] and "something else was done" in b["error"]
+    assert not b["ok"] and "nothing done in it" in b["error"]
 
 
 def test_steps_of_a_sign_in_do_not(env):
@@ -149,7 +160,7 @@ def test_steps_of_a_sign_in_do_not(env):
     eng.press = {"dialog": "cookies", "submits": False}
     c.handle({"cmd": "click", "session": sid, "ref": r["Accept all cookies"]})
     eng.press = {}
-    for k in ("Try another way", "Send a new code", "Send a new code"):
+    for k in ("Try another way", "Send a new code", "Send a new code", "Send a new code"):
         assert bind_code(c, sid, r)["ok"]
         assert submit(c, sid, r[k])["ok"]
     assert bind_code(c, sid, r)["ok"]
@@ -185,25 +196,219 @@ def test_what_to_pay_ends_it(env):
     assert c.session.chain != c.session.gen
 
 
-@pytest.mark.parametrize("url", [f"{SITE}/login?next=/security/phone", f"{SITE}/login?x=https%253A%252F%252Fevil.example", f"{SITE}/settings/phone",
-                                 f"{SITE}/transfer", f"{SITE}/login#a?next=/x", f"{SITE}/account/deletePhone"])
-def test_an_address_that_leads_elsewhere(env, url):
-    c, eng, sid, refs = env
-    eng.pages[url] = eng.pages[f"{SITE}/login"]
-    c.handle({"cmd": "open", "session": sid, "url": url})
-    eng.navigate(f"{SITE}/login")
-    refs = {e["label"]: e["ref"] for e in c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["elements"]}
-    assert fill(c, sid, bind(c, sid, refs))["ok"]  # signing in works
-    assert c.session.chain is None
-
-
 @pytest.mark.parametrize("url,ok", [(f"{SITE}/login?next=%2Faccount", True), (f"{SITE}/login?next=%2Fsettings%2Fsecurity", False),
-                                    (f"{SITE}/login?a=1#/x", True), (f"{SITE}/payment/login", False)])
+                                    (f"{SITE}/login?a=1#/x", True), (f"{SITE}/payment/login", False), (f"{SITE}/login?to=security-settings", False)])
 def test_where_the_sites_own_sign_in_page_leads(env, url, ok):
     c, eng, sid, refs = env
     eng.frames[0].url = url
     assert fill(c, sid, bind(c, sid, refs))["ok"]
     assert (c.session.chain is not None) is ok
+
+
+@pytest.mark.parametrize("url,ok", [
+    (f"{SITE}/", True), (f"{SITE}/en", True), (f"{SITE}/login", True), (f"{SITE}/account/login", True), (f"{SITE}/wp-login.php", True), (f"{SITE}/users/sign_in", True),
+    (f"{SITE}/#/login", True), (f"{SITE}/en/log-in?lang=en", True), (f"{SITE}/index.html", True), (f"{SITE}/account", False), (f"{SITE}/settings/security", False),
+    (f"{SITE}/login?next=/x", False), (f"{SITE}/login/return/security", False), (f"{SITE}/wallet", False), (f"{SITE}/login?return=security-settings", False),
+    (f"{SITE}/#/wallet/send", False), (f"{SITE}/login#x?next=/y", False), (f"{SITE}/oauth/authorize?client_id=1", False), ("http://www.club.example/login", False),
+    (f"{SITE}/classes", False), (f"{SITE}/login/confirm", False)])
+def test_where_a_session_begins(env, url, ok):
+    assert co.plain_entry(url) is ok
+
+
+def started(env, url=f"{SITE}/"):
+    """A new session at the site's start page, which has links and things on it."""
+    c, eng, sid, _ = env
+    c.handle({"cmd": "close", "session": sid})
+    c.retire = False
+    eng.pages[url] = lambda: [Frame("home", url, title="Club", text="Hello", elements=[
+        el("link", label="Log in", dest=f"{SITE}/login"), el("link", label="here", dest=f"{SITE}/settings/security"), el("button", label="Log In"),
+        el("link", label="Log in", id="l2", dest=f"{SITE}/login?next=/transfer/confirm"), el("button", label="Book now"), el("input", name="q", label="Search", type="search"),
+        el("link", label="Join", dest="https://evil.example/login"), el("button", label="Accept all cookies"), el("link", label="Accept", id="l3", dest=f"{SITE}/wallet")])]
+    r = c.handle({"cmd": "open", "url": url})
+    return r["session"], {i + 1: e["ref"] for i, e in enumerate(r["snapshot"]["elements"])}
+
+
+@pytest.mark.parametrize("n,press,ok", [
+    (1, {"plain": True, "dest": f"{SITE}/login", "submits": False}, True), (2, {"dest": f"{SITE}/settings/security", "submits": False}, False),
+    (3, {"submits": False}, True), (3, {"submits": True}, False), (4, {"dest": f"{SITE}/login?next=/transfer/confirm", "submits": False}, False),
+    (5, {"submits": False}, False), (7, {"dest": "https://evil.example/login", "submits": False}, False),
+    (8, {"dialog": "cookies", "submits": False}, True), (9, {"dialog": "cookies", "submits": False, "dest": f"{SITE}/wallet"}, False)])
+def test_what_was_done_before_the_sign_in_counts(env, n, press, ok):
+    c, eng, _, _ = env
+    sid, r = started(env)
+    eng.press = press
+    c.handle({"cmd": "click", "session": sid, "ref": r[n]})
+    eng.press = {}
+    assert (c.session.chain == c.session.gen) is ok
+    eng.navigate(f"{SITE}/login")
+    refs = {e["label"]: e["ref"] for e in c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["elements"]}
+    assert fill(c, sid, bind(c, sid, refs))["ok"]  # signing in itself works
+    assert (c.session.chain == c.session.gen) is ok
+
+
+@pytest.mark.parametrize("what", ["type", "back", "open elsewhere", "open here"])
+def test_other_things_before_the_sign_in(env, what):
+    c, eng, _, _ = env
+    sid, r = started(env)
+    if what == "type":
+        c.handle({"cmd": "type", "session": sid, "ref": r[6], "text": "x"})
+    elif what == "back":
+        c.handle({"cmd": "back", "session": sid})
+    else:
+        url = f"{SITE}/login" if what == "open here" else "https://other.example/"
+        c.handle({"cmd": "open", "session": sid, "url": url})
+    assert (c.session.chain == c.session.gen) is (what == "open here")
+
+
+def test_a_second_page_revives_nothing(env):
+    c, eng, sid, refs = env
+    eng.frames[0].url = f"{SITE}/login?next=/settings/security"
+    assert fill(c, sid, bind(c, sid, refs, user="User name", password=None, press=None))["ok"] and c.session.chain is None
+    page = [Frame("main", f"{SITE}/login/password", elements=[el("input", type="password", name="pw", label="Password", form=1), el("button", label="Log in", form=1)])]
+    page[0].loader = "L-2"
+    eng.frames = page
+    refs = {e["label"]: e["ref"] for e in c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["elements"]}
+    assert fill(c, sid, si(c, cmd="bind_login", session=sid, password=refs["Password"], press=None))["ok"]
+    assert c.session.chain is None
+
+
+@pytest.mark.parametrize("press,ok", [
+    ({"dest": f"{SITE}/verify"}, True), ({"dest": f"{SITE}/verify/sms?method=sms"}, True), ({"dest": "javascript:void(0)"}, True), ({"dest": f"{SITE}/challenge?action=send"}, False),
+    ({"dest": "https://evil.example/verify"}, False), ({"dest": f"{SITE}/transfer"}, False), ({"dest": f"{SITE}/verify?method=/x"}, False)])
+def test_where_a_step_leads(env, press, ok):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.press = {"submits": False, **press}
+    assert submit(c, sid, r["Try another way"])["ok"]
+    assert (c.session.chain == c.session.gen) is ok
+
+
+@pytest.mark.parametrize("kind,press,ok", [("button", {"submits": True, "method": "post"}, True), ("button", {"submits": False}, False),
+                                           ("button", {"submits": True, "method": "get"}, False), ("link", {"submits": False}, False)])
+def test_continue_is_a_step_only_as_a_forms_button(env, kind, press, ok):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.frames[0].els[4 if kind == "button" else 3]["label"] = "Continue"
+    eng.press = {"dest": f"{SITE}/verify", **press}
+    assert submit(c, sid, r["Send a new code" if kind == "button" else "Try another way"])["ok"]
+    assert (c.session.chain == c.session.gen) is ok
+
+
+def test_after_a_code_only_a_new_one_or_its_own_button(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    assert fill_code(c, sid, bind_code(c, sid, r, press=None))["ok"]
+    assert submit(c, sid, r["Send a new code"])["ok"] and c.session.chain == c.session.gen
+    assert submit(c, sid, r["Try another way"])["ok"] and c.session.chain != c.session.gen
+
+
+def test_another_route_of_the_same_page_is_another_place(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.frames[0].url = f"{SITE}/app?a=1#/login/verify"
+    assert fill_code(c, sid, bind_code(c, sid, r, press=None))["ok"]
+    for url in (f"{SITE}/app?a=1#/wallet/send/verify", f"{SITE}/app?a=1&b=2#/login/verify"):
+        eng.frames[0].url = url
+        assert "first code went" in bind_code(c, sid, r, press=None)["error"]
+    eng.frames[0].url = f"{SITE}/app?a=2#/login/verify"
+    assert bind_code(c, sid, r, press=None)["ok"]
+
+
+@pytest.mark.parametrize("facts", [{"captions": ["Pay now"]}, {"captions": ["Verify https://www.club.example/transfer"]}, {"action": f"{SITE}/transfer/confirm"}])
+def test_what_would_send_it_counts_too(env, facts):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.code_facts = facts
+    assert not bind_code(c, sid, r, press=None)["ok"]
+
+
+def test_the_fields_own_name_counts_too(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.frames[0].els[1]["name"] = "transferOtp"
+    assert not bind_code(c, sid, r)["ok"]
+
+
+@pytest.mark.parametrize("how,ok", [("link", True), ("button", True), ("text", False)])
+def test_a_page_that_offers_to_sign_out_is_an_account(env, how, ok):
+    c, eng, sid, refs = env
+    if how == "text":
+        eng.frames[0].text = "Log out"
+    else:
+        eng.frames[0].els[20] = el(how, label="Log out")
+    c.handle({"cmd": "snapshot", "session": sid})
+    assert c.session.account is ok
+
+
+@pytest.mark.parametrize("words,kw,ok", [
+    ("Enter the code we sent to your email", {"label": "Enter it here"}, False), ("Check your inbox", {"label": "", "name": "x1"}, False), ("Check your inbox", {"label": "Email"}, True),
+    ("Verification code", {"name": "search"}, True), ("Find a class", {"label": "Enter it here"}, True), ("We have emailed you a code", {"label": "Promo code"}, True),
+    ("Código de verificación", {"label": "Aquí"}, False)])
+def test_where_the_page_asks_for_a_code_ampi_types_only_plain_fields(env, words, kw, ok):
+    c, eng, sid, _ = env
+    eng.words = words
+    eng.frames[0].els[10] = el("input", **kw)
+    snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
+    ref = next(e["ref"] for e in snap["elements"] if e["ref"].endswith(":10"))
+    assert c.handle({"cmd": "type", "session": sid, "ref": ref, "text": "482913"})["ok"] is ok
+
+
+def test_in_an_account_looser_names_count(env):
+    c, eng, sid, _ = env
+    eng.words = "Settings"
+    eng.frames[0].els[10] = el("input", label="Confirmation code")
+    snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
+    ref = next(e["ref"] for e in snap["elements"] if e["ref"].endswith(":10"))
+    c.session.signed_in = True
+    assert "one-time code" in c.handle({"cmd": "type", "session": sid, "ref": ref, "text": "482913"})["error"]
+
+
+def test_fingerprints_of_the_page_say_nothing_about_it(env):
+    import hashlib
+
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    b = c.handle({"cmd": "bind_submit", "session": sid, "ref": r["Save"]})
+    title, around = eng.frames[0].title, eng.frames[0].text
+    assert b["seen"] != hashlib.sha256(f"{title}\n{around}".encode()).hexdigest() and len(b["seen"]) == len(b["digest"]) == 64
+
+
+def test_what_may_have_been_done_is_not_done_again(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.code_facts = {"count": 6}
+    b = bind_code(c, sid, r)
+    real, n = eng.op, [0]
+
+    def op(f, a):
+        if a["op"] == "setcode" and not a.get("look"):
+            n[0] += 1
+            real(f, a)
+            raise co.CdpProtocolError("Cannot find context")
+        return real(f, a)
+    eng.op = op
+    out = fill_code(c, sid, b)
+    assert not out["ok"] and out["phase"] == "sent" and n[0] == 1 and c.session.code and c.session.codes == 1
+
+
+@pytest.mark.parametrize("change", ["words", "new-password", "price", "signup", "chain", "pin"])
+def test_a_code_next_to_a_password_follows_the_same_rules(env, change):
+    c, eng, sid, refs = env
+    refs = both(env)
+    if change == "words":
+        eng.words = "Confirm the transfer"
+    elif change == "signup":
+        eng.words = "Create your account"
+    elif change == "price":
+        eng.frames[0].text = "Order total: 500,00 €"
+    elif change == "chain":
+        c.session.gen += 1
+    elif change == "pin":
+        eng.frames[0].els[10].update(name="p3", label="PIN code again", type="password")
+    else:
+        eng.frames[0].els[10]["autocomplete"] = "new-password"
+    b = si(c, cmd="bind_login", session=sid, user=refs["Email"], password=refs["Password"], code=refs["Authentication code"])
+    assert not b["ok"]
 
 
 def test_not_for_long(env):
@@ -364,20 +569,159 @@ def test_the_page_changed_just_before(env):
     c, eng, sid, _ = env
     r = signed_in(env)
     b = bind_code(c, sid, r)
-    eng.frames[0].els[1]["vanish"] = 0
+    real = eng.op
+
+    def op(f, a):
+        return {"ok": False, "set": False} if a["op"] == "setcode" else real(f, a)
+    eng.op = op
     out = fill_code(c, sid, b)
-    assert not out["ok"] and out["phase"] == "verify" and c.session.codes == 0 and c.session.code is None
-    del eng.frames[0].els[1]["vanish"]
+    assert not out["ok"] and out["phase"] == "verify" and c.session.codes == 0 and c.session.code == [] and c.session.code_place is None
+    eng.op = real
     assert bind_code(c, sid, r)["ok"]
+
+
+def test_another_try_in_boxes_never_mixes_codes(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.code_facts = {"count": 6}
+    for code in ("482913", "777777"):
+        assert fill_code(c, sid, bind_code(c, sid, r, press=None), code=code)["ok"]
+    assert eng.posts == ["482913", "777777"]
+
+
+def test_a_page_that_takes_its_time_gets_it_once(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.code_facts = {"count": 6}
+    t, real = c.clock(), eng.op
+
+    def op(f, a):
+        if c.clock() > t + 3 and a["op"] == "inspect" and f.els.get(a["n"], {}).get("name") == "otp" and eng.posts:
+            f.els[1]["connected"] = False  # the answer came
+        return real(f, a)
+    eng.op = op
+    clicks = len(eng.clicks)
+    assert fill_code(c, sid, bind_code(c, sid, r)) == {"ok": True, "session": sid, "pressed": False, "moved": True}
+    assert len(eng.clicks) == clicks
+
+
+def test_a_button_that_stays_disabled_was_not_pressed(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.frames[0].els[2]["disabled"] = True
+    real = eng.op
+    eng.op = lambda f, a: {"ok": False} if a["op"] == "clickif" else real(f, a)
+    out = fill_code(c, sid, bind_code(c, sid, r))
+    assert out["ok"] and out["pressed"] is False
+
+
+@pytest.mark.parametrize("what", ["type", "open", "click"])
+def test_what_was_refused_was_not_done(env, what):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    if what == "click":
+        eng.frames[0].els[5]["disabled"] = True
+    out = c.handle({"cmd": what, "session": sid, "ref": r["Save"] if what == "click" else r["Code"], "text": CODE, "url": f"{SITE}/x"})
+    assert not out["ok"] and bind_code(c, sid, r)["ok"]
+
+
+def test_which_way_the_code_should_come(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    for how in ("click", "submit"):
+        eng.frames[0].els[9] = {**el("checkbox", label="Text message to ••12", form=1), "kind": "radio", "type": "radio"}
+        snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
+        ref = next(e["ref"] for e in snap["elements"] if e["label"].startswith("Text message"))
+        eng.press = {"texts": []}  # a radio's own words are its label's
+        out = c.handle({"cmd": "click", "session": sid, "ref": ref}) if how == "click" else submit(c, sid, ref)
+        eng.press = {}
+        assert out["ok"] and bind_code(c, sid, r)["ok"]
+    eng.frames[0].els[9]["label"] = "Delete my phone"
+    c.handle({"cmd": "click", "session": sid, "ref": ref})
+    assert not bind_code(c, sid, r)["ok"]
+
+
+@pytest.mark.parametrize("label,ok", [("Text message", True), ("Email", True), ("Email j•••@x.example", True), ("Authenticator app", True), ("SMS", True), ("Backup code", True),
+                                      ("Email me offers", False), ("Text editor", False), ("Phone settings", False)])
+def test_ways_as_buttons(env, label, ok):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.frames[0].els[4].update(label=label)
+    eng.press = {"submits": False, "dest": ""}
+    assert submit(c, sid, r["Send a new code"])["ok"]
+    assert (c.session.chain == c.session.gen) is ok
+
+
+@pytest.mark.parametrize("label,box,ok", [("Log in", True, True), ("Log in", False, False), ("Transfer", True, False), ("Verify", True, True)])
+def test_a_sign_in_without_a_form(env, label, box, ok):
+    c, eng, sid, refs = env
+    assert fill(c, sid, bind(c, sid, refs, press=None))["ok"]
+    eng.frames[0].els[3]["label"] = label
+    eng.press = {"submits": False, "withForm": False, "withBox": box}
+    assert submit(c, sid, refs["Log in"])["ok"]
+    assert (c.session.chain == c.session.gen) is ok
+
+
+def test_a_wrong_code_shown_where_the_form_went(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.code_facts = {"action": f"{SITE}/verify/check"}
+    assert fill_code(c, sid, bind_code(c, sid, r, press=None))["ok"]
+    eng.frames[0].url = f"{SITE}/verify/check"
+    eng.frames[0].els[1]["id"] = "mat-input-7"
+    assert bind_code(c, sid, r, press=None)["ok"]
+    eng.frames[0].url = f"{SITE}/other"
+    assert not bind_code(c, sid, r, press=None)["ok"]
+
+
+@pytest.mark.parametrize("what,ok", [("zero", True), ("stripe", True), ("short", True), ("robot", False), ("total", False), ("advice", True), ("heading", False), ("failed", True)])
+def test_ordinary_things_on_such_pages(env, what, ok):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    if what == "zero":
+        eng.frames[0].text = "Cart total: 0,00 €"
+    elif what == "stripe":
+        eng.frames.append(Frame("m", "https://js.stripe.com/v3/m-outer-abc.html", parent="main"))
+    elif what == "short":
+        eng.frames[0].text = "Please verify it's you"
+    elif what == "robot":
+        eng.frames[0].text = "Verify you are human"
+    elif what == "total":
+        eng.frames[0].text = "Order total: 10,00 €"
+    elif what == "failed":
+        eng.words = "Не удалось войти. Введите код. Maksuton tekstiviesti"
+    else:
+        eng.words = "If this wasn't you, change your password immediately"
+        if what == "heading":
+            real = eng.op
+            eng.op = lambda f, a: {**real(f, a), "heads": eng.words} if a["op"] == "code" else real(f, a)
+        else:
+            real = eng.op
+            eng.op = lambda f, a: {**real(f, a), "heads": "Sign in"} if a["op"] == "code" else real(f, a)
+    assert bind_code(c, sid, r)["ok"] is ok
+
+
+@pytest.mark.parametrize("kw,strict,loose", [
+    ({"label": "Quantity", "max": 1}, False, False), ({"name": "timezone", "id": "timezone"}, False, False), ({"label": "One-time purchase"}, False, False),
+    ({"name": "phoneCode", "label": "Code"}, True, True), ({"id": "ContentArea_txtCode", "label": "Code"}, True, True), ({"id": "code-group", "name": "code"}, True, True),
+    ({"label": "Código"}, True, True), ({"name": "SMSCode"}, True, True), ({"label": "Enter the 6 digits"}, False, True), ({"name": "authcode"}, True, True),
+    ({"label": "Country", "name": "countryCode"}, False, False), ({"label": "Group code"}, False, False), ({"name": "orderCode"}, False, False)])
+def test_fields(kw, strict, loose):
+    d = {"type": "text", "autocomplete": "", "name": "", "id": "", "label": "", "max": 0, **kw}
+    assert (co.code_field(d), co.code_field(d, loose=True)) == (strict, loose)
 
 
 def test_the_code_is_cut_out_until_the_next_page(env):
     c, eng, sid, _ = env
     r = signed_in(env)
     assert fill_code(c, sid, bind_code(c, sid, r, press=None), code="2026")["ok"]
-    eng.frames[0].text = "Wrong code 2026! Not 20261 or 1.2026"
+    eng.frames[0].text = "Wrong code 2026! Not 20261, but 2 0 2 6, 20-26 and x2026"
     text = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["text"]
-    assert text == "Wrong code •••! Not 20261 or 1.2026"
+    assert text == "Wrong code •••! Not 20261, but •••, ••• and x•••"
+    eng.frames[0].els[1]["value"] = ""
+    assert fill_code(c, sid, bind_code(c, sid, r, press=None), code="3344")["ok"]
+    eng.frames[0].text = "2026 and 3\n3\n4\n4"
+    assert c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["text"] == "••• and •••"  # the first one, too
     eng.navigate(f"{SITE}/in")
     eng.frames[0].text = "Classes in 2026"
     assert c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["text"] == "Classes in 2026"
@@ -397,10 +741,10 @@ def test_password_and_code_in_one_form(env):
     assert "other fields" in bind(c, sid, refs)["error"]
     b = si(c, cmd="bind_login", session=sid, user=refs["Email"], password=refs["Password"], code=refs["Authentication code"], press=refs["Log in"])
     assert b["ok"] and set(b["bound"]["elements"]) == {"user", "password", "code", "press"}
-    for bad in ({}, {"code": "1 2"}, {"code": "1234567"}):
+    for bad in ({"code": None}, {"code": "1 2"}, {"code": "1234567"}):
         assert not fill(c, sid, b, **bad)["ok"] and not eng.sets
     r = fill(c, sid, b, code=CODE)
-    assert r["ok"] and c.session.code[0] == CODE
+    assert r["ok"] and c.session.code[0][0] == CODE and c.session.codes == 1
     assert not si(c, cmd="bind_login", session=sid, user=refs["Email"], code=refs["Authentication code"])["ok"]
 
 
@@ -428,6 +772,7 @@ def test_ampi_never_types_a_code(env, kw, how):
                                 {"label": "Middle initial", "max": 1}, {"name": "comment"}, {"label": "Pinterest"}, {"label": "Country code"}])
 def test_other_fields_are_as_before(env, kw):
     c, eng, sid, _ = env
+    eng.words = "Find your booking"
     eng.describe = lambda n, e, real=eng.describe: {**real(n, e), "max": e.get("max", 0)}
     eng.frames[0].els[10] = el("input", **kw)
     snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
@@ -437,7 +782,7 @@ def test_other_fields_are_as_before(env, kw):
 
 @pytest.mark.parametrize("text,ok", [
     ("Send code", True), ("Resend", True), ("Text me", True), ("Email me a code", True), ("Try another way", True), ("Use authenticator app", True),
-    ("Continue", True), ("Get a new verification code", True), ("Use a backup code", True), ("Use another method", True), ("Send a text message", True),
+    ("Continue", False), ("Get a new verification code", True), ("Use a backup code", True), ("Use another method", True), ("Send a text message", True),
     ("Send", False), ("Request", False), ("Send money", False), ("Delete account", False), ("Confirm", False), ("Change number", False), ("Yes", False),
     ("Add phone number", False), ("Disable two-factor", False), ("Send code and pay", False), ("Continue to payment", False)])
 def test_captions_of_steps(text, ok):
@@ -459,6 +804,8 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Sign in</title><h1>Two-step 
 <form id=ro method=post><input name=who readonly value=me><input name=r1><button>Go</button></form>
 <form id=way method=post><input name=w1><input type=radio name=via value=sms><button>Go</button></form>
 <form id=lg method=post><input type=email name=e><input type=password name=s><input name=totp maxlength=6><button id=bl>Log in</button></form>
+<main><p>Confirm your transfer</p><p>500 EUR</p><div><div>Deep</div><div><label>Payee</label><form id=z method=post><input name=z1><button>Go</button></form></div></div></main>
+<footer>Footer offer</footer>
 <pre id=out></pre>"""
 SCRIPT = r"""
 const run = (op) => JSON.parse(JSON.stringify(globalThis.__ampi.run(op)));
@@ -470,11 +817,16 @@ out.max = [N.otp.max, N.who.max, N.d1.max];
 out.one = facts('otp', 'b1'); out.other = facts('otp', 'b6').press; out.again = facts('otp', 'again').press;
 out.six = facts('d1', 'b6'); out.second = facts('d2').count; out.free = facts('f1', 'bf'); out.wrongBox = facts('f1', 'b1').press;
 out.extra = ['m1', 'p1', 'r1', 'w1'].map(n => facts(n).extra);
+out.near = ['Confirm your transfer', '500 EUR', 'Deep', 'Payee', 'Footer offer'].map(x => facts('z1').words.includes(x));
 const expect = (f) => Object.fromEntries(['hasForm','count','max','type','extra','boxes','shown','method','action','boxed','press'].map(k => [k, f[k]]));
 out.stale = run({ op: 'setcode', n: N.otp.n, i: 0, value: 'x', press: I.b1.n, expect: { ...expect(out.one), max: 8 } });
+out.look = run({ op: 'setcode', n: N.d1.n, i: 0, look: true, value: '', press: I.b6.n, expect: expect(out.six) });
+out.box = [['b1', 'otp'], ['bf', 'f1'], ['b1', 'f1']].map(x => run({ op: 'gate', n: I[x[0]].n, with: N[x[1]].n }).withBox);
 out.set = run({ op: 'setcode', n: N.otp.n, i: 0, value: '482913', press: I.b1.n, expect: expect(out.one) }); out.value = q('[name=otp]').value;
 const seen = []; for (const d of document.querySelectorAll('.d')) d.addEventListener('input', (e) => seen.push(e.target.name + e.target.value));
 out.boxes = [...'482913'].map((x, i) => run({ op: 'setcode', n: N.d1.n, i: i, value: x, press: I.b6.n, expect: expect(out.six) }).ok); out.seen = seen;
+out.full = run({ op: 'setcode', n: N.d1.n, i: 0, look: true, value: '', press: I.b6.n, expect: {} }).full; out.cleared = [5, 4].map(i => run({ op: 'setcode', n: N.d1.n, i: i, value: '', press: I.b6.n, expect: {} }).ok);
+out.left = q('[name=d6]').value + q('[name=d5]').value + q('[name=d4]').value; seen.length = 6;
 out.past = run({ op: 'setcode', n: N.d1.n, i: 6, value: 'x', press: I.b6.n, expect: {} });
 q('[name=d4]').remove(); out.gone = run({ op: 'setcode', n: N.d1.n, i: 3, value: 'x', press: I.b6.n, expect: {} });
 const press = (id, n) => { const g = run({ op: 'gate', n: I[id].n, with: N[n].n }); return Object.fromEntries(['tag','texts','to','submits','ident'].map(k => [k, g[k]])); };
@@ -509,12 +861,16 @@ def test_the_page_script_in_a_browser(tmp_path):
         "hasForm": True, "count": 1, "max": 6, "extra": False, "boxes": 1, "shown": True, "method": "post", "press": "form", "boxed": False}
     assert "Two-step verification" in one["words"] and "Enter the code." in one["words"]
     assert "Change phone" not in one["words"] and "Pay now" not in one["words"] and not co.CODE_DANGER.search(one["words"])
+    assert [x.strip() for x in one["captions"]] == ["Verify"] and [x.strip() for x in out["free"]["captions"]] == ["Continue"]
+    assert out["near"] == [True, True, True, True, False]
     assert out["other"] == "" and out["again"] == ""  # another form's button, one that doesn't send
     assert (out["six"]["count"], out["six"]["extra"], out["six"]["press"], out["second"]) == (6, False, "form", 1)
     assert (out["free"]["count"], out["free"]["hasForm"], out["free"]["press"], out["wrongBox"]) == (4, False, "box", "")
     assert out["extra"] == [True, True, False, True]
     assert out["stale"] == {"ok": False, "set": False} and out["set"] == {"ok": True} and out["value"] == CODE
     assert out["boxes"] == [True] * 6 and out["seen"] == [f"d{i + 1}{x}" for i, x in enumerate(CODE)]
+    assert out["look"] == {"ok": True, "full": []} and out["full"] == [0, 1, 2, 3, 4, 5] and out["cleared"] == [True, True] and out["left"] == "9"
+    assert out["box"] == [True, True, False]
     assert out["past"]["ok"] is False and out["gone"] == {"ok": False, "set": True}
     assert out["clicked"] == {"ok": True} and out["sent"] == CODE and out["empty"] == {"ok": False}
     assert set(out["form"]) == {"(secret)"}  # what went into them is never shown

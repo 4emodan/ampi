@@ -42,7 +42,7 @@ def test_pairing_code_is_the_same_on_both_sides(classes):
 
 def test_both_sides_refuse_the_same_sites(classes):
     sites = ["google.com", "accounts.google.com", "notgoogle.com", "x.com", "fox.com", "mybank.example", "bank.example", "example.bank", "a.pankki.example",
-             "github.com", "gist.github.com", "club.example", "web.telegram.org"]
+             "github.com", "login.gov.example", "yahoo.co.example", "gist.github.com", "club.example", "web.telegram.org"]
     r = subprocess.run([JAVA, "-cp", str(classes), "app.ampi.companion.LogicTest", "code", "x", *sites], capture_output=True, text=True)
     _, _, listed, *said = r.stdout.splitlines()
     assert set(listed.split()) == signin.NOT and "" not in listed.split(" ")

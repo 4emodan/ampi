@@ -71,7 +71,9 @@ NOT = frozenset("""
     curve.com viva.com binance.com coinbase.com kraken.com bybit.com okx.com bitstamp.net
     crypto.com metamask.io interactivebrokers.com interactivebrokers.ie degiro.eu degiro.nl nordnet.fi nordnet.se
     etoro.com trading212.com nordea.fi nordea.com op.fi aktia.fi handelsbanken.se handelsbanken.fi
-    swedbank.se seb.se""".split())
+    swedbank.se seb.se zoho.eu tutanota.com hey.com mailbox.org posteo.de aol.com
+    bunq.com suomi.fi""".split())
+NOT_LABELS = frozenset("google yahoo yandex hotmail gov govt gob gouv".split())  # under any ending
 NOT_WORDS = re.compile(r"bank|banque|banco|pankki|sparkasse")
 # What the phone and the gateway may answer; anything else is "failed".
 PHONE_CODES = frozenset({"no_login", "busy", "paused", "limit", "ringing", "notifications_off", "no_fingerprint", "key_gone",
@@ -80,7 +82,9 @@ GATEWAY_CODES = frozenset({"offline", "no_vault", "busy", "limit", "no_answer"})
 
 
 def refused(host: str) -> bool:
-    return any(host == n or host.endswith("." + n) for n in NOT) or any(NOT_WORDS.search(x) for x in host.split(".")[:-1])
+    labels = host.split(".")
+    return (any(host == n or host.endswith("." + n) for n in NOT) or any(NOT_WORDS.search(x) for x in labels[:-1])
+            or any(x in NOT_LABELS for x in labels))
 
 
 def known(code: Any, codes: frozenset[str]) -> str:
@@ -292,7 +296,7 @@ def controller(req: dict, timeout: float = 60) -> dict:
 
 def words(error: Any) -> str:
     """The controller's own fixed sentences."""
-    return "".join(c for c in error if c.isascii() and c.isprintable())[:200] if isinstance(error, str) else "it didn't work"
+    return "".join(c for c in error if c.isascii() and c.isprintable())[:300] if isinstance(error, str) else "it didn't work"
 
 
 # --- ampi-tools -----------------------------------------------------------------------------------
