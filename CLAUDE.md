@@ -69,6 +69,11 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
                         filling the basket; never places/pays an order; polite limiter, pause on any block
   ops_flow.py           scenarios (docs/FLOWS.md): bookings a fixed script makes from a contract on the server, one approval,
                         journal, one press that books
+  permissions.py, report.py, hub_data.py
+                        the owner's settings per action, adapter and watcher (off / ask / built-in / report), checked in
+                        server.py; the report of what watchers did without asking; what the hub's pages show and change
+                        (looser: only after approval in Telegram)
+  hub.py, hub_static/   the Ampi hub: overview, abilities, watchers, activity, address book (over SSH)
   ops_phone.py          the owner's phone: notifications, alarms, timers (private chat; groups and forwarded messages ask)
   ops_signin.py         logins saved on the phone (private chat only): asks ampi-signin, gets only the outcome
   vault.py              the owner's profile + card (vault.json 0600, entered with `ampi-tools vault-set`), masking,

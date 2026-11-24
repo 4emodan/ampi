@@ -33,7 +33,7 @@ def test_the_cli_forwards_the_origin(monkeypatch):
 def test_approvals_asked_for_by_watchers_say_so(yt):
     daemon, server, _ = yt(auth=FakeAuth())
     ops = [{"op": "youtube.subscribe", "args": {"channel": "@mkbhd"}}]
-    resp = asyncio.run(daemon.handle({"cmd": "run", "ops": ops, "origin": "watcher:yt-uploads"}, 1))
+    resp = asyncio.run(daemon.handle({"cmd": "run", "ops": ops, "origin": "watcher:yt-uploads"}, 2))
     assert resp["ok"] and "Asked for by watcher:yt-uploads while handling outside content" in resp["text"]
     resp = ask(daemon, ("youtube.subscribe", {"channel": "@mkbhd"}))
     assert "Asked for by" not in resp["text"]

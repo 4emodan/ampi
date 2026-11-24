@@ -61,3 +61,18 @@ button:disabled { opacity: .5; cursor: default; }
 .cards a { display: block; text-decoration: none; color: var(--text); }
 .cards a:hover .panel { border-color: var(--accent); }
 .cards .soon { opacity: .55; }
+
+header { flex-wrap: wrap; }
+details.panel { margin-bottom: 12px; }
+details.panel > summary { cursor: pointer; font-weight: 600; }
+details.panel > summary .note { font-weight: 400; margin-left: 8px; }
+.oprow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 8px 0;
+         border-top: 1px solid var(--line); }
+.oprow .k { overflow-wrap: anywhere; }
+.oprow .k small, .kv small { display: block; color: var(--muted); }
+.oprow.changed { background: var(--warn-bg); }
+select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; }
+.kv { padding: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+h2 { font-size: 17px; margin: 24px 0 8px; }
+.bar { position: sticky; bottom: 0; padding: 12px 0; background: var(--bg); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 13px; margin: 4px 0 0; color: var(--muted); }

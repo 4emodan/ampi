@@ -44,5 +44,12 @@ const Hub = (() => {
     for (const c of children) if (c !== null && c !== undefined) node.append(c);  // text stays text
     return node;
   }
-  return { api, el, token };
+  function say(text, bad) {
+    const m = document.getElementById("msg");
+    m.textContent = text;
+    m.classList.toggle("err", !!bad);
+    m.classList.toggle("hidden", !text);
+    if (text) m.scrollIntoView({ block: "nearest" });
+  }
+  return { api, el, token, say };
 })();

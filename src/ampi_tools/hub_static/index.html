@@ -3,21 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ampi hub</title>
+<title>Overview · Ampi hub</title>
 <link rel="stylesheet" href="/hub.css">
 <script src="/hub.js"></script>
+<script src="/overview.js" defer></script>
 </head>
 <body>
-<header><a class="brand" href="/">Ampi hub</a><nav><a href="/address-book">Address book</a></nav></header>
+<header><a class="brand" href="/">Ampi hub</a><nav><a class="on" href="/">Overview</a><a href="/abilities">Abilities</a><a href="/watchers">Watchers</a><a href="/activity">Activity</a><a href="/address-book">Address book</a></nav></header>
 <main>
-  <h1>Settings</h1>
-  <p class="sub">Your Ampi's configuration, on your server. Only reachable through your SSH tunnel.</p>
-  <div class="cards">
-    <a href="/address-book"><div class="panel"><strong>Address book</strong>
-      <p class="note">Home, work and other places Ampi can use for routes, searches near a place, deliveries and forms.</p></div></a>
-    <div class="soon"><div class="panel"><strong>More soon</strong>
-      <p class="note">People, notes, watchers and permissions will come here.</p></div></div>
-  </div>
+  <h1>Overview</h1>
+  <p class="sub">Everything that can be set up in Ampi, and where to change it.</p>
+  <div id="msg" class="msg hidden" role="status"></div>
+  <div id="out"></div>
 </main>
 </body>
 </html>

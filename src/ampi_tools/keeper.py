@@ -158,6 +158,13 @@ class Keeper:
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(audit)")}
+        # items: how many emails; detail: which (JSON); reported: 0 due, 1 told the owner, NULL not for a report
+        for column, kind in (("items", "INTEGER"), ("detail", "TEXT"), ("reported", "INTEGER")):
+            if column not in have:
+                self.db.execute(f"ALTER TABLE audit ADD COLUMN {column} {kind}")
+        # An action that was running when the service stopped.
+        self.db.execute("UPDATE audit SET status='unknown' WHERE status='auto' AND reported=0")
         self.db.commit()
         self.clock = clock
         # checkout sessions a watcher opened: session id -> (profile, name, site)
@@ -310,11 +317,13 @@ class Keeper:
         return dict(row) if row else None
 
     def audit_add(self, profile: str, name: str, h: str, run: str | None, step: str, op: str, summary: str,
-                  idem_key: str | None, status: str, amount: str | None = None) -> int:
+                  idem_key: str | None, status: str, amount: str | None = None, items: int | None = None,
+                  detail: list | None = None, report: bool = False) -> int:
         cur = self.db.execute(
-            "INSERT INTO audit (profile, name, hash, run, step, op, args_summary, idem_key, status, at, amount) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (profile, name, h, run, step, op, summary[:2000], idem_key, status, self.clock(), amount))
+            "INSERT INTO audit (profile, name, hash, run, step, op, args_summary, idem_key, status, at, amount, items, "
+            "detail, reported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (profile, name, h, run, step, op, summary[:2000], idem_key, status, self.clock(), amount, items,
+             json.dumps(detail, ensure_ascii=False) if detail else None, 0 if report else None))
         self.db.commit()
         return int(cur.lastrowid)
 
@@ -331,6 +340,36 @@ class Keeper:
         return self.db.execute("SELECT COUNT(*) FROM audit WHERE profile=? AND name=? AND at > ? AND status IN "
                                "('auto', 'done', 'approved', 'requested', 'failed', 'unknown')",
                                (profile, name, self.clock() - 24 * 3600)).fetchone()[0]
+
+    def items_today(self, profile: str, name: str, op: str | None = None) -> int:
+        """Emails it changed without asking (whatever came of it) in 24 hours."""
+        q = "SELECT COALESCE(SUM(items), 0) FROM audit WHERE profile=? AND name=? AND at > ?"
+        return self.db.execute(q + (" AND op=?" if op else ""), (profile, name, self.clock() - 24 * 3600,
+                                                                 *((op,) if op else ()))).fetchone()[0]
+
+    def due_reports(self, quiet: float = 120, longest: float = 900) -> list[tuple[str, str, list[dict]]]:
+        """(profile, name, finished actions to report), once the watcher has been quiet for a while."""
+        now, out = self.clock(), []
+        for p, n, first, last in self.db.execute(
+                "SELECT profile, name, MIN(at), MAX(at) FROM audit WHERE reported=0 AND status != 'auto' GROUP BY 1, 2").fetchall():
+            if now - last >= quiet or now - first >= longest:
+                rows = self.db.execute("SELECT * FROM audit WHERE profile=? AND name=? AND reported=0 AND status != 'auto' "
+                                       "ORDER BY id LIMIT 300", (p, n)).fetchall()
+                out.append((p, n, [dict(r) for r in rows]))
+        return out
+
+    def reported(self, ids: list[int]) -> None:
+        self.db.executemany("UPDATE audit SET reported=1 WHERE id=?", [(i,) for i in ids])
+        self.db.commit()
+
+    def activity(self, limit: int = 150) -> list[dict]:
+        rows = self.db.execute("SELECT id, profile, name, step, op, args_summary, status, approval_id, result, at, items "
+                               "FROM audit ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows]
+
+    def list_all(self) -> list[dict]:
+        rows = self.db.execute("SELECT * FROM watchers WHERE status NOT IN ('deleted', 'proposed') ORDER BY profile, name")
+        return [{**dict(r), "actions_today": self.actions_today(r["profile"], r["name"])} for r in rows.fetchall()]
 
     def pays_this_month(self, profile: str, name: str) -> int:
         return self.db.execute("SELECT COUNT(*) FROM audit WHERE profile=? AND name=? AND op='checkout.pay' AND at > ? "

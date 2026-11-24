@@ -543,7 +543,9 @@ def _declared_action(a: Any, where: str) -> dict:
 
 AGENT_TOOL_RE = re.compile(r"^(Read|Glob|Grep|WebSearch|WebFetch|Skill|Edit|Write|Bash\([a-z][a-z0-9-]{0,30}:\*\))$")
 AGENT_FORBIDDEN_BASH = {"env", "sh", "bash", "dash", "zsh", "python", "python3", "uv", "uvx", "pip", "xargs",
-                        "timeout", "nohup", "sudo", "su", "watchers", "node", "perl", "ruby", "curl", "wget"}
+                        "timeout", "nohup", "sudo", "su", "watchers", "node", "perl", "ruby", "curl", "wget",
+                        "nice", "setsid", "stdbuf", "exec", "command", "eval", "time", "watch", "script", "flock", "fish",
+                        "pipx", "npx", "deno", "bun", "php", "make", "find", "awk", "busybox", "at", "batch", "crontab"}
 
 
 def _step(s: Any, i: int, earlier: list[str], files: dict[str, bytes]) -> dict:

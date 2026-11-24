@@ -94,7 +94,9 @@ def tools(tmp_path):
         return pid == BRIDGE_PID
 
     def make(policy=Policy()):
-        return Daemon(services, Approvals(tmp_path / "a.sqlite3"), policy, trusted), td_server, gm_server
+        daemon = Daemon(services, Approvals(tmp_path / "a.sqlite3"), policy, trusted)
+        daemon.runs.origin_of = lambda pid: "private" if pid == 1 else "unknown"  # the owner's chat
+        return daemon, td_server, gm_server
 
     return make
 

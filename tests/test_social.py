@@ -106,12 +106,14 @@ def social(tmp_path):
 
         daemon = Daemon(Services(threads_client=th, instagram_client=ig), Approvals(tmp_path / "a.sqlite3"), policy,
                         trusted)
+        daemon.runs.origin_of = lambda pid: "private" if pid == 1 else "unknown"  # the owner's chat
         return daemon, graph
 
     return make
 
 
-def ask(daemon, *ops, pid=1, origin=None):
+def ask(daemon, *ops, pid=None, origin=None):
+    pid = pid or (2 if origin else 1)
     return run(daemon.handle({"cmd": "run", "ops": [{"op": o, "args": a} for o, a in ops], "origin": origin}, pid))
 
 

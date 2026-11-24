@@ -161,6 +161,7 @@ def yt(tmp_path):
         client.limiter = Limiter(concurrent=2, per_second=1000)
         daemon = Daemon(Services(youtube_client=client), Approvals(tmp_path / "a.sqlite3"), policy,
                         lambda pid: asyncio.sleep(0, pid == BRIDGE))
+        daemon.runs.origin_of = lambda pid: "private" if pid == 1 else "unknown"  # the owner's chat
         return daemon, server, client
 
     return make

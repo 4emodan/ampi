@@ -1,4 +1,4 @@
-"""Ampi hub: the owner's configuration pages (first: the address book), served by `ampi-tools hub` as user
+"""Ampi hub: the owner's configuration pages (what is set up, activity, permissions, watchers, the address book), served by `ampi-tools hub` as user
 ampitools on a Unix socket (/run/ampi-hub/hub.sock, mode 0600). There is no network port: the owner reaches it
 through `ssh -L 127.0.0.1:PORT:/run/ampi-hub/hub.sock` (scripts/ampi-hub.ps1), which logs in as root.
 
@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import socketserver
 import threading
 import time
@@ -33,7 +34,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .todoist import ToolError
 from .vault import ADDRESS_FIELDS, LATLNG, Conflict, Vault, check_name, entry_rev
@@ -41,9 +42,10 @@ from .vault import ADDRESS_FIELDS, LATLNG, Conflict, Vault, check_name, entry_re
 log = logging.getLogger("ampi-hub")
 
 STATIC = Path(__file__).with_name("hub_static")
-PAGES = {"/": "index.html", "/address-book": "address-book.html"}
+PAGES = {"/": "index.html", "/address-book": "address-book.html", "/activity": "activity.html",
+         "/abilities": "abilities.html", "/watchers": "watchers.html"}
 ASSETS = {"/hub.css": ("hub.css", "text/css; charset=utf-8"), "/hub.js": ("hub.js", "text/javascript; charset=utf-8"),
-          "/address-book.js": ("address-book.js", "text/javascript; charset=utf-8")}
+          **{f"/{n}.js": (f"{n}.js", "text/javascript; charset=utf-8") for n in ("address-book", "overview", "activity", "abilities", "watchers")}}
 HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 MAX_BODY = 64 * 1024
 GEOCODES_PER_DAY = 30
@@ -64,6 +66,28 @@ class HttpError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
         self.status, self.message = status, message
+
+
+def ask_tools(request: dict, timeout: float = 20) -> dict:
+    """Asks the ampi-tools daemon (hub_data.py), which knows this process by its user."""
+    from .server import socket_path
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(socket_path())
+            s.sendall(json.dumps(request).encode() + b"\n")
+            raw = b""
+            while not raw.endswith(b"\n"):
+                part = s.recv(65536)
+                if not part or len(raw) > 8 * 1024 * 1024:
+                    break
+                raw += part
+        resp = json.loads(raw)
+    except (OSError, ValueError, AttributeError):
+        raise HttpError(503, "the tools service isn't reachable; try again") from None
+    if not resp.get("ok"):
+        raise HttpError(409, str(resp.get("error") or "refused"))
+    return resp
 
 
 # --- the address book ---------------------------------------------------------------------------
@@ -322,6 +346,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static(path)
             self._check_api()
             book = self.hub.book
+            if method == "GET" and (m := re.fullmatch(r"/api/(overview|activity|watchers|abilities)", path)):
+                scope = parse_qs(urlsplit(self.path).query).get("scope", ["chat"])[0]
+                return self._json(200, self.hub.ask({"cmd": f"hub.{m[1]}", "scope": scope}))
+            if method == "POST" and path == "/api/set":
+                body = self._body()
+                return self._json(200, self.hub.ask({"cmd": "hub.set", "scope": body.get("scope"), "changes": body.get("changes")}))
             if path == "/api/places":
                 if method == "GET":
                     return self._json(200, {"places": book.places()})
@@ -392,7 +422,8 @@ class Hub:
     read again when it changes, so every session of the script gets a new token. token: a fixed one (tests)."""
 
     def __init__(self, home: Path, token: str | None = None, geocode: Callable[[str], dict] | None = None,
-                 token_file: Path | None = None):
+                 token_file: Path | None = None, ask: Callable[[dict], dict] = ask_tools):
+        self.ask = ask
         self.token = token
         self.token_file = token_file
         self._token_stamp: tuple | None = None

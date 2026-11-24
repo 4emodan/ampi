@@ -39,11 +39,12 @@ from .ops import (
     MAX_PENDING, MAX_SUMMARY, OPS, Approvals, Policy, Services, clean, clean_block, execute, id_list, pre_resolve,
     prepare, shares_with_others, summarize, validate,
 )
-from . import cards, watch_spec as ws
+from . import cards, hub_data, permissions as perms, report, watch_spec as ws
 from .keeper import (
     ACTIVATE_TTL, ALL_WATCHERS_PENDING_CAP, DEFAULT_ACTION_TTL, MAX_ACTION_TTL, ORIGIN_RE, WATCHER_PENDING_CAP, Keeper,
     actual_route, b64decode_files, b64encode_files, parse_origin, resolve_routes, route_fits,
 )
+from .permissions import Permissions
 from .todoist import Todoist, ToolError
 from . import ops_social
 from . import meta_session
@@ -71,7 +72,9 @@ ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide", "notices
          "runs.unregister", "telegram.protect",
          # watchers v2: only the bridge's engine talks to the keeper
          "watch.propose", "watch.get", "watch.list", "watch.status", "watch.delete", "watch.space_get",
-         "watch.space_put", "watch.audit", "watch.run"}
+         "watch.space_put", "watch.audit", "watch.run", "watch.settings"}
+# The hub (the same user as this service; Ampi and the bridge run as another).
+HUB = {"hub.overview", "hub.activity", "hub.abilities", "hub.watchers", "hub.set"}
 WATCHER_ONLY = {"youtube.ids", "youtube.show", "gmail.meta"} | ops_social.WATCHER_ONLY
 ACTIVATE_CHOICES = [{"key": "all", "label": "✅ Turn on and allow all"},
                     {"key": "ask", "label": "▶️ Turn on, ask each time"},
@@ -88,6 +91,7 @@ AGENT_ROUTINE_MAX = 25  # emails per request; more asks
 OUTSIDE = "Not asked by you in chat: outside content (emails, messages, pages) may be behind it"
 PROPOSALS_PENDING_CAP = 5
 RISK_ICON = ws.RISK_ICON
+SETTINGS_TTL = 1800
 log = logging.getLogger("ampi-tools")
 
 PidCheck = Callable[[int], Awaitable[bool]]
@@ -160,15 +164,26 @@ def peer_pid(writer: asyncio.StreamWriter) -> int:
         return -1
 
 
+def peer_uid(writer: asyncio.StreamWriter) -> int:
+    sock = writer.get_extra_info("socket")
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", creds)[1]
+    except (AttributeError, OSError):
+        return -1
+
+
 class Daemon:
     def __init__(self, services: Services, approvals: Approvals, policy: Policy, trusted: PidCheck,
-                 runs: RunRegistry | None = None, keeper: Keeper | None = None):
+                 runs: RunRegistry | None = None, keeper: Keeper | None = None,
+                 permissions: Permissions | None = None):
         self.services = services
         self.approvals = approvals
         self.policy = policy
         self.trusted = trusted
         self.runs = runs or RunRegistry()
         self.keeper = keeper
+        self.permissions = permissions or Permissions(":memory:")
         self._tg_lock = asyncio.Lock()
         self._files = asyncio.Lock()  # gmail.download (see connection)
         self._paying: set[tuple[str, str]] = set()
@@ -179,9 +194,13 @@ class Daemon:
         side = self.services.telegram_side
         return side.store if side is not None else None
 
-    async def handle(self, request: dict, pid: int) -> dict:
+    async def handle(self, request: dict, pid: int, uid: int = -1) -> dict:
         try:
             cmd = request.get("cmd")
+            if cmd in HUB:
+                if uid < 0 or uid != os.geteuid():
+                    raise ToolError("only for the Ampi hub")
+                return hub_data.answer(self, cmd, request)
             if cmd in ADMIN and not await self.trusted(pid):
                 raise ToolError("only the owner can answer approval requests (Telegram buttons)")
             if cmd == "run":
@@ -191,7 +210,9 @@ class Daemon:
                     raise ToolError("youtube.ids/youtube.show are for watchers; use `youtube feed` / `youtube video`")
                 # Where the request really comes from: the claude run it descends from (never what it says).
                 origin = self.runs.origin_of(pid)
-                resp = self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin), ops)
+                # The bridge's own reads (its watchers' checks) aren't a chat's.
+                own = origin == "unknown" and not any(ws.is_write(o["op"]) for o in ops) and await self.trusted(pid)
+                resp = self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin, own), ops)
                 if origin == SOCIAL_ORIGIN and isinstance(resp.get("text"), str):
                     resp["text"] = clip(resp["text"])
                 return resp
@@ -283,11 +304,15 @@ class Daemon:
             log.exception("request failed")
             return {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
 
-    async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "unknown") -> dict:
+    async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "unknown",
+                  own: bool = False) -> dict:
         """`origin` is where the request really came from ("private", "group:…", "watcher:…" or "unknown");
         `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
         # Instagram/Threads web-session reads: only social-mode conversations; direct messages: never through here.
         check_social_origin(ops, origin, "run")
+        scope = self._scope(origin)
+        if not own:
+            self.permissions.refuse(scope, ops)
         ops_phone.check_phone(ops, origin)
         ops_signin.check(ops, origin)
         if any(o["op"].startswith(("checkout.", "signin.")) for o in ops):
@@ -329,6 +354,7 @@ class Daemon:
             if self.approvals.pending_count() >= MAX_PENDING:  # (again below: nothing is even looked at before this)
                 raise ToolError(f"{MAX_PENDING} requests are already waiting for the owner; wait for their answer")
             ops_phone.defer(ops, origin)
+        asked = [{"op": o["op"], "args": dict(o["args"])} for o in ops]  # as they came: what they do is judged by these
         self._add_places(ops, origin)
         ops = await pre_resolve(self.services, ops)
         for o in ops:
@@ -337,7 +363,9 @@ class Daemon:
         telegram = [o for o in ops if o["op"] in WRITE_OPS]
         if len(telegram) > 1:  # caps and the duplicate guard are per message: one per request
             raise ToolError("one Telegram write per request (send them one at a time)")
-        critical = False
+        # A process outside any known run could be one a watcher left behind: its changes ask.
+        critical = origin == "unknown" and any(ws.is_write(o["op"]) for o in ops)
+        critical = critical or any(self.permissions.mode(scope, o["op"], o["args"]) == "ask" for o in asked)
         for o in ops:
             if o["op"] in WOLT_BASKET_OPS and origin != "private":
                 critical = True  # a basket wanted by something other than the owner in chat: ask them
@@ -562,7 +590,13 @@ class Daemon:
                         "error": "High risk: tap the same button again to confirm."}
             if current.get("kind") == "watch.activate":
                 return self._decide_activate(current, choice)
+            if current.get("kind") != "watch.action":
+                raise ToolError("unknown kind of request")
             return await self._decide_watch_action(current, choice)
+        if current.get("kind") == "settings.change":
+            return self._decide_settings(current, approve)
+        if current.get("kind"):
+            raise ToolError("unknown kind of request")
         grants = json.loads(current.get("grants") or "null")
         if always and not (approve and grants):
             raise ToolError("this request has no “always” option")
@@ -579,6 +613,11 @@ class Daemon:
         ok, text, status = False, "interrupted", "failed"
         try:
             ops = json.loads(item["ops"])
+            try:  # (switched off while the request waited)
+                self.permissions.refuse(self._scope(str(json.loads(current.get("meta") or "{}").get("origin") or "")), ops)
+            except ToolError as e:
+                text = f"Not done: {e}"
+                return {"ok": True, "status": "failed", "text": text}
             for o in ops:  # ops that hand something back to Ampi later (info.reveal) key it by the request
                 o["args"]["approval_id"] = approval_id
             ok, text, _ = await execute(self.services, ops)
@@ -604,6 +643,67 @@ class Daemon:
         if self.keeper is None:
             raise ToolError("the watcher keeper isn't set up")
         return self.keeper
+
+    @staticmethod
+    def _scope(origin: str) -> str:
+        parsed = parse_origin(origin)
+        return perms.watcher_scope(parsed[0], parsed[1]) if parsed else "chat"
+
+    def ask_settings(self, scope: str, changes: dict[str, list[str]]) -> int:
+        """Anything looser asks in Telegram, whoever sent it here."""
+        lines = [f"Change what {perms.words(scope)} may do:"]
+        for op, (old, new) in changes.items():
+            note = "" if op.endswith(".*") or op.startswith("flow:") else f" ({cards.note_of(op)})"
+            lines.append(f"• {op}: {old} → {new}{note}")
+        summary = "\n".join(lines)
+        if len(summary) > 2800:
+            raise ToolError("too many changes at once; save a few at a time")
+        self.approvals.expire()
+        for row in self.approvals.recent(100):  # the newest request for this page counts
+            if row["status"] == "pending" and row.get("kind") == "settings.change" \
+                    and json.loads(row.get("meta") or "{}").get("scope") == scope:
+                self.approvals.claim(row["id"], "expired")
+        card = {"who": "you, in the Ampi hub", "what": "Change permissions", "details": "\n".join(lines[1:]), "level": "high",
+                "risks": [f"For {perms.words(scope)}", "Approve only if you just changed this yourself"]}
+        return self.approvals.add([], summary, None, kind="settings.change", ttl=SETTINGS_TTL,
+                                  meta={"scope": scope, "changes": changes}, card=card)
+
+    def _decide_settings(self, current: dict, approve: bool) -> dict:
+        item = self.approvals.claim(current["id"], "approved" if approve else "rejected")
+        if item is None:
+            state = (self.approvals.get(current["id"]) or {}).get("status", "unknown")
+            return {"ok": True, "status": state, "text": f"Request #{current['id']} is already {state}."}
+        status, text = "rejected", "Rejected; nothing was changed."
+        if approve:
+            meta = json.loads(item["meta"])
+            status, text = "done", "Changed."
+            try:
+                hub_data.check_changes(self, meta["scope"], meta["changes"])
+                self.permissions.apply(meta["scope"], meta["changes"], f"hub, approved in Telegram (#{current['id']})")
+            except ToolError as e:
+                status, text = "failed", str(e)
+        self.approvals.finish(current["id"], status, text)
+        return {"ok": True, "status": status, "text": text}
+
+    def send_reports(self) -> int:
+        """What watchers did without asking, as notices (kept until Telegram took them)."""
+        if self.keeper is None or self.tg_store is None:
+            return 0
+        n = 0
+        for _, name, rows in self.keeper.due_reports():
+            for text in report.texts(name, rows):
+                self.tg_store.notice(text)
+                n += 1
+            self.keeper.reported([r["id"] for r in rows])
+        return n
+
+    async def keep_reporting(self) -> None:
+        while True:
+            try:
+                self.send_reports()
+            except Exception:
+                log.exception("reports failed")
+            await asyncio.sleep(30)
 
     def _decide_activate(self, current: dict, choice: str) -> dict:
         k = self._keeper()
@@ -656,6 +756,15 @@ class Daemon:
             if audit:
                 k.audit_update(audit["id"], "failed", text)
             return {"ok": True, "status": "failed", "text": text}
+        scope = perms.watcher_scope(meta["profile"], meta["name"])
+        try:
+            self.permissions.refuse(scope, json.loads(item["ops"]))
+        except ToolError as e:
+            text = f"Not done: {e}"
+            self.approvals.finish(current["id"], "failed", text)
+            if audit:
+                k.audit_update(audit["id"], "failed", text)
+            return {"ok": True, "status": "failed", "text": text}
         if audit:
             k.audit_update(audit["id"], "approved")
         ok, text, status = False, "interrupted", "failed"
@@ -669,7 +778,7 @@ class Daemon:
             self.approvals.finish(current["id"], status, text)
             if audit:
                 k.audit_update(audit["id"], status, text)
-        if choice == "watcher" and ok:
+        if choice == "watcher" and ok and self.permissions.mode(scope, meta["op"]) not in ("off", "ask"):
             k.add_grant(meta["profile"], meta["name"], meta["hash"], meta["step"], meta["op"], meta["route"])
             text += (f"\nFrom now on watcher “{meta['name']}” may do this ({meta['op']}, same destination) without "
                      "asking, until you change or delete it.")
@@ -706,7 +815,12 @@ class Daemon:
             return {"ok": True, "status": status}
         if cmd == "watch.delete":
             k.delete(profile, name)
+            self.permissions.forget(perms.watcher_scope(profile, name))
             return {"ok": True}
+        if cmd == "watch.settings":
+            scope = perms.watcher_scope(profile, name)
+            return {"ok": True, "off": self.permissions.off(scope),
+                    "reports": "report" in self.permissions.all(scope).values()}
         if cmd == "watch.space_get":
             return {"ok": True, "files": b64encode_files(k.space_get(profile, name))}
         if cmd == "watch.space_put":
@@ -812,6 +926,9 @@ class Daemon:
         elif code_note:
             summary += (f"\n\n⚠ Its own code ({', '.join(custom)}) is too long to show here; ask Ampi to show "
                         f"watchers/{name}/ before approving (version {spec.hash[:12]}).")
+        kept = [op for op, m in self.permissions.all(perms.watcher_scope(profile, name)).items() if m == "report"]
+        if kept:
+            footer += "\nKeeps what you allowed it without asking (Ampi hub): " + ", ".join(sorted(kept))
         room = MAX_SUMMARY - len(summary) - len(footer) - 40
         if room < 0:
             k.close_proposal(pid, "withdrawn")
@@ -905,6 +1022,8 @@ class Daemon:
         for o in ops:
             if o["op"] in ws.NOT_FOR_WATCHERS:
                 raise ToolError(f"{o['op']} isn't available to watchers")
+        scope = perms.watcher_scope(profile, name)
+        self.permissions.refuse(scope, ops)
         if not any(ws.is_write(o["op"]) for o in ops):
             self._add_places(ops, f"watcher:{profile}/{name}@{h[:12]}")
             if not agent:
@@ -992,12 +1111,39 @@ class Daemon:
         if granted and await shares_with_others(self.services, o):
             granted = False  # a shared Todoist project or a public playlist: other people see it, so ask (as in chat)
         # `fits` / declared actions keep their own rules; "ask each time" watchers still ask.
+        mode = self.permissions.mode(scope, op, raw_args)
+        hiding = agent and perms.hides(op, raw_args)
+        many = len(id_list(o["args"])) if op in perms.REPORTABLE and op != "gmail.draft" else 0
+        if mode == "report" and op in perms.REPORTABLE and op not in self.policy.require_approval:
+            granted = granted or many <= perms.MAX_ITEMS
         routine = (agent and not granted and not declared and op in AGENT_ROUTINE and w["mode"] == "all"
                    and op not in self.policy.require_approval and len(id_list(o["args"])) <= AGENT_ROUTINE_MAX)
-        granted = granted or routine
-        summary = await summarize(self.services, ops, self.policy)
+        granted = (granted or routine) and mode != "ask"
+        items: list[dict] = []
+        if granted and many and (mode == "report" or hiding):
+            if many > perms.MAX_ITEMS:
+                raise ToolError(f"at most {perms.MAX_ITEMS} emails per request; split it")
+            items = await perms.email_items(self.services, id_list(o["args"]))
+            if hiding:
+                perms.check_hiding(op, items, id_list(o["args"]), k.clock())
+        try:
+            summary = await summarize(self.services, ops, self.policy)
+        except ToolError:
+            if not granted or mode != "report":
+                raise
+            summary = f"1 action(s): 1× {op}\n• {op} {many or ''}".rstrip()
         if granted:
-            audit_id = k.audit_add(profile, name, h, run_id, step, op, summary, idem_key, "auto", amount)
+            # (No await between these checks and the audit row that counts.)
+            k.active(profile, name, hash12)
+            if self.permissions.mode(scope, op, raw_args) != mode:
+                raise ToolError("the owner is changing this watcher's permissions; try again")
+            if many and (mode == "report" or hiding):
+                if op == "gmail.trash" and k.items_today(profile, name, op) + many > perms.TRASH_PER_DAY:
+                    raise ToolError(f"{perms.TRASH_PER_DAY} emails a day go to the trash without asking; leave the rest")
+                if k.items_today(profile, name) + many > perms.ITEMS_PER_DAY:
+                    raise ToolError("the daily limit of emails changed without asking is reached; leave the rest")
+            audit_id = k.audit_add(profile, name, h, run_id, step, op, summary, idem_key, "auto", amount, many or None,
+                                   [{x: i[x] for x in ("subject", "from")} for i in items], mode == "report")
             if op in WRITE_OPS:
                 o["args"]["resolved"]["auto"] = True
                 try:
@@ -1016,7 +1162,7 @@ class Daemon:
                 st = await self.services.checkout_side.client.call({"cmd": "status"})
                 if st.get("session"):
                     k.checkout_sessions[st["session"]] = (profile, name, site)
-            if ok and w["risk"] == "high" and self.tg_store and not routine:
+            if ok and w["risk"] == "high" and self.tg_store and not routine and mode != "report":
                 self.tg_store.notice(f"🔴 Watcher “{name}” did: {summary.split(chr(10), 2)[min(1, summary.count(chr(10)))][:300]}")
             out = {"ok": ok, "text": text, "audit_id": audit_id, **extra} if ok else \
                 {"ok": False, "error": text, "audit_id": audit_id}
@@ -1045,6 +1191,7 @@ class Daemon:
         reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
         info = ws.WRITE_OPS.get(op)
         pinnable = bool(route) and all(v not in (None, "*") for v in route.values())
+        pinnable = pinnable and mode != "ask"
         choices = ACTION_CHOICES if pinnable else ONCE_CHOICES
         approval_id = self.approvals.add(
             ops, summary, reason, kind="watch.action", choices=choices, ttl=ttl, idem_key=idem_key,
@@ -1148,7 +1295,8 @@ class Daemon:
                         except asyncio.TimeoutError:
                             wr.transport.abort()
                     return
-                response = await self._while_there(request, pid, rd)
+                response = await (self.handle(request, pid, peer_uid(wr)) if request.get("cmd") in HUB
+                                  else self._while_there(request, pid, rd))
                 if response is None:
                     return
             wr.write(json.dumps(response).encode() + b"\n")
@@ -1294,7 +1442,9 @@ async def _serve(home: Path) -> None:
         for approval_id in approvals.recover():
             store.notice(f"⚠️ Request #{approval_id} was approved, but the tools service stopped while running it; "
                          "the outcome is unknown. Check before asking again.")
-        daemon = Daemon(services, approvals, policy, systemd_main_pid_check(unit), keeper=Keeper(home / "watch.sqlite3"))
+        daemon = Daemon(services, approvals, policy, systemd_main_pid_check(unit), keeper=Keeper(home / "watch.sqlite3"),
+                        permissions=Permissions(home / "permissions.sqlite3"))
+        reporter = asyncio.create_task(daemon.keep_reporting())  # noqa: F841
         refresher = asyncio.create_task(refresh_meta_tokens(services))  # noqa: F841 (runs for the daemon's life)
         teller = asyncio.create_task(keep_telling_tg_reader(services))  # noqa: F841
         freeing = asyncio.create_task(ops_flow.free(services, 3))  # noqa: F841 # a session a scenario had open when the service stopped
@@ -1544,7 +1694,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("command", choices=["serve", "gmail-login", "youtube-login", "threads-login",
                                             "instagram-login", "wolt-login", "vault-set", "vault-show",
                                             "vault-clear", "check", "info-show", "info-set", "info-delete",
-                                            "info-default-card", "info-search", "info-reveal", "hub",
+                                            "info-default-card", "info-search", "info-reveal", "hub", "permissions-set",
                                             "instagram-session", "threads-session"])
     parser.add_argument("what", nargs="*", help="vault-set/vault-clear: card, profile or home; info-*: NAME [FIELD|on|off]")
     parser.add_argument("--write", action="store_true", help="youtube-login: also allow changes (playlists, "
@@ -1578,6 +1728,22 @@ def main(argv: list[str] | None = None) -> None:
     if args.command.startswith("info-"):
         from . import info_cli
         info_cli.main(home, args.command, list(args.what), _geocode)
+        return
+    if args.command == "permissions-set":  # the owner on the server: SCOPE OP=MODE… (the service picks it up at once)
+        db = Permissions(home / "permissions.sqlite3")
+        if not args.what:
+            for r in db.db.execute("SELECT scope, op, mode FROM settings ORDER BY 1, 2"):
+                print(*r)
+            return
+        scope, changes = args.what[0], {}
+        for pair in args.what[1:]:
+            op, _, mode = pair.partition("=")
+            if not perms.SCOPE_RE.fullmatch(scope) or mode != "default" and mode not in perms.allowed_modes(scope, op, OPS, OPS):
+                sys.exit(f"{scope}: {pair}: not possible")
+            if db.get(scope, op) != mode:
+                changes[op] = [db.get(scope, op), mode]
+        db.apply(scope, changes, "on the server")
+        print(f"{len(changes)} changed")
         return
     if args.command == "hub":
         from . import hub

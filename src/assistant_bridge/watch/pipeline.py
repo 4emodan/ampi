@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ampi_tools import watch_spec as ws
+from ampi_tools.permissions import OUTSIDE_TOOLS
 
 log = logging.getLogger(__name__)
 
@@ -326,11 +327,17 @@ class Pipeline:
             st.actions += 1
             if self.svc.mark_acting:
                 await self.svc.mark_acting(st.run_id, st.actions)
+        tools = tuple(s["tools"])
+        if any(t in cut for cut in OUTSIDE_TOOLS.values() for t in tools):
+            # (What ampi-tools itself offers, it refuses by itself.)
+            got = await self.svc.tools({"cmd": "watch.settings", "name": w.name})
+            off = got.get("off") if got.get("ok") else list(OUTSIDE_TOOLS)
+            tools = tuple(t for t in tools if not any(t in OUTSIDE_TOOLS.get(a, ()) for a in off or ()))
         async with self.slots["agent"]:
             st.llm_calls += 1
             result = await self.svc.claude(
                 "Input:\n" + untrusted(text_in), cwd=self.svc.workspace, session_id=_uuid(), started=False,
-                model=s["model"], allowed_tools=tuple(s["tools"]), append_system_prompt=system,
+                model=s["model"], allowed_tools=tools, append_system_prompt=system,
                 extra_denied=("Read(./inbox/mail/**)",),  # files from emails: the owner's private chat only
                 origin=f"{w.origin}#{s['id']}")
         if not result.ok:

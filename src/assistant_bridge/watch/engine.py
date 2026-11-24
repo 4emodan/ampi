@@ -490,7 +490,11 @@ class WatchEngine:
         if row is not None and not retry:
             self.db.set_item(row["id"], "done" if final in ("ok", "stopped") else "failed")
         self._write_run_file(w, st, final)
+        told = False  # ampi-tools reports it, with what was done
         if not st.test and w.risk == "high" and st.actions:
+            got = await self.tools({"cmd": "watch.settings", "name": w.name})
+            told = bool(got.get("ok") and got.get("reports"))
+        if not st.test and w.risk == "high" and st.actions and not told:
             acted = [e for e in st.log if e.get("type") in ("adapter", "script", "llm") and e.get("status") == "ok"]
             await self.notify(f"🔴 Watcher {w.name} acted (run {st.run_id}): "
                               + "; ".join(f"{e['id']}" for e in acted)[:800])
