@@ -28,6 +28,12 @@ changed since they approved. Run `fill` and `submit` with the Bash tool's `timeo
 4. Take a snapshot, check for a real confirmation, and tell the owner what it says. If it says "MAY have gone
    through", check the page and email before anything else; never press again without asking.
 
+**First look whether a fixed script does it:** `checkout flows` lists the bookings it can make. Then only
+`checkout flow NAME 2026-11-27 18:30` (Bash `timeout: 600000`; tell the owner to look at their phone after approving): no steps of your own.
+It asks once. If it says nothing was booked, tell the owner why; go on by hand only if they want. If it says MAY be booked: check their
+email, never book again. `--again` only when the owner says so themselves. To see which slots are free, look with `checkout open` first,
+and `checkout close` before the script.
+
 If it needs the owner's account there, use the signin skill (a login they saved on their phone, unlocked by fingerprint).
 
 Stop and tell the owner when: a captcha or bot check shows (never try to get around it), it needs a login that isn't

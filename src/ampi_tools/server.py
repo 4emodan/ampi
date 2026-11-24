@@ -52,7 +52,7 @@ from .maps import LATLNG_RE, Maps, latlng, zone
 from .ops_wolt import BASKET_OPS as WOLT_BASKET_OPS
 from .ops_checkout import PRIVATE_ONLY as CHECKOUT_PRIVATE, CheckoutClient, CheckoutSide, PaymentRules
 from . import ops_phone
-from . import ops_signin
+from . import ops_flow, ops_signin
 from .vault import Vault, mask_cards, mask_coords, mask_text
 from .wolt import Wolt, WoltAuth
 from .meta import INSTAGRAM, THREADS, MetaAuth, MetaClient, MetaService, RedactingFormatter, redact, register_secret
@@ -290,6 +290,9 @@ class Daemon:
         check_social_origin(ops, origin, "run")
         ops_phone.check_phone(ops, origin)
         ops_signin.check(ops, origin)
+        if any(o["op"].startswith(("checkout.", "signin.")) for o in ops):
+            await ops_flow.free(self.services)
+        ops_flow.check_busy(self.services, ops)
         if any(o["op"] == "gmail.download" for o in ops):
             # A stranger's file lands in the workspace: only when the owner asked in their own chat.
             if origin != "private":
@@ -320,6 +323,8 @@ class Daemon:
                 raise ToolError("a payment is already waiting for the owner's answer")
             if ops[0]["op"] == "checkout.submit" and self._pending_pay("checkout.submit"):
                 raise ToolError("a button press is already waiting for the owner's answer")
+            if ops[0]["op"] == "checkout.flow" and self._pending_pay("checkout.flow"):
+                raise ToolError("a booking is already waiting for the owner's answer")
         if any(o["op"] in ops_phone.WRITES for o in ops) and origin != "private":
             if self.approvals.pending_count() >= MAX_PENDING:  # (again below: nothing is even looked at before this)
                 raise ToolError(f"{MAX_PENDING} requests are already waiting for the owner; wait for their answer")
@@ -385,6 +390,8 @@ class Daemon:
                         {"cmd": "hold", "session": ops[0]["args"]["resolved"]["session"],
                          "until": ops[0]["args"]["resolved"]["expires"]})
             reason = clean(reason, 300) if isinstance(reason, str) and reason.strip() else None
+            if ops[0]["op"] == "checkout.flow" and self._pending_pay("checkout.flow"):
+                raise ToolError("a booking is already waiting for the owner's answer")
             if ops[0]["op"] == "checkout.pay" and self._pending_pay():  # again: another may have arrived meanwhile
                 raise ToolError("a payment is already waiting for the owner's answer")
             if ops[0]["op"] == "checkout.submit" and self._pending_pay("checkout.submit"):
@@ -559,6 +566,9 @@ class Daemon:
         grants = json.loads(current.get("grants") or "null")
         if always and not (approve and grants):
             raise ToolError("this request has no “always” option")
+        if approve:
+            await ops_flow.free(self.services)
+            ops_flow.check_busy(self.services, json.loads(current["ops"]))
         item = self.approvals.claim(approval_id, "approved" if approve else "rejected")
         if item is None:
             state = (self.approvals.get(approval_id) or {}).get("status", "unknown")
@@ -625,6 +635,8 @@ class Daemon:
         k = self._keeper()
         meta = json.loads(current.get("meta") or "{}")
         approve = choice in ("approve", "watcher")
+        if approve:
+            ops_flow.check_busy(self.services, json.loads(current["ops"]))
         item = self.approvals.claim(current["id"], "approved" if approve else "rejected")
         audit = k.audit_for_approval(current["id"])
         if item is None:
@@ -868,6 +880,7 @@ class Daemon:
     async def watcher_action(self, profile: str, name: str, hash12: str, step: str, ops: list[dict], reason: Any,
                              idem_key: str | None, ttl: float, run_id: str | None, agent: bool) -> dict:
         """One payment of a watcher at a time, so its weekly/monthly counts can't be raced."""
+        ops_flow.check_busy(self.services, ops)
         paying = any(o["op"] == "checkout.pay" for o in ops)
         key = (profile, name)
         if paying:
@@ -1054,7 +1067,7 @@ class Daemon:
         for row_id, ops in self.approvals.db.execute("SELECT id, ops FROM approvals WHERE status='pending'").fetchall():
             for o in json.loads(ops):
                 r = o.get("args", {}).get("resolved") if o.get("op") in (
-                    "checkout.fill", "checkout.pay", "checkout.submit") else None
+                    "checkout.fill", "checkout.pay", "checkout.submit", "checkout.flow") else None
                 if isinstance(r, dict) and r.get("expires", now + 1) < now:
                     self.approvals.db.execute("UPDATE approvals SET status='expired' WHERE id=? AND status='pending'",
                                               (row_id,))
@@ -1078,7 +1091,7 @@ class Daemon:
     def _may_see(row: dict, origin: str) -> bool:
         """Social requests only for social runs (exactly), and social runs see nothing else; requests to the phone only
         for the owner's own chat (their texts say what is set there)."""
-        if origin != "private" and '"op": "phone.' in (row.get("ops") or ""):
+        if origin != "private" and any(f'"op": "{k}' in (row.get("ops") or "") for k in ("phone.", "checkout.flow", "checkout.submit")):
             return False
         return is_social_request(row) == (origin == SOCIAL_ORIGIN)
 
@@ -1276,6 +1289,7 @@ async def _serve(home: Path) -> None:
         services.checkout_side = CheckoutSide(CheckoutClient(), Vault(home), load_payment_rules(home / "config.toml"))
         services.phone_client = ops_phone.PhoneClient()
         services.signin_client = ops_signin.SigninClient()
+        services.flows = ops_flow.Flows(home / "flows", ops_flow.Journal(home / "flows.sqlite3"))
         approvals = Approvals(home / "approvals.sqlite3")
         for approval_id in approvals.recover():
             store.notice(f"⚠️ Request #{approval_id} was approved, but the tools service stopped while running it; "
@@ -1283,6 +1297,7 @@ async def _serve(home: Path) -> None:
         daemon = Daemon(services, approvals, policy, systemd_main_pid_check(unit), keeper=Keeper(home / "watch.sqlite3"))
         refresher = asyncio.create_task(refresh_meta_tokens(services))  # noqa: F841 (runs for the daemon's life)
         teller = asyncio.create_task(keep_telling_tg_reader(services))  # noqa: F841
+        freeing = asyncio.create_task(ops_flow.free(services, 3))  # noqa: F841 # a session a scenario had open when the service stopped
         server = await serve_socket(daemon, socket_path())
         log.info("listening on %s", socket_path())
         async with server:

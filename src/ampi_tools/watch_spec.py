@@ -107,6 +107,7 @@ WRITE_OPS: dict[str, OpInfo] = {
     "checkout.close": OpInfo("high", route=("site",)),
     "checkout.fill": OpInfo("high", route=("site",)),
     "checkout.pay": OpInfo("high", route=("site",)),
+    "checkout.flow": OpInfo("high", route=("flow",)),
     "checkout.submit": OpInfo("high", route=("site",)),  # the owner's chat only (NOT_FOR_WATCHERS)
     # Instagram/Threads through the owner's web session: public, in the owner's name (never for watchers, below).
     "igweb.comment": OpInfo("high", route=("target", "comment")),
@@ -131,7 +132,7 @@ SOCIAL_SESSION_READS = frozenset({"igweb.feed", "igweb.profile", "igweb.posts", 
 SOCIAL_SESSION_WRITES = frozenset(op for op in WRITE_OPS if op.startswith(("igweb.", "thweb.")))
 NOT_FOR_WATCHERS = frozenset({"telegram.revoke", "telegram.permissions", "info.revoke", "approvals.list",
                               "info.fields", "info.reveal", "info.collect", "info.save_place", "payment.log",
-                              "checkout.submit",
+                              "checkout.submit", "checkout.flow", "checkout.flows",
                               # a stranger's file in the workspace: only in the owner's own chat
                               "gmail.download",
                               # the owner's phone: their own chat only (ops_phone.check_phone)

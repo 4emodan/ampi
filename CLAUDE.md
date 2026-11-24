@@ -67,6 +67,8 @@ src/ampi_tools/         optional Todoist, Gmail, YouTube, Threads, Instagram wit
                         routes, weather, link resolving; local daily/monthly budget; answers carry source links
   wolt.py, ops_wolt.py  Wolt via wolt.com's own (unofficial) web API, owner's choice: venues, menus, orders,
                         filling the basket; never places/pays an order; polite limiter, pause on any block
+  ops_flow.py           scenarios (docs/FLOWS.md): bookings a fixed script makes from a contract on the server, one approval,
+                        journal, one press that books
   ops_phone.py          the owner's phone: notifications, alarms, timers (private chat; groups and forwarded messages ask)
   ops_signin.py         logins saved on the phone (private chat only): asks ampi-signin, gets only the outcome
   vault.py              the owner's profile + card (vault.json 0600, entered with `ampi-tools vault-set`), masking,

@@ -571,7 +571,7 @@ def signin_main(argv: list[str] | None = None) -> int:
 WAIT_DEFAULT = 540  # seconds; the skill runs these with the Bash tool's 600000 ms timeout
 
 
-def _wait_for(approval: int, wait: float, poll: float = 3.0) -> dict:
+def _wait_for(approval: int, wait: float, poll: float = 3.0, running: float = 50) -> dict:
     """Waits for the owner's answer to request #approval; returns the final status response."""
     deadline = time.monotonic() + wait
     while True:
@@ -580,12 +580,12 @@ def _wait_for(approval: int, wait: float, poll: float = 3.0) -> dict:
             return st
         # Approved means it's running now (e.g. filling and paying): give it up to 50 s more, but stay inside
         # the Bash tool's 600 s limit.
-        if time.monotonic() >= deadline + (50 if st.get("status") == "approved" else 0):
+        if time.monotonic() >= deadline + (running if st.get("status") == "approved" else 0):
             return {"ok": True, "status": st.get("status"), "text": ""}
         time.sleep(poll)
 
 
-def _run_waiting(prog: str, ops: list[dict], reason: str | None, wait: float, collect: bool = False) -> int:
+def _run_waiting(prog: str, ops: list[dict], reason: str | None, wait: float, collect: bool = False, running: float = 50) -> int:
     response = request({"cmd": "run", "ops": ops, "reason": reason, "origin": os.environ.get("AMPI_ORIGIN") or None})
     if not response.get("ok"):
         print(f"{prog}: {response.get('error', 'failed')}", file=sys.stderr)
@@ -598,7 +598,7 @@ def _run_waiting(prog: str, ops: list[dict], reason: str | None, wait: float, co
         print(response.get("text", ""))
         return 0
     print(f"Waiting for the owner's answer to request #{approval} (up to {int(wait)} s)…", flush=True)
-    st = _wait_for(approval, wait)
+    st = _wait_for(approval, wait, running=running)
     status = st.get("status")
     if status == "approved":
         print(f"The owner approved request #{approval} and it's still running. Check with `{prog} status {approval}` "
@@ -703,6 +703,12 @@ def checkout_parser() -> argparse.ArgumentParser:
     s.add_argument("ref")
     s.add_argument("--what", required=True, help="what it does, e.g. 'book yoga class, Fri 10:00, 1 person'")
     s.add_argument("--option", help="for a list or a text field of a signed-in account that `choose`/`type` refuse: what to set it to")
+    sub.add_parser("flows", help="the bookings a fixed script can make, and the latest ones")
+    s = sub.add_parser("flow", help="book with a fixed script (asks the owner once, then their phone)")
+    s.add_argument("name")
+    s.add_argument("date", help="YYYY-MM-DD")
+    s.add_argument("time", help="HH:MM, 24 hours")
+    s.add_argument("--again", action="store_true", help="only when the owner said so: the slot was booked before, or may have been")
     sub.add_parser("status", help="answer to a request").add_argument("approval", type=int)
     return p
 
@@ -718,6 +724,9 @@ def checkout_main(argv: list[str] | None = None) -> int:
         return _run_waiting("checkout", _op("checkout.pay", fills=_fill_pairs(a.pairs), button=a.button,
                                             amount=a.amount, currency=a.currency, what=a.what, card=a.card),
                             a.reason, a.wait)
+    if c == "flow":
+        return _run_waiting("checkout", _op("checkout.flow", flow=a.name, flow_date=a.date, flow_time=a.time, again=a.again), a.reason,
+                            min(a.wait, 330), running=240)
     if c == "submit":
         return _run_waiting("checkout", _op("checkout.submit", ref=a.ref, what=a.what, option=a.option), a.reason, a.wait)
     args = {"open": {"url": getattr(a, "url", None), "engine": getattr(a, "engine", None)}, "click": {"ref": getattr(a, "ref", None)},

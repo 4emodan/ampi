@@ -1452,7 +1452,7 @@ class Controller:
         s.worlds[frame["frame_id"]] = (frame["loader"], ctx)
         return ctx
 
-    ONCE = ("setcode", "signin", "clickif")  # what may have been done is never done again
+    ONCE = ("click", "setcode", "signin", "clickif")  # what may have been done is never done again
     ELEMENT_OPS = ("inspect", "gate", "set", "click", "choose", "login", "signin", "clickif", "code", "setcode")
 
     def _eval(self, s: Session, frame: dict, op: dict) -> dict | None:
