@@ -9,3 +9,4 @@ config.toml
 data/
 profiles/
 companion/out/
+companion/firefox/out/

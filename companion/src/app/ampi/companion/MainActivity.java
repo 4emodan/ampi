@@ -49,7 +49,7 @@ public final class MainActivity extends Activity {
         List<Notes.Message> messages = Notes.messages(this);
         List<Checks.Problem> problems = Checks.problems(this);
         var key = new StringBuilder().append(LinkService.connectedSince).append(LinkService.problem).append(cfg == null)
-                .append(Unlock.current() != null).append(messages.size()).append(messages.isEmpty() ? "" : messages.get(messages.size() - 1).id());
+                .append(Unlock.current() != null).append(Handover.current() != null).append(messages.size()).append(messages.isEmpty() ? "" : messages.get(messages.size() - 1).id());
         for (Checks.Problem p : problems) key.append(p.text());
         for (Alarm a : store.alarms) key.append(a.id).append(a.at).append(a.ringing);
         if (key.toString().equals(shown)) return;  // keeps the scroll position while nothing changed
@@ -75,7 +75,7 @@ public final class MainActivity extends Activity {
         }
         if (Unlock.current() != null) {
             LinearLayout card = Ui.card(page);
-            Ui.body(card, "Ampi wants to use a saved login");
+            Ui.body(card, "Ampi waits for you");
             Ui.button(card, "Show", true, v -> startActivity(new Intent(this, UnlockActivity.class)));
         }
         for (Checks.Problem p : problems) {
@@ -104,6 +104,11 @@ public final class MainActivity extends Activity {
         LinearLayout logins = Ui.card(page);
         Ui.small(logins, "Only on this phone, opened by your fingerprint.");
         Ui.button(logins, "Open", false, v -> startActivity(new Intent(this, LoginsActivity.class)));
+
+        Ui.heading(page, "Sessions from Firefox");
+        LinearLayout sessions = Ui.card(page);
+        Ui.small(sessions, Handover.current() != null ? "One is here: ask Ampi to use it." : "For sites you sign in to with Google, a passkey and the like.");
+        Ui.button(sessions, "Open", false, v -> startActivity(new Intent(this, SessionActivity.class)));
 
         Ui.heading(page, "Messages");
         if (messages.isEmpty()) Ui.small(Ui.card(page), "None yet.");
@@ -156,6 +161,7 @@ public final class MainActivity extends Activity {
         LinkService.stop(this);
         Config.clear(this);
         Unlock.interrupt();
+        Handover.clear();
         VaultSession.closeCurrent();
         Notes.clear(this);
         refresh();

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ampi session</title>
+<link rel="stylesheet" href="popup.css">
+<h1>Ampi session</h1>
+<section id="setup" hidden>
+  <p>Paste the key from the Ampi app (Sessions from Firefox, Make a key).</p>
+  <input id="key" type="password" autocomplete="off" spellcheck="false">
+  <button id="save">Save</button>
+</section>
+<section id="give" hidden>
+  <p>Give Ampi your session on</p>
+  <p id="host"></p>
+  <p class="small" id="what"></p>
+  <button id="go">Give</button>
+</section>
+<section id="hand" hidden>
+  <p id="done"></p>
+  <button id="share">Send to the Ampi app</button>
+  <button id="copy">Copy instead</button>
+  <p class="small">Copied: open the Ampi app, Sessions from Firefox, Paste a session. It is good for 10 minutes and once.</p>
+</section>
+<p id="note" role="status"></p>
+<button id="reset" class="plain" hidden>Use another key</button>
+<script src="logic.js"></script>
+<script src="popup.js"></script>
+</html>

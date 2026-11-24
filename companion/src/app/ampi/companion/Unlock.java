@@ -44,8 +44,8 @@ final class Unlock {
     private Unlock() {}
 
     /** TEST: nothing of the login is sent. FILL: it goes to the sign-in service. CODE: the one-time code a site asks for after
-     *  that. FILL_CODE: both at once. */
-    enum Kind { TEST, FILL, CODE, FILL_CODE }
+     *  that. FILL_CODE: both at once. SESSION: the session the owner gave from Firefox. */
+    enum Kind { TEST, FILL, CODE, FILL_CODE, SESSION }
 
     /** The login that was sent last: codes are only for it, for a few minutes (guarded by Unlock.class). */
     private static final class Last {
@@ -64,14 +64,16 @@ final class Unlock {
         final String host, nonce;
         final Kind kind;
         final List<Logins.Login> choices;
+        final SessionBox box;  // of a SESSION
         final long deadline;  // elapsedRealtime
         private final Context app;
         private final BooleanSupplier paired;
         private final Consumer<JSONObject> send;
         private boolean over;  // guarded by Unlock.class
 
-        private Ask(Context c, String host, Kind kind, List<Logins.Login> choices, long deadline, BooleanSupplier paired,
+        private Ask(Context c, String host, Kind kind, List<Logins.Login> choices, SessionBox box, long deadline, BooleanSupplier paired,
                     Consumer<JSONObject> send) {
+            this.box = box;
             this.app = c.getApplicationContext();
             this.host = host;
             this.kind = kind;
@@ -143,6 +145,24 @@ final class Unlock {
                 if (totp == null) answer(o);
                 else new Thread(() -> workOut(o, totp, now), "ampi-code").start();
             } catch (JSONException | IllegalArgumentException e) {
+                answer(result("failed"));
+            }
+        }
+
+        /** The fingerprint was given and the session opened: sent once, then it is gone here. */
+        void given(byte[] plain) {
+            String no = left() <= 0 ? "expired" : paired.getAsBoolean() && Handover.current() == box ? null : "interrupted";
+            if (kind != Kind.SESSION || !end()) return;
+            if (no != null) {
+                answer(result(no));
+                return;
+            }
+            Handover.spent(app, box);
+            calm();
+            try {
+                answer(result(null).put("host", box.host()).put("path", box.path())
+                        .put("cookies", new JSONArray(new String(plain, StandardCharsets.UTF_8))));
+            } catch (JSONException e) {
                 answer(result("failed"));
             }
         }
@@ -264,12 +284,14 @@ final class Unlock {
         String no;
         try {
             List<Logins.Login> choices = new ArrayList<>();
-            no = whyNot(c, host, kind, Logins.serverId(signin), choices);
+            SessionBox box = Handover.current();
+            if (box != null && !box.site().equals(host)) box = null;
+            no = whyNot(c, host, kind, box, Logins.serverId(signin), choices);
             if (no == null && !paired.getAsBoolean()) no = "interrupted";
             if (no == null) {
                 synchronized (Unlock.class) {
                     if (current != null) no = "busy";
-                    else current = ask = new Ask(c, host, kind, List.copyOf(choices), SystemClock.elapsedRealtime() + waitMs, paired, send);
+                    else current = ask = new Ask(c, host, kind, List.copyOf(choices), kind == Kind.SESSION ? box : null, SystemClock.elapsedRealtime() + waitMs, paired, send);
                 }
             }
         } catch (Logins.Gone e) {
@@ -303,7 +325,7 @@ final class Unlock {
 
     /** First what doesn't depend on the site, and one limit for all sites: the answers must not tell which ones are saved
      *  without the owner being shown something. */
-    private static String whyNot(Context c, String host, Kind kind, String server, List<Logins.Login> choices)
+    private static String whyNot(Context c, String host, Kind kind, SessionBox box, String server, List<Logins.Login> choices)
             throws IOException, GeneralSecurityException, Logins.Gone {
         synchronized (Unlock.class) {
             if (current != null) return "busy";
@@ -313,6 +335,11 @@ final class Unlock {
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         if (!nm.areNotificationsEnabled() || Notes.off(c, App.SIGNIN)) return "notifications_off";
         if (!Logins.fingerprintReady(c)) return "no_fingerprint";
+        if (kind == Kind.SESSION) {
+            if (!allowed(c)) return "limit";
+            if (box != null) Handover.toOpen(box);  // is the key still there?
+            return box == null ? "no_session" : null;
+        }
         List<Logins.Login> all = Logins.all(c);
         if (!all.isEmpty()) Logins.toOpen(all.get(0));  // is the key still there?
         if (!allowed(c)) return "limit";
@@ -363,7 +390,8 @@ final class Unlock {
         NotificationManager nm = c.getSystemService(NotificationManager.class);
         PendingIntent open = PendingIntent.getActivity(c, 1, new Intent(c, UnlockActivity.class), PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder b = new Notification.Builder(c, App.SIGNIN).setSmallIcon(R.drawable.ic_ampi)
-                .setContentTitle(a.kind == Kind.CODE ? "A sign-in asks for a code" : "Ampi wants to use a saved login")
+                .setContentTitle(a.kind == Kind.CODE ? "A sign-in asks for a code" : a.kind == Kind.SESSION ? "Ampi wants to use your session"
+                        : "Ampi wants to use a saved login")
                 .setContentText("Tap to see which one")
                 .setContentIntent(open).setAutoCancel(false).setOnlyAlertOnce(true).setLocalOnly(true)
                 .setTimeoutAfter(Math.max(1000, a.left())).setVisibility(Notification.VISIBILITY_PRIVATE)

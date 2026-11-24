@@ -10,7 +10,8 @@ with TLS 1.3 inside: both certificates were fixed while pairing, so the gateway 
 site the sign-in form is on, the owner unlocks the login for exactly that site, and it goes straight to the controller, which
 checks everything again and fills it in. No answer of this service ever has a login in it. `code`: the same with the one-time
 code a site asks for next: the owner types it on the phone, or the phone works it out from a key saved with the login (it
-stays there, like everything else).
+stays there, like everything else). `session`: the cookies of one site that the owner gave from their Firefox go into a new
+browser session, the same way.
 
 One JSON line in, one out, only for ampi-tools. One request at a time. A login is kept in memory only until it was filled in, or
 (a sign-in over two pages) 3 minutes for the same browser session and site; then the process ends, and its memory with it. It also
@@ -49,7 +50,8 @@ FILL_TOTAL, CODE_FILL_TOTAL = 175.0, 225.0  # a whole sign-in: the browser, the 
 CHECKOUT = "/run/ampi-checkout.sock"
 SESSION_RE = re.compile(r"[0-9a-f]{16}")
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
-MAX_LINE, MAX_FRAME, MAX_CALLS = 4096, 8192, 4
+MAX_LINE, MAX_FRAME, MAX_SESSION_FRAME, MAX_CALLS = 4096, 8192, 60_000, 4
+MAX_COOKIES = 80
 HOST_RE = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])")
 CODE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{2,14}[A-Za-z0-9]")
 # Sites no login is used for (the app saves none for them either, Hosts.java): one opens much more than one site (mail, sign-in
@@ -75,7 +77,7 @@ NOT = frozenset("""
 NOT_WORDS = re.compile(r"bank|banque|banco|pankki|sparkasse")
 # What the phone and the gateway may answer; anything else is "failed".
 PHONE_CODES = frozenset({"no_login", "busy", "paused", "limit", "ringing", "notifications_off", "no_fingerprint", "key_gone",
-                         "denied", "expired", "interrupted", "unsupported", "bad_request", "failed", "no_signin"})
+                         "denied", "expired", "interrupted", "unsupported", "bad_request", "failed", "no_signin", "no_session"})
 GATEWAY_CODES = frozenset({"offline", "no_vault", "busy", "limit", "no_answer"})
 
 
@@ -111,7 +113,7 @@ def send_frame(tls: ssl.SSLSocket, msg: dict) -> None:
     tls.sendall(struct.pack(">I", len(body)) + body)
 
 
-def read_frame(tls: ssl.SSLSocket) -> dict:
+def read_frame(tls: ssl.SSLSocket, limit: int = MAX_FRAME) -> dict:
     def exactly(n: int) -> bytes:
         out = b""
         while len(out) < n:
@@ -122,7 +124,7 @@ def read_frame(tls: ssl.SSLSocket) -> dict:
         return out
 
     n = int.from_bytes(exactly(4), "big")
-    if not 0 < n <= MAX_FRAME:
+    if not 0 < n <= limit:
         raise Lost
     try:
         msg = json.loads(exactly(n).decode("utf-8"))
@@ -180,6 +182,35 @@ class Login:
     code: str = ""
 
 
+@dataclass(repr=False)
+class Given:
+    """A session the owner gave. Never printed."""
+    host: str
+    path: str
+    cookies: list[dict]
+
+
+def given_of(r: dict, site: str) -> Given | None:
+    host, path, cookies = r.get("host"), r.get("path"), r.get("cookies")
+    if not isinstance(host, str) or not HOST_RE.fullmatch(host) or host.removeprefix("www.") != site:
+        return None
+    if not isinstance(path, str) or not re.fullmatch(r"/[A-Za-z0-9._~%/+-]{0,200}", path) or ".." in path or "//" in path:
+        return None
+    if not isinstance(cookies, list) or not 0 < len(cookies) <= MAX_COOKIES or not all(isinstance(c, dict) and cookie_ok(c, host) for c in cookies):
+        return None
+    return Given(host, path, [{k: c.get(k) for k in "nvdopshx"} for c in cookies])
+
+
+def cookie_ok(c: dict, host: str) -> bool:
+    """One Firefox would send to that host, as companion/firefox/logic.js writes it (checked again by the controller)."""
+    n, v, d, p = (c.get(k) for k in "nvdp")
+    if not all(isinstance(x, str) for x in (n, v, d, p, c.get("x"))) or not all(isinstance(c.get(k), bool) for k in "osh"):
+        return False
+    return (bool(re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}", n)) and bool(re.fullmatch(r"[\x20-\x3a\x3c-\x7e]{0,4096}", v))
+            and bool(re.fullmatch(r"/[\x21-\x3a\x3c-\x7e]{0,500}", p)) and c["x"] in ("", "Lax", "Strict", "None")
+            and (d == host or not c["o"] and "." in d and bool(HOST_RE.fullmatch(d)) and host.endswith("." + d)))
+
+
 def login_of(r: dict, host: str, purpose: str = "fill") -> Login | None:
     """What was asked for: the login ("fill"), with a code ("fill+code"), or only the code ("code")."""
     user, secret, hosts, code = r.get("user"), r.get("secret"), r.get("hosts"), r.get("code")
@@ -199,9 +230,9 @@ def login_of(r: dict, host: str, purpose: str = "fill") -> Login | None:
 
 
 def ask(host: str, caller: socket.socket, conf: Path = CONF, vault: Callable[[], socket.socket] = open_vault,
-        purpose: str = "test") -> tuple[str, Login | None]:
+        purpose: str = "test") -> tuple[str, Login | Given | None]:
     """Has the owner unlock the login for `host` on the phone, or give the code it asks for; ("ok" or why not, the login when it
-    is to be filled in). `purpose`: test, fill, fill+code, code."""
+    is to be filled in). `purpose`: test, fill, fill+code, code, session."""
     deadline = time.monotonic() + (CODE_TOTAL if "code" in purpose else TOTAL)
     try:
         devices = trust.load_devices(conf)
@@ -235,7 +266,7 @@ def ask(host: str, caller: socket.socket, conf: Path = CONF, vault: Callable[[],
 
 
 def _ask(host: str, sock: socket.socket, ctx: ssl.SSLContext, devices: list[trust.Device], deadline: float,
-         purpose: str) -> tuple[str, Login | None]:
+         purpose: str) -> tuple[str, Login | Given | None]:
     sock.sendall(b'{"cmd": "open"}\n')
     r = json.loads(read_line(sock, deadline))
     if not isinstance(r, dict) or r.get("ok") is not True:
@@ -246,19 +277,20 @@ def _ask(host: str, sock: socket.socket, ctx: ssl.SSLContext, devices: list[trus
         if not any(der == d.der for d in devices):
             return "untrusted", None
         wait = CODE_WAIT if "code" in purpose else WAIT
-        send_frame(tls, {"v": 1, "op": "code", "host": host, "wait": wait} if purpose == "code" else
+        send_frame(tls, {"v": 1, "op": purpose, "host": host, "wait": wait} if purpose in ("code", "session") else
                    {"v": 1, "op": "get", "purpose": purpose.split("+")[0], "host": host, "wait": wait,
                     **({"code": True} if purpose == "fill+code" else {})})
-        r = read_frame(tls)
+        limit = MAX_SESSION_FRAME if purpose == "session" else MAX_FRAME
+        r = read_frame(tls, limit)
         if r.get("asking") is True:
-            r = read_frame(tls)
+            r = read_frame(tls, limit)
         if r.get("ok") is not True:
             return known(r.get("error"), PHONE_CODES), None
         if purpose == "test":
             return "ok", None
         if purpose == "fill+code" and "code" not in r:
             return "unsupported", None  # an older app
-        login = login_of(r, host, purpose)
+        login = given_of(r, host) if purpose == "session" else login_of(r, host, purpose)
         return ("ok", login) if login is not None else ("failed", None)
 
 
@@ -338,7 +370,8 @@ class Service:
     def handle(self, req: Any, conn: socket.socket) -> dict:
         req = req if isinstance(req, dict) else {}
         cmd = req.get("cmd")
-        good = {"test": self._good_test, "fill": self._good_fill, "code": self._good_code}.get(cmd) if isinstance(cmd, str) else None
+        good = {"test": self._good_test, "fill": self._good_fill, "code": self._good_code,
+                "session": self._good_session}.get(cmd) if isinstance(cmd, str) else None
         if good is None or not good(req):
             return {"ok": False, "code": "bad_request"}
         if not self.asking.acquire(blocking=False):  # never in a queue: it would ask later, for someone who has gone
@@ -348,6 +381,8 @@ class Service:
                 resp = self._fill(req, conn)
             elif cmd == "code":
                 resp = self._code(req, conn)
+            elif cmd == "session":
+                resp = self._session(req, conn)
             else:
                 code, _ = self.ask(req["host"], conn)
                 resp = {"ok": code == "ok", "code": code}
@@ -371,6 +406,10 @@ class Service:
     @staticmethod
     def _good_code(req: dict) -> bool:
         return Service._good_refs(req, ("code", "press")) and req.get("code") is not None
+
+    @staticmethod
+    def _good_session(req: dict) -> bool:
+        return Service._good_test(req) and req.get("engine") in (None, "obscura", "lightpanda")
 
     @staticmethod
     def _good_refs(req: dict, keys: tuple[str, ...]) -> bool:
@@ -479,6 +518,33 @@ class Service:
             phase = r.get("phase")
             return {"ok": False, "code": "page", "error": words(r.get("error")), "phase": "sent" if phase == "sent" else ""}
         return {"ok": True, "code": "ok", "pressed": r.get("pressed") is True, "moved": r.get("moved") is True}
+
+    def _session(self, req: dict, conn: socket.socket) -> dict:
+        """A session the owner gave from Firefox goes into a new browser session."""
+        if refused(req["host"]):
+            return {"ok": False, "code": "refused_site"}
+        engine = {"engine": req["engine"]} if req.get("engine") else {}
+        end = time.monotonic() + FILL_TOTAL
+        try:
+            b = self.controller({"cmd": "bind_session", **engine}, timeout=40)
+            if b.get("ok") is not True:
+                return {"ok": False, "code": "page", "error": words(b.get("error"))}
+            code, got = self.ask(req["host"], conn, purpose="session")
+            if not isinstance(got, Given):
+                return {"ok": False, "code": code if code != "ok" else "failed"}
+            self._forget()
+            if end - time.monotonic() < 45 or gone(conn):
+                return {"ok": False, "code": "lost"}
+            r = self.controller({"cmd": "fill_session", "host": got.host, "path": got.path, "cookies": got.cookies, **engine},
+                                timeout=max(45, end - time.monotonic()))
+        except Busy:
+            return {"ok": False, "code": "browser_busy"}
+        except (Lost, OSError, ValueError):
+            return {"ok": False, "code": "no_browser"}
+        if r.get("ok") is not True:
+            return {"ok": False, "code": "page", "error": words(r.get("error"))}
+        kept, of = r.get("kept"), r.get("of")
+        return {"ok": True, "code": "ok", "kept": kept if type(kept) is int else 0, "of": of if type(of) is int else 0}
 
     def _held_for(self, session: str, host: str) -> Held | None:
         h = self.held

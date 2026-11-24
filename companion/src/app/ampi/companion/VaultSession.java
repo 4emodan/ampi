@@ -161,6 +161,7 @@ final class VaultSession implements Runnable {
             case "get test" -> Unlock.Kind.TEST;
             case "get fill" -> m.optBoolean("code") ? Unlock.Kind.FILL_CODE : Unlock.Kind.FILL;
             case "code " -> Unlock.Kind.CODE;
+            case "session " -> Unlock.Kind.SESSION;
             default -> null;
         };
     }

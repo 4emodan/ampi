@@ -543,6 +543,9 @@ def signin_parser() -> argparse.ArgumentParser:
     s.add_argument("--password", metavar="REF", help="the password field")
     s.add_argument("--code", metavar="REF", help="a one-time code's field in the same form")
     s.add_argument("--press", metavar="REF", help="the form's sign-in button, pressed right after filling")
+    s = sub.add_parser("session", help="open a site signed in with the session the owner gave from their Firefox")
+    s.add_argument("site", help="e.g. example.com")
+    s.add_argument("--engine", choices=("obscura", "lightpanda"), help="another browser engine for this session")
     s = sub.add_parser("code", help="the one-time code the site asks for right after `signin fill`: the owner gives it on the phone")
     s.add_argument("--code", metavar="REF", required=True, help="its field (the first one, when there is one box per digit)")
     s.add_argument("--press", metavar="REF", help="the button that sends it (many pages send it by themselves)")
@@ -552,6 +555,8 @@ def signin_parser() -> argparse.ArgumentParser:
 def signin_ops(a: argparse.Namespace) -> list[dict]:
     if a.cmd == "fill":
         return _op("signin.fill", user_ref=a.user, password_ref=a.password, code_ref=a.code, press_ref=a.press)
+    if a.cmd == "session":
+        return _op("signin.session", site_host=a.site, engine=a.engine)
     if a.cmd == "code":
         return _op("signin.code", code_ref=a.code, press_ref=a.press)
     return _op("signin.test", site_host=a.site)

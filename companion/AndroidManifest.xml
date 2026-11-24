@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="app.ampi.companion"
-    android:versionCode="4"
-    android:versionName="0.4">
+    android:versionCode="5"
+    android:versionName="0.5">
 
     <uses-sdk android:minSdkVersion="36" android:targetSdkVersion="36" />
 
@@ -47,6 +47,16 @@
 
         <activity android:name=".LoginsActivity" android:exported="false" android:launchMode="singleTop"
             android:excludeFromRecents="true" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|fontScale" />
+        <!-- A session from Firefox, shared as text by the owner (any app may share one: only the extension's can be opened). -->
+        <activity android:name=".SessionActivity" android:exported="true" android:launchMode="singleTask" android:taskAffinity=""
+            android:label="Ampi: use this session" android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|fontScale">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
         <activity android:name=".UnlockActivity" android:exported="false" android:launchMode="singleTask" android:taskAffinity=""
             android:excludeFromRecents="true" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|fontScale" />
         <service android:name=".LinkService" android:exported="false" android:foregroundServiceType="specialUse">

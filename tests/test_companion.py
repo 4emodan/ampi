@@ -26,7 +26,7 @@ def classes(tmp_path_factory):
     out = tmp_path_factory.mktemp("classes")
     src = ROOT / "src/app/ampi/companion"
     subprocess.run([JAVAC, "-encoding", "UTF-8", "--release", "17", "-d", str(out), *(str(src / f) for f in (
-        "Frames.java", "AlarmTimes.java", "Texts.java", "Tls.java", "Hosts.java", "Totp.java")), *map(str, (ROOT / "test").rglob("*.java"))], check=True)
+        "Frames.java", "AlarmTimes.java", "Texts.java", "Tls.java", "Hosts.java", "Totp.java", "SessionBox.java")), *map(str, (ROOT / "test").rglob("*.java"))], check=True)
     return out
 
 

@@ -110,7 +110,7 @@ accessibility or notification-reading permission.
   (the owner's lock-screen setting). Tapping opens the app. No links, no system-made actions. At most 20 kept, and the
   answer says so if Android didn't show it.
 - Screens: status and what to fix, alarms (delete, test), messages, unpair (needs the screen lock). No WebView,
-  `allowBackup=false`, not debuggable; exported: the launcher, and the pairing screen and receiver, which only adb may
+  `allowBackup=false`, not debuggable; exported: the launcher, the screen a session from Firefox is shared to (it only takes text), and the pairing screen and receiver, which only adb may
   start (`android.permission.DUMP`; an app the owner gave that permission with adb could open the screen too, but can't
   press its buttons).
 
@@ -233,15 +233,42 @@ sign-in itself led, without anyone judging what a page says:
 
 ampi-tools applies the approvals, so a compromised one could press those known steps without asking; it can't get a code anywhere else.
 
+### Your own session from Firefox (Google sign-in, passkeys, anything else)
+
+Google refuses sign-ins in automated and embedded browsers, and passkeys need the owner's device; pretending to be another browser is out.
+Instead the owner signs in on the phone, in real Firefox, in whatever way the site wants, and gives Ampi's browser *that one site's*
+session for one task:
+
+1. Once: `companion/firefox/build.ps1` packs the extension (a few KB, no background script, no content script, no network: CSP
+   `default-src 'none'`); the owner has it signed at addons.mozilla.org ("on your own", not listed) and installs the file. The app makes a
+   256-bit key (Sessions from Firefox), shown once, pasted into the extension. There it can only encrypt and can't be read out again (a
+   non-extractable CryptoKey); in the phone's secure hardware it can only decrypt, with a class-3 biometric every time.
+2. The owner taps the extension on the site, "Give": Firefox asks for that one site's permission, which is given up again at once. It takes
+   the cookies Firefox would send to that host (the host's own and its parents'; no partitioned ones, none from a private tab; trackers are
+   left out), **never those that vouch for a person in that browser** (`CLEARANCE`: bot-check cookies; the controller drops them again).
+   AES-256-GCM; host, path, time, a random id, number and scope are readable but authenticated with it.
+3. "Send to the Ampi app" (share sheet) or copy and paste. The app keeps it, still encrypted, in memory, 10 minutes at most, each id once. Any
+   app may share a text there: only one sealed with the key can be opened, so nobody slips in the session of someone else's account.
+4. `signin session example.com`: the app shows the host, the number of cookies and the widest name they are for; the fingerprint opens it
+   and it goes the way logins go (`{"v":1,"op":"session","host","wait"}` -> `{"ok":true,"host","path","cookies"}`, 60 KB).
+5. ampi-signin checks that every cookie is one for that host or its parents; the controller (`fill_session`) opens a new session in a fresh
+   engine, sets them (host-only ones without a domain), looks whether the engine took them, opens the page the owner was on, and it is an
+   account from the first moment: the same rules as after a sign-in. Long HttpOnly values are cut out of every answer. No code goes into such
+   a session. It ends with the browser session; nobody signs out on the site (that would end it in Firefox, too).
+
+What it costs: for that task the server's browser is signed in without password and second factor. Narrower than a password, but it lives
+until the site ends it: only "sign out everywhere" there ends it for sure. The same sites are refused as for logins. Some sites don't accept a
+session in another browser or from another address: then that is it.
+
 ### Not yet
 
 Sign-in forms and codes inside frames, several boxes for a code next to a password, links by email as a sign-in (Ampi reads that mail:
-never), Google and the like, passkeys. Never a CAPTCHA.
+never); of a session: what a site keeps in localStorage, sites over several domains. Never a CAPTCHA.
 
 ## Order
 
 A. Gateway, `phone` command, app with notifications, alarms, timers, pairing (live). B. Saving and unlocking logins.
-C1. Signing in on a page, one-time codes. C2. Lightpanda engine, prepaid bookings. D. Card payments on Lightpanda, confirmed in the app.
+C1. Signing in on a page, one-time codes, sessions from Firefox. C2. Lightpanda engine, prepaid bookings. D. Card payments on Lightpanda, confirmed in the app.
 Each phase: skeptic review of the plan, build, security and correctness reviews, fixes, then the owner deploys.
 
 ## Release key

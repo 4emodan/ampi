@@ -138,7 +138,7 @@ NOT_FOR_WATCHERS = frozenset({"telegram.revoke", "telegram.permissions", "info.r
                               "phone.status", "phone.notify", "phone.alarm", "phone.timer", "phone.alarms",
                               "phone.cancel",
                               # logins saved there: the same (ops_signin.check)
-                              "signin.test", "signin.fill", "signin.code"}) \
+                              "signin.test", "signin.fill", "signin.code", "signin.session"}) \
     | SOCIAL_SESSION_READS | SOCIAL_SESSION_WRITES
 # Reads a watcher test run never makes for real: it gets stub data (ampi_tools.social_dm) instead.
 TEST_STUB_OPS = frozenset({"igweb.inbox", "igweb.dm"})

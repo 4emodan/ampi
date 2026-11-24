@@ -32,6 +32,7 @@ public final class UnlockActivity extends Activity {
     private Unlock.Ask ask;
     private Logins.Login chosen;
     private CancellationSignal prompt;
+    private boolean session;
     private TextView left;
     private String note = "", code = "";
 
@@ -59,6 +60,7 @@ public final class UnlockActivity extends Activity {
             return;
         }
         if (ask.choices.size() == 1) chosen = ask.choices.get(0);
+        session = ask.kind == Unlock.Kind.SESSION;
         draw();
     }
 
@@ -104,16 +106,21 @@ public final class UnlockActivity extends Activity {
         root.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
         boolean onlyCode = ask.kind == Unlock.Kind.CODE, asksCode = onlyCode || ask.kind == Unlock.Kind.FILL_CODE;
         boolean saved = chosen != null && chosen.totp();
-        Ui.title(page, onlyCode ? "A code to sign in?" : ask.kind == Unlock.Kind.TEST ? "Use a saved login?" : "Sign in?");
+        Ui.title(page, session ? "Use your session?" : onlyCode ? "A code to sign in?" : ask.kind == Unlock.Kind.TEST ? "Use a saved login?" : "Sign in?");
         LinearLayout card = Ui.card(page);
-        TextView host = Ui.add(card, ask.host, 26, Ui.accent(this));
+        TextView host = Ui.add(card, session ? ask.box.host() : ask.host, 26, Ui.accent(this));
         host.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
-        Ui.body(card, onlyCode ? "You just had your login filled in there. The site asks for a one-time code, and it goes into that page. "
+        Ui.body(card, session ? "The session you gave from Firefox goes to Ampi's browser on your server: it is signed in there as you, without "
+                + "your password or second factor, until that browser is closed. Only signing out on the site ends it for sure."
+                : onlyCode ? "You just had your login filled in there. The site asks for a one-time code, and it goes into that page. "
                 + "Ampi doesn't see it."
                 : ask.kind == Unlock.Kind.TEST ? "Only a test: the login is unlocked here, and nothing of it is sent or filled in."
                 : "Ampi's browser on your server has this site's sign-in page open. Your user name and password are "
                 + "filled in there. Ampi doesn't see them, and can then use your account there until the browser is closed.");
-        if (ask.choices.size() > 1) {
+        if (session) {
+            Ui.small(card, ask.box.count() + " cookies, given " + Alarm.when(ask.box.at())
+                    + (ask.box.scope().isEmpty() ? "" : "\nSome of them are for everything on " + ask.box.scope()));
+        } else if (ask.choices.size() > 1) {
             Ui.small(card, "Which one?");
             for (Logins.Login l : ask.choices) {
                 Ui.button(card, (l == chosen ? "✓ " : "") + l.label(), l == chosen, v -> {
@@ -160,8 +167,8 @@ public final class UnlockActivity extends Activity {
         if (!onlyCode || saved) {
             Button go = Ui.button(page, "Use fingerprint", true, v -> unlock());
             go.setFilterTouchesWhenObscured(true);
-            go.setEnabled(chosen != null);
-            go.setAlpha(chosen != null ? 1 : 0.4f);
+            go.setEnabled(session || chosen != null);
+            go.setAlpha(session || chosen != null ? 1 : 0.4f);
         }
         Ui.button(page, "Refuse", false, v -> ask.refuse());
         left = Ui.small(page, "");
@@ -198,7 +205,7 @@ public final class UnlockActivity extends Activity {
     private void unlock() {
         Unlock.Ask a = ask;
         Logins.Login l = chosen;
-        if (a == null || l == null || !a.live()) {
+        if (a == null || l == null && !session || !a.live()) {
             over();
             return;
         }
@@ -207,7 +214,7 @@ public final class UnlockActivity extends Activity {
         String with = typed;
         Cipher cipher;
         try {
-            cipher = Logins.toOpen(l);
+            cipher = session ? Handover.toOpen(a.box) : Logins.toOpen(l);
         } catch (Logins.Gone e) {
             a.end("key_gone");
             return;
@@ -218,9 +225,9 @@ public final class UnlockActivity extends Activity {
         }
         stopPrompt();
         prompt = new CancellationSignal();
-        new BiometricPrompt.Builder(this).setTitle(a.host).setSubtitle(l.label())
+        new BiometricPrompt.Builder(this).setTitle(a.host).setSubtitle(session ? "Your session from Firefox" : l.label())
                 .setDescription(a.kind == Unlock.Kind.TEST ? "Test: nothing is sent or filled in"
-                        : a.kind == Unlock.Kind.CODE ? "A code to sign in there" : "Sign in there").setConfirmationRequired(true)
+                        : session ? "Use it in Ampi's browser" : a.kind == Unlock.Kind.CODE ? "A code to sign in there" : "Sign in there").setConfirmationRequired(true)
                 .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 .setNegativeButton("Back", getMainExecutor(), (d, w) -> { })
                 .build().authenticate(new BiometricPrompt.CryptoObject(cipher), prompt, getMainExecutor(),
@@ -248,11 +255,12 @@ public final class UnlockActivity extends Activity {
         }
         byte[] plain = null;
         try {
-            plain = Logins.opened(cipher, l);
-            a.unlocked(l, plain, typed);
+            plain = session ? Handover.opened(cipher, a.box) : Logins.opened(cipher, l);
+            if (session) a.given(plain);
+            else a.unlocked(l, plain, typed);
         } catch (GeneralSecurityException | RuntimeException e) {
             Log.e("Ampi", "unlock", e);
-            say("That login couldn't be opened. Try again; if it stays, delete it and add it again.");
+            say(session ? "That session couldn't be opened: it isn't from your Firefox, or the key there is an old one." : "That login couldn't be opened. Try again; if it stays, delete it and add it again.");
         } finally {
             if (plain != null) Arrays.fill(plain, (byte) 0);
         }

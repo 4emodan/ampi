@@ -53,6 +53,8 @@ WORDS = {
     "refused_site": "saved logins aren't used on that site (mail, sign-in providers, banks and the like): the owner signs in there",
     "no_signin": "the phone only gives a code for a login it unlocked in the last 10 minutes, for a site of that login (at most three "
                  "times): start again with `signin fill`",
+    "no_session": "no session of that site was given: the owner signs in there in Firefox, taps the Ampi button there (Give, then Send to the "
+                  "Ampi app), and asks again within 10 minutes",
     "unknown": "the browser stopped answering while the login was being filled in: it MAY have been sent. Look at the page (`checkout "
                "snapshot`) before trying again",
 }
@@ -197,6 +199,26 @@ async def si_code(s: Services, a: dict) -> Result:
     return await _then(s, side, st, done)
 
 
+async def si_session(s: Services, a: dict) -> Result:
+    from .ops_checkout import cs
+
+    host, = need(a, "site_host")
+    client = _client(s)
+    side = cs(s)
+    if (await side.client.call({"cmd": "status"})).get("session"):
+        raise ToolError("a checkout session is open: close it first (`checkout close`)")
+    r = await client.call({"cmd": "session", "host": host, **({"engine": a["engine"]} if a.get("engine") else {})}, timeout=FILL_TIMEOUT)
+    if r.get("ok") is not True:
+        raise ToolError("no session: " + _why(r, "session"))
+    st = await side.client.call({"cmd": "status"})
+    if not st.get("session"):
+        raise ToolError("the browser closed the session again; try again")
+    done = (f"The owner's session is in the browser ({r.get('kept')} of {r.get('of')} cookies). Check below whether the site took it: some don't "
+            "accept a session in another browser, and then that's it (don't try to get around it).")
+    return await _then(s, side, st, done)
+
+
+OPS["signin.session"] = Op("signin.session", False, si_session)
 OPS["signin.test"] = Op("signin.test", False, si_test)
 OPS["signin.code"] = Op("signin.code", False, si_code)
 OPS["signin.fill"] = Op("signin.fill", False, si_fill)

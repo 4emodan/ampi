@@ -28,7 +28,8 @@ card, code or hidden fields), for the owner's approval message; any change of th
 the sign-in form is really on, and fill in a login the owner unlocked on their phone for exactly that site. The password
 goes only into a password field of that site's own page, and is cut out of everything this answers afterwards.
 `bind_code` and `fill_code` do the same with the one-time code a site asks for next: only where that sign-in itself led (see
-Session.chain), because such codes also confirm payments and changes of an account.
+Session.chain), because such codes also confirm payments and changes of an account. `fill_session` opens a new session with the
+cookies of one site that the owner gave from their own browser: an account from its first moment.
 
 No arbitrary JavaScript from the assistant, no other reading of input values, no console/network events forwarded,
 no downloads, no file:// pages, no stealth and no captcha solving.
@@ -123,6 +124,12 @@ CODE_DANGER = re.compile(
     r"πληρωμ\w*|μεταφορ\w*|διαγραφ\w*|νέο\w* (κωδικό\w* πρόσβασης|τηλέφωνο|email)", re.I)
 # An address that leads further than to a sign-in.
 CODE_DEEP = re.compile(CODE_DANGER.pattern + r"|\b(settings?|preferences|security|2fa|mfa|two.?factor|password|confirm\w*|approv\w*|authori[sz]e|edit)\b", re.I)
+COOKIE_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}")
+COOKIE_VALUE, COOKIE_PATH = re.compile(r"[\x20-\x3a\x3c-\x7e]{0,4096}"), re.compile(r"/[\x21-\x3a\x3c-\x7e]{0,500}")
+# They vouch for "a person in that very browser": taking them along would get around a site's bot check. (The extension leaves them
+# out, too.)
+CLEARANCE = re.compile(r"(cf_clearance|__cf_bm|__cflb|_cfuvid|cf_chl.*|_abck|bm_.*|ak_bmsc|sec_cpt|datadome|_px.*|pxcts|reese84|incap_ses.*|visid_incap.*|"
+                       r"nlbi_.*|aws-waf-token|kp_uid.*|x-kpsdk.*|__ddg.*|_grecaptcha|rc::.*|frcaptcha.*|h-captcha.*)", re.I)
 CODE_FRAME = re.compile(r"3-?ds|threeds|three-d|/acs\b|acs\.", re.I)
 COOKIE_CAPTION = re.compile(r"(decline|reject|deny|accept|allow)( all)?( cookies)?|(only )?necessary( cookies)?( only)?|close|×|dismiss", re.I)
 RISKY = re.compile(r"subscri|recurring|membership|auto-?renew|save (my )?card|remember (this |my )?card|\blink\b|"
@@ -394,9 +401,9 @@ def hider(secrets_: list[str], cut_off: bool = False) -> "re.Pattern | None":
     return re.compile("|".join(p for _, p in sorted(set(parts), reverse=True)), re.I) if parts else None
 
 
-def hidden(value: Any, secrets_: list[str]) -> Any:
+def hidden(value: Any, secrets_: list[str], tokens: tuple[str, ...] = ()) -> Any:
     """What comes from the page, without the login that was filled in. (A site that wants to can always write it in some
-    other way: it has it. This keeps ordinary pages from showing it.)"""
+    other way: it has it. This keeps ordinary pages from showing it.) `tokens`: long random values, as they are."""
     rx, ends = hider(secrets_), hider(secrets_, cut_off=True)
 
     def other(m: re.Match) -> str:  # written in a way not in the list: decode, and then leave nothing of it
@@ -405,6 +412,10 @@ def hidden(value: Any, secrets_: list[str]) -> Any:
             urllib.parse.unquote(x), urllib.parse.unquote_plus(x), html.unescape(x), urllib.parse.unquote(urllib.parse.unquote(x)))) else x
 
     def cut(x: str) -> str:
+        for t in tokens:
+            x = x.replace(t, "•••")
+        if not rx:
+            return x
         m = re.match(r"https?://[^/?#\s]*", x)  # a site's name isn't a password, even when one is spelled the same
         start = m.end() if m else 0
         return x[:start] + re.sub(r"\S+", other, (ends if len(x) >= 40 else rx).sub("•••", x[start:]))
@@ -418,7 +429,7 @@ def hidden(value: Any, secrets_: list[str]) -> Any:
             # ("bound" is what ampi-signin hands back to be compared; it goes nowhere else.)
             return {k: v if k == "bound" else walk(v, words if k not in PAGE_WORDS else True) for k, v in x.items()}
         return x
-    return walk(value, False) if rx else value
+    return walk(value, False) if rx or tokens else value
 
 
 def origin_of(url: str, security_origin: str | None = None) -> str:
@@ -958,6 +969,7 @@ class Session:
         self.gen = 0         # counts everything done in the session: an approved press needs it unchanged
         self.filled = False  # the owner's details were filled in
         self.secrets: list[str] = []  # the login filled in: cut out of every reply
+        self.tokens: tuple[str, ...] = ()  # of a session the owner gave: cut out of every reply, too
         self.code: tuple[Code, str] | None = None  # the one-time code filled in, and the document it is in
         # A one-time code goes in only where a sign-in itself led: `chain` is `gen` as it was after the login was filled in, carried on
         # by the few presses that belong to a sign-in (_carries). Anything else that was done breaks it, for good.
@@ -983,6 +995,9 @@ class Session:
     @property
     def hide(self) -> list[str]:
         return [*self.secrets, *([self.code[0]] if self.code else [])]
+
+    def cut(self, value: Any) -> Any:
+        return hidden(value, self.hide, self.tokens)
 
     def name(self, frame_id: str) -> str:
         if frame_id not in self.frame_names:
@@ -1016,7 +1031,7 @@ class Controller:
         self._phase: str | None = None
 
     CHANGES = ("open", "click", "type", "choose", "back", "fill", "pay")
-    SIGNIN = ("bind_login", "fill_login", "bind_code", "fill_code")  # for ampi-signin, and nothing else is
+    SIGNIN = ("bind_login", "fill_login", "bind_code", "fill_code", "bind_session", "fill_session")  # for ampi-signin, and nothing else is
 
     # --- request entry -------------------------------------------------------------------
 
@@ -1030,9 +1045,10 @@ class Controller:
         """`signin`: the caller is ampi-signin."""
         s = self.session
         out = self._handle(req, signin)
-        secrets_ = [x for session in {s, self.session} if session is not None for x in session.hide]
+        both = [x for x in {s, self.session} if x is not None]
+        secrets_, tokens = [x for session in both for x in session.hide], tuple(x for session in both for x in session.tokens)
         try:
-            return hidden(out, secrets_) if secrets_ else out
+            return hidden(out, secrets_, tokens) if secrets_ or tokens else out
         except Exception:
             self.retire = True
             self.drop()
@@ -1048,6 +1064,7 @@ class Controller:
             if signin is not (cmd in self.SIGNIN):
                 raise Refused("unknown command")
             fn = {"bind_login": self.bind_login, "fill_login": self.fill_login, "bind_code": self.bind_code, "fill_code": self.fill_code,
+                  "bind_session": self.bind_session, "fill_session": self.fill_session,
                   "status": self.status, "open": self.open, "snapshot": self.snapshot_cmd, "click": self.click,
                   "type": self.type_text, "choose": self.choose, "back": self.back, "close": self.close,
                   "bind": self.bind, "gate": self.gate, "bind_submit": self.bind_submit, "submit": self.submit, "fill": self.fill, "pay": self.pay, "hold": self.hold}.get(cmd)
@@ -1284,7 +1301,7 @@ class Controller:
     @staticmethod
     def _m(s: Session, text: Any) -> str:
         """As a reply says it (handle() does the same to everything of the page in it)."""
-        return hidden({"text": str(text or "")}, s.hide)["text"]
+        return s.cut({"text": str(text or "")})["text"]
 
     def snapshot(self, s: Session) -> dict:
         frames = self._frames(s)
@@ -1586,7 +1603,7 @@ class Controller:
             self._settable(d, req["option"])
             op = {"op": "choose", "n": n, "option": req["option"]} if d["kind"] == "select" else {"op": "set", "n": n, "value": req["option"]}
         g = self._gate(s, bframe, n)
-        if hidden(self._press(g), s.hide) != req.get("press"):
+        if s.cut(self._press(g)) != req.get("press"):
             raise changed
         if g["leaks"]:
             raise Refused("that would put the login that was filled in into an address; nothing was pressed")
@@ -2060,6 +2077,68 @@ class Controller:
         except (Refused, CdpProtocolError):
             return self._error("after the code was filled in, the page changed or went somewhere this browser doesn't open; look at it "
                                "before trying again")
+
+    # --- a session the owner gave from their own browser (only ampi-signin) ------------------------
+
+    def _engine_for(self, req: dict) -> str:
+        engine = req.get("engine") or "obscura"
+        if not isinstance(engine, str) or engine not in ENGINES:
+            raise Refused("unknown browser engine")
+        if engine not in self.engines:
+            raise Refused("the second browser engine isn't installed")
+        if self.session is not None:
+            raise Refused("another checkout session is open; close it first")
+        if self.retire:
+            raise Refused("the checkout browser is starting afresh; try again in a few seconds")
+        return engine
+
+    def bind_session(self, req: dict) -> dict:
+        """Before the owner is asked: could a session be opened now?"""
+        self._engine_for(req)
+        return {"ok": True}
+
+    @staticmethod
+    def _cookie(c: Any, host: str) -> dict:
+        """A cookie as the engine takes it, or a refusal: one that a browser would send to that host."""
+        bad = Refused("that session isn't as expected")
+        if not isinstance(c, dict) or any(not isinstance(c.get(k), str) for k in "nvdpx") or any(not isinstance(c.get(k), bool) for k in "osh"):
+            raise bad
+        d = c["d"]
+        if not (COOKIE_NAME.fullmatch(c["n"]) and COOKIE_VALUE.fullmatch(c["v"]) and COOKIE_PATH.fullmatch(c["p"]) and c["x"] in ("", "Lax", "Strict", "None")
+                and (d == host or not c["o"] and LOGIN_HOST.fullmatch(d) and host.endswith("." + d))):
+            raise bad
+        return {"name": c["n"], "value": c["v"], "path": c["p"], "secure": c["s"], "httpOnly": c["h"], "url": f"https://{d}{c['p']}",
+                **({} if c["o"] else {"domain": "." + d}), **({"sameSite": c["x"]} if c["x"] else {})}
+
+    def fill_session(self, req: dict) -> dict:
+        host, path, given = req.get("host"), req.get("path"), req.get("cookies")
+        engine = self._engine_for(req)
+        if not isinstance(host, str) or not LOGIN_HOST.fullmatch(host) or not isinstance(path, str) or not COOKIE_PATH.fullmatch(path) \
+                or ".." in path or "//" in path or not isinstance(given, list) or not 0 < len(given) <= 80:
+            raise Refused("that session isn't as expected")
+        cookies = [self._cookie(c, host) for c in given]
+        cookies = [c for c in cookies if not CLEARANCE.fullmatch(c["name"])]
+        if not cookies:
+            raise Refused("there is nothing in that session that can be used")
+        url = self.check_url(f"https://{host}{path}")
+        s = self._new_session(engine)
+        s.signed_in = True  # from the first moment
+        s.tokens = tuple(c["value"] for c in cookies if c["httpOnly"] and len(c["value"]) >= 16)
+        try:
+            s.cdp.call("Network.setCookies", {"cookies": cookies}, s.cdp_session)
+            # (An engine may leave one out without a word.)
+            there = s.cdp.call("Network.getCookies", {"urls": [f"https://{host}/", url]}, s.cdp_session).get("cookies") or []
+            names = {c.get("name") for c in there if isinstance(c, dict)}
+            kept = sum(c["name"] in names for c in cookies)
+            if not kept:
+                raise Refused("the browser took nothing of that session")
+            self._visit(s, url)
+            s.cdp.call("Page.navigate", {"url": url}, s.cdp_session)
+            self._settle(s, NAV_TIMEOUT)
+        except (Refused, CdpProtocolError) as e:
+            self.drop()
+            raise Refused(str(e) if isinstance(e, Refused) else "the browser couldn't take that session") from None
+        return {"ok": True, "session": s.id, "kept": kept, "of": len(cookies)}
 
     def _moved(self, s: Session, top: dict) -> bool:
         now = self._frames(s)[0]
