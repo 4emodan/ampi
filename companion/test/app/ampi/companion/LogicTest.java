@@ -33,6 +33,17 @@ final class LogicTest {
         return n < 0 ? "none" : Instant.ofEpochMilli(n).atZone(ZoneId.of(zone)).toOffsetDateTime().toString();
     }
 
+    static void loginProblems() {
+        eq("email", "", Texts.loginProblem("", "me.x+y@sub.example.co.uk", "pw"));
+        eq("name", "", Texts.loginProblem("Personal", "jane", "pw"));
+        eq("handle", "", Texts.loginProblem("", "@jane", "pw"));
+        eq("email as label, too", "", Texts.loginProblem("me@example.com", "me@example.com", "pw"));
+        for (String[] x : new String[][] {{"", "", "pw"}, {"", "me", ""}, {"me@example.com", "S3cret!", "S3cret!"}, {"me@example.com", "S3cret!", "pw"},
+                {"", "jane", "me@example.com"}, {"", "me@example", "pw"}, {"", "me@exampl\u0435.com", "pw"}, {"", "me@@example.com", "pw"}, {"", "x".repeat(201), "pw"}})
+            eq("problem " + String.join("|", x), false, Texts.loginProblem(x[0], x[1], x[2]).isEmpty());
+        eq("invisible", "me@example.com", Texts.line("\u200b me@example.com\u200b\u2060 ", 201));
+    }
+
     static void alarmTimes() {
         String z = "Europe/Helsinki";
         eq("later today", "2026-11-24T07:00+02:00", next("07:00", null, null, z, "2026-11-24T06:59:59+02:00"));
@@ -217,6 +228,7 @@ final class LogicTest {
         clockChanges();
         frames();
         texts();
+        loginProblems();
         sites();
         codes();
         sessions();

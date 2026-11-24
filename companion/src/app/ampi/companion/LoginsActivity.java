@@ -107,7 +107,7 @@ public final class LoginsActivity extends Activity {
         for (Logins.Login l : all) {
             LinearLayout card = Ui.card(page);
             Ui.body(card, String.join("\n", l.hosts()));
-            Ui.small(card, l.label() + (l.totp() ? " · with authenticator key" : ""));
+            Ui.small(card, "Label: " + l.label() + (l.totp() ? " · with authenticator key" : ""));
             if (signin.length > 0 && !l.server().equals(server)) Ui.small(card, "Saved for another server: can't be used with this one.");
             Ui.button(card, "Delete", false, v -> show(new AlertDialog.Builder(this).setTitle("Delete this login?")
                     .setMessage(String.join(", ", l.hosts()) + " · " + l.label()).setNegativeButton("Keep", null)
@@ -189,8 +189,8 @@ public final class LoginsActivity extends Activity {
         LinearLayout card = Ui.card(page);
         EditText site = field(card, "Site, e.g. example.com (more addresses: one per line)",
                 TEXT | InputType.TYPE_TEXT_VARIATION_URI | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        EditText label = field(card, "Name for it, e.g. Personal", TEXT);
-        EditText user = field(card, "User name or email", TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        // (Not a password variation: password managers take the field before the first one of those for the user name.)
+        EditText user = field(card, "User name or email you sign in with", TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
         EditText secret = field(card, "Password", TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         CheckBox show = new CheckBox(this);
         show.setText("Show password");
@@ -201,11 +201,19 @@ public final class LoginsActivity extends Activity {
             secret.setSelection(Math.max(0, at));
         });
         card.addView(show);
-        EditText totp = field(card, "Authenticator key, if you want the codes from here (as the site shows it, or its otpauth:// link)",
+        EditText label = field(card, "Label for the list, optional (e.g. Personal). Not the user name.", TEXT);
+        LinearLayout codes = Ui.card(page);
+        EditText totp = field(codes, "Authenticator key (as the site shows it, or its otpauth:// link)",
                 TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        Ui.small(card, "Password and codes are then on one phone, behind your fingerprint. Without a key you type the codes when a "
+        Ui.small(codes, "Password and codes are then on one phone, behind your fingerprint. Without a key you type the codes when a "
                 + "site asks for them.");
-        TextView problem = Ui.body(card, "");
+        codes.setVisibility(View.GONE);  // out of reach of a password manager, too, that fills every password field
+        Button more = Ui.button(page, "Add an authenticator key (optional)", false, null);
+        more.setOnClickListener(v -> {
+            codes.setVisibility(View.VISIBLE);
+            more.setVisibility(View.GONE);
+        });
+        TextView problem = Ui.body(page, "");
         Button save = Ui.button(page, "Save with fingerprint", true, v -> save(site, label, user, secret, totp, problem));
         save.setFilterTouchesWhenObscured(true);
         Ui.small(page, "The clipboard is emptied after saving. Your keyboard may keep a clipboard history of its own: clear it there.");
@@ -227,14 +235,13 @@ public final class LoginsActivity extends Activity {
     private void save(EditText site, EditText label, EditText user, EditText secret, EditText totp, TextView problem) {
         List<String> hosts;
         Totp key;
-        String name = Texts.line(label.getText().toString(), 40), u = user.getText().toString().strip(), s = secret.getText().toString();
+        String given = Texts.line(label.getText().toString(), 40), u = Texts.line(user.getText().toString(), 201), s = secret.getText().toString();
         byte[] signin = signin(this);
         Cipher cipher;
         try {
             hosts = Hosts.parse(site.getText().toString());
-            if (name.isEmpty()) throw new IllegalArgumentException("Give it a name");
-            if (u.isEmpty() || s.isEmpty()) throw new IllegalArgumentException("Enter the user name and the password");
-            if (u.length() > 200 || s.length() > 200) throw new IllegalArgumentException("At most 200 characters each");
+            String wrong = Texts.loginProblem(given, u, s);
+            if (!wrong.isEmpty()) throw new IllegalArgumentException(wrong);
             key = Totp.parse(totp.getText().toString());
             if (signin.length == 0) throw new IllegalArgumentException("Pair this phone first");
             cipher = Logins.toSave(this);
@@ -247,10 +254,11 @@ public final class LoginsActivity extends Activity {
             return;
         }
         problem.setText("");
+        String name = given.isEmpty() ? Texts.line(hosts.get(0), 40) : given;
         if (prompt != null) prompt.cancel();
         prompt = new CancellationSignal();
         new BiometricPrompt.Builder(this).setTitle("Save this login").setSubtitle(name)
-                .setDescription("For " + String.join(", ", hosts))
+                .setDescription("For " + String.join(", ", hosts) + "\nUser name: " + u)
                 .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
                 .setNegativeButton("Cancel", getMainExecutor(), (d, w) -> { })
                 .build().authenticate(new BiometricPrompt.CryptoObject(cipher), prompt, getMainExecutor(),
