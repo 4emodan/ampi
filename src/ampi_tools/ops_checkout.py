@@ -248,7 +248,7 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
         return "order"
     origin = str(g.get("frame_origin") or "?")
     dest = str(g.get("dest") or "")
-    if any("•••" in str(x) for x in (*raw, g.get("label"), g.get("ident"), dest)):
+    if g.get("signed_in") and g.get("kind") != "radio" and any("•••" in str(x) for x in (*raw, g.get("label"), g.get("ident"), dest)):
         return "commit"  # something was cut out of it: what it really says isn't known here
     if g.get("submits") and dest and not dest.startswith((origin + "/", origin + "?")) and dest != origin:
         return "commit"  # sends what is entered to another site

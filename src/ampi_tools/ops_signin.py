@@ -151,6 +151,8 @@ async def si_fill(s: Services, a: dict) -> Result:
     st = await side.client.call({"cmd": "status"})
     if not st.get("session"):
         raise ToolError("no checkout session; open the site's sign-in page with `checkout open URL`")
+    if refs["code"] and st.get("codes") is False:
+        raise ToolError("no code can be filled in in this session: begin a new one at the site's start or sign-in page, and do nothing else before this")
     r = await client.call({"cmd": "fill", "session": st["session"], **{k: v for k, v in refs.items() if v}},
                           timeout=CODE_TIMEOUT if refs["code"] else FILL_TIMEOUT)
     if r.get("ok") is not True:
@@ -163,9 +165,16 @@ async def si_fill(s: Services, a: dict) -> Result:
         done = "The user name was filled in and sent. For the password page, run `signin fill` again within 3 minutes."
     if r.get("pressed") and not r.get("moved", True):
         done += " The page hasn't changed yet: take a snapshot in a few seconds, and don't sign in again before that."
-    if r.get("password"):
+    try:
+        codes = (await side.client.call({"cmd": "status"})).get("codes")
+    except ToolError:
+        codes = None
+    if codes:
         done += (" If it asks for a one-time code now: `signin code --code REF`, right away (doing anything else first, even a "
                  "click, ends that).")
+    elif r.get("password") and codes is not None:
+        done += (" If it asks for a one-time code now, none can be filled in in this session (it didn't begin at the site's start or sign-in page, or "
+                 "something else was done in it): tell the owner, and start again in a new one if they want.")
     return await _then(s, side, st, done)
 
 

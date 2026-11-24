@@ -31,7 +31,7 @@ signin test example.com                                  only tests: the phone u
    tool's `timeout: 290000`. The owner types the code on the phone, or the phone works it out. `--code` is its field (the first one,
    when there is one box per digit); leave `--press` out if the page sends it by itself. Anything else you do first, even a click,
    ends that. Only these may come in between, through `checkout submit` (it asks): "Send code", "Try another way", "Use authenticator
-   app" and the like; and a plain click on a cookie banner or on which way the code should come. Close banners before signing in.
+   app" and the like; and a plain click on a cookie banner's button or on which way the code should come.
    A wrong code: `signin code` again, in the same field (three in all). Password and code in one form: `signin fill … --code REF`
    (also with `timeout: 290000`).
 5. "Approve it in your app" / "check your phone": tell the owner to open the app themselves and that it must name that site, then look
@@ -43,9 +43,9 @@ signin test example.com                                  only tests: the phone u
 - "refused" or "didn't answer": stop, and say so. Don't ask again unless they tell you to.
 - "no login is saved": ask whether they want to add it in the app; give the exact address of the page (the app matches it).
 - Google, Apple, Facebook or Microsoft sign-in, passkeys, links by email and codes inside a frame aren't possible. Say so.
-- For a site that asks for codes: in a **new** session open its plain sign-in page (or its start page, then its own "Log in"), and do
-  nothing else there before `signin fill`: no other pages, no typing. After an address with another one in it (`?next=…`) no code can be
-  filled in.
+- For a site that asks for codes: in a **new** session open its start page and use its own "Log in" (or open its plain sign-in page), and
+  do nothing else there before `signin fill` but closing a cookie banner: no other pages, no typing. After an address with another one in it
+  (`?next=…`) no code can be filled in. (The result of `signin fill` says whether one can.)
 - A code that confirms a payment, an order or a change of the account is never for you: the owner does that themselves.
 - The browser forgets everything when the session closes: sign in once per task, and `checkout close` at the end.
 - **Never ask the owner to send a password or a one-time code in the chat**, and don't accept one: it belongs in the app.
