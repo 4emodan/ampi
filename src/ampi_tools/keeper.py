@@ -318,7 +318,7 @@ class Keeper:
 
     def audit_add(self, profile: str, name: str, h: str, run: str | None, step: str, op: str, summary: str,
                   idem_key: str | None, status: str, amount: str | None = None, items: int | None = None,
-                  detail: list | None = None, report: bool = False) -> int:
+                  detail: dict | None = None, report: bool = False) -> int:
         cur = self.db.execute(
             "INSERT INTO audit (profile, name, hash, run, step, op, args_summary, idem_key, status, at, amount, items, "
             "detail, reported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -363,7 +363,7 @@ class Keeper:
         self.db.commit()
 
     def activity(self, limit: int = 150) -> list[dict]:
-        rows = self.db.execute("SELECT id, profile, name, step, op, args_summary, status, approval_id, result, at, items "
+        rows = self.db.execute("SELECT id, profile, name, step, op, args_summary, status, approval_id, result, at, items, detail "
                                "FROM audit ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 

@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import socket
+import sqlite3
 import struct
 import sys
 import time
@@ -407,8 +408,9 @@ class Daemon:
                 # Not the owner typing in chat: a run that read outside content (or an unknown process).
                 summary = (f"⚠ Asked for by {clean(who, 80)} while handling outside content, not by you in "
                            f"chat.\n{summary}")
-            grants = grant_offer(self.services, ops, origin) if telegram else None
-            if ops[0]["op"] == "checkout.fill":  # "✅ + always here": these fields on this exact site, 30 days
+            always_ask = any(self.permissions.mode(scope, o["op"], o["args"]) == "ask" for o in asked)
+            grants = grant_offer(self.services, ops, origin) if telegram and not always_ask else None
+            if ops[0]["op"] == "checkout.fill" and not always_ask:  # "✅ + always here": these fields on this exact site, 30 days
                 r = ops[0]["args"]["resolved"]
                 grants = [{"kind": "site", "origin": r["origin"], "fields": r["fields"]}]
             if ops[0]["op"] in ("checkout.fill", "checkout.pay", "checkout.submit"):
@@ -444,6 +446,8 @@ class Daemon:
                     + (summary.split("\n", 1)[0] if ops[0]["op"] == "checkout.submit" else summary)
                 ),
             }
+        if not own:
+            self.permissions.refuse(scope, asked)  # (time passed)
         if telegram:
             for o in telegram:
                 o["args"]["resolved"]["auto"] = True
@@ -625,6 +629,8 @@ class Daemon:
         finally:
             self.approvals.finish(approval_id, status, text)
             log.info("approval #%s %s", approval_id, status)
+        if always and any(self.permissions.mode(self._scope(""), o["op"]) == "ask" for o in json.loads(item["ops"])):
+            always = False  # set to ask each time meanwhile
         if always and ok and grants and grants[0].get("kind") == "site":
             g = grants[0]  # from the stored request, never from the button
             self.services.checkout_side.vault.grant(g["origin"], g["fields"])
@@ -651,6 +657,13 @@ class Daemon:
 
     def ask_settings(self, scope: str, changes: dict[str, list[str]]) -> int:
         """Anything looser asks in Telegram, whoever sent it here."""
+        replaced: list[int] = []
+        self.approvals.expire()
+        for row in self.approvals.recent(100):  # one request per page: what still waits is in the new one too
+            meta = json.loads(row.get("meta") or "{}") if row.get("kind") == "settings.change" else {}
+            if row["status"] == "pending" and meta.get("scope") == scope:
+                changes = {**{op: c for op, c in meta["changes"].items() if self.permissions.get(scope, op) == c[0]}, **changes}
+                replaced.append(row["id"])
         lines = [f"Change what {perms.words(scope)} may do:"]
         for op, (old, new) in changes.items():
             note = "" if op.endswith(".*") or op.startswith("flow:") else f" ({cards.note_of(op)})"
@@ -658,11 +671,9 @@ class Daemon:
         summary = "\n".join(lines)
         if len(summary) > 2800:
             raise ToolError("too many changes at once; save a few at a time")
-        self.approvals.expire()
-        for row in self.approvals.recent(100):  # the newest request for this page counts
-            if row["status"] == "pending" and row.get("kind") == "settings.change" \
-                    and json.loads(row.get("meta") or "{}").get("scope") == scope:
-                self.approvals.claim(row["id"], "expired")
+        for i in replaced:
+            self.approvals.claim(i, "expired")
+            lines.append(f"(replaces request #{i})")
         card = {"who": "you, in the Ampi hub", "what": "Change permissions", "details": "\n".join(lines[1:]), "level": "high",
                 "risks": [f"For {perms.words(scope)}", "Approve only if you just changed this yourself"]}
         return self.approvals.add([], summary, None, kind="settings.change", ttl=SETTINGS_TTL,
@@ -691,9 +702,13 @@ class Daemon:
             return 0
         n = 0
         for _, name, rows in self.keeper.due_reports():
-            for text in report.texts(name, rows):
-                self.tg_store.notice(text)
-                n += 1
+            try:
+                for text in report.texts(name, rows):
+                    self.tg_store.notice(text)
+                    n += 1
+            except Exception:  # (tried again at the next round, without holding up the others)
+                log.exception("report of %s failed", name)
+                continue
             self.keeper.reported([r["id"] for r in rows])
         return n
 
@@ -815,7 +830,12 @@ class Daemon:
             return {"ok": True, "status": status}
         if cmd == "watch.delete":
             k.delete(profile, name)
-            self.permissions.forget(perms.watcher_scope(profile, name))
+            scope = perms.watcher_scope(profile, name)
+            for row in self.approvals.recent(200):
+                if row["status"] == "pending" and row.get("kind") == "settings.change" \
+                        and json.loads(row.get("meta") or "{}").get("scope") == scope:
+                    self.approvals.claim(row["id"], "expired")
+            self.permissions.forget(scope)
             return {"ok": True}
         if cmd == "watch.settings":
             scope = perms.watcher_scope(profile, name)
@@ -886,6 +906,10 @@ class Daemon:
             "SELECT COUNT(*) FROM approvals WHERE status='pending' AND kind='watch.activate'").fetchone()[0]
         if waiting >= PROPOSALS_PENDING_CAP:
             raise ToolError(f"{PROPOSALS_PENDING_CAP} watcher proposals are already waiting for the owner's answer")
+        bad = [t for e in ws.manifest(spec) for t in e.get("tools", [])
+               if t.startswith("Bash(") and t[5:].split(":")[0] in ws.PROPOSE_FORBIDDEN_BASH]
+        if bad:
+            raise ToolError(f"{bad[0]} runs other commands; not for a watcher's AI step")
         entries = await resolve_routes(self.services, ws.manifest(spec))
         level, _ = ws.risk(entries)
         request = req.get("request") if isinstance(req.get("request"), str) else ""
@@ -1112,16 +1136,22 @@ class Daemon:
             granted = False  # a shared Todoist project or a public playlist: other people see it, so ask (as in chat)
         # `fits` / declared actions keep their own rules; "ask each time" watchers still ask.
         mode = self.permissions.mode(scope, op, raw_args)
-        hiding = agent and perms.hides(op, raw_args)
+        before = granted
         many = len(id_list(o["args"])) if op in perms.REPORTABLE and op != "gmail.draft" else 0
         if mode == "report" and op in perms.REPORTABLE and op not in self.policy.require_approval:
-            granted = granted or many <= perms.MAX_ITEMS
-        routine = (agent and not granted and not declared and op in AGENT_ROUTINE and w["mode"] == "all"
+            granted = granted or (many <= perms.MAX_ITEMS and self.tg_store is not None)
+        by_report = granted and not before
+        if agent and not fits and perms.unguards(op, raw_args):
+            granted = by_report = False
+        routine = (agent and not granted and not perms.unguards(op, raw_args) and not declared and op in AGENT_ROUTINE and w["mode"] == "all"
                    and op not in self.policy.require_approval and len(id_list(o["args"])) <= AGENT_ROUTINE_MAX)
         granted = (granted or routine) and mode != "ask"
+        free = by_report or routine or (agent and not fits)  # not among the actions approved with the watcher
+        hiding = free and perms.hides(op, raw_args)
+        reports = mode == "report" or (routine and "report" in self.permissions.all(scope).values())
         items: list[dict] = []
-        if granted and many and (mode == "report" or hiding):
-            if many > perms.MAX_ITEMS:
+        if granted and many and (reports or hiding):
+            if many > perms.MAX_ITEMS and free:
                 raise ToolError(f"at most {perms.MAX_ITEMS} emails per request; split it")
             items = await perms.email_items(self.services, id_list(o["args"]))
             if hiding:
@@ -1129,7 +1159,7 @@ class Daemon:
         try:
             summary = await summarize(self.services, ops, self.policy)
         except ToolError:
-            if not granted or mode != "report":
+            if not granted or not reports:
                 raise
             summary = f"1 action(s): 1× {op}\n• {op} {many or ''}".rstrip()
         if granted:
@@ -1137,32 +1167,42 @@ class Daemon:
             k.active(profile, name, hash12)
             if self.permissions.mode(scope, op, raw_args) != mode:
                 raise ToolError("the owner is changing this watcher's permissions; try again")
-            if many and (mode == "report" or hiding):
+            if many and free and (mode == "report" or hiding):
                 if op == "gmail.trash" and k.items_today(profile, name, op) + many > perms.TRASH_PER_DAY:
                     raise ToolError(f"{perms.TRASH_PER_DAY} emails a day go to the trash without asking; leave the rest")
                 if k.items_today(profile, name) + many > perms.ITEMS_PER_DAY:
                     raise ToolError("the daily limit of emails changed without asking is reached; leave the rest")
             audit_id = k.audit_add(profile, name, h, run_id, step, op, summary, idem_key, "auto", amount, many or None,
-                                   [{x: i[x] for x in ("subject", "from")} for i in items], mode == "report")
-            if op in WRITE_OPS:
-                o["args"]["resolved"]["auto"] = True
-                try:
-                    await asyncio.wait_for(self._tg_lock.acquire(), 10)
-                except asyncio.TimeoutError:
-                    k.audit_update(audit_id, "failed", "busy")
-                    raise ToolError("another Telegram message is being sent; nothing was sent, try again shortly") from None
-                try:
+                                   {"as": perms.strongest(op, raw_args), "change": perms.change_text(op, raw_args), "items": [
+                                       {"subject": i["subject"], "who": f"from {i['from']}"} for i in items]} if items else
+                                   {"as": op, "items": [{"subject": str(raw_args.get("subject") or "(a reply)"), "who":
+                                                         f"to {raw_args.get('to') or 'the sender it answers'}"}]}
+                                   if op == "gmail.draft" else None, reports)
+            try:
+                if op in WRITE_OPS:
+                    o["args"]["resolved"]["auto"] = True
+                    try:
+                        await asyncio.wait_for(self._tg_lock.acquire(), 10)
+                    except asyncio.TimeoutError:
+                        k.audit_update(audit_id, "failed", "busy")
+                        raise ToolError("another Telegram message is being sent; nothing was sent, try again shortly") from None
+                    try:
+                        ok, text, extra = await execute(self.services, ops)
+                    finally:
+                        self._tg_lock.release()
+                else:
                     ok, text, extra = await execute(self.services, ops)
-                finally:
-                    self._tg_lock.release()
-            else:
-                ok, text, extra = await execute(self.services, ops)
+            except ToolError:
+                raise
+            except BaseException:
+                k.audit_update(audit_id, "unknown", "interrupted")
+                raise
             k.audit_update(audit_id, "done" if ok else "failed", text)
             if ok and op == "checkout.open":
                 st = await self.services.checkout_side.client.call({"cmd": "status"})
                 if st.get("session"):
                     k.checkout_sessions[st["session"]] = (profile, name, site)
-            if ok and w["risk"] == "high" and self.tg_store and not routine and mode != "report":
+            if ok and w["risk"] == "high" and self.tg_store and not routine and not reports:
                 self.tg_store.notice(f"🔴 Watcher “{name}” did: {summary.split(chr(10), 2)[min(1, summary.count(chr(10)))][:300]}")
             out = {"ok": ok, "text": text, "audit_id": audit_id, **extra} if ok else \
                 {"ok": False, "error": text, "audit_id": audit_id}
@@ -1737,8 +1777,13 @@ def main(argv: list[str] | None = None) -> None:
             return
         scope, changes = args.what[0], {}
         for pair in args.what[1:]:
+            if scope != "chat" and not sqlite3.connect(f"file:{home / 'watch.sqlite3'}?mode=ro", uri=True).execute(
+                    "SELECT 1 FROM watchers WHERE 'watcher:' || profile || '/' || name = ? AND status NOT IN "
+                    "('deleted', 'proposed')", (scope,)).fetchone():
+                sys.exit(f"no such watcher: {scope}")
             op, _, mode = pair.partition("=")
-            if not perms.SCOPE_RE.fullmatch(scope) or mode != "default" and mode not in perms.allowed_modes(scope, op, OPS, OPS):
+            if not perms.SCOPE_RE.fullmatch(scope) or mode != "default" and mode not in perms.allowed_modes(
+                    scope, op, OPS, {n for n in OPS if OPS[n].critical}):
                 sys.exit(f"{scope}: {pair}: not possible")
             if db.get(scope, op) != mode:
                 changes[op] = [db.get(scope, op), mode]

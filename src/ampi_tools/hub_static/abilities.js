@@ -9,6 +9,7 @@ async function abilities(scope, box) {
   const save = el("button", { class: "btn primary", type: "button", onclick: send }, "Save");
   const hint = el("span", { class: "note" });
   save.disabled = true;
+  const open = new Set([...box.querySelectorAll("details[open]")].map((d) => d.dataset.a));
   box.replaceChildren();
   function changes() {
     const c = {};
@@ -17,6 +18,7 @@ async function abilities(scope, box) {
   }
   function pick(op, mode, modes) {
     now[op] = want[op] = mode;
+    if (!modes.includes(mode)) modes = [...modes, mode];
     const s = el("select", { "aria-label": op }, ...modes.map((m) => {
       const o = el("option", { value: m }, WORDS[m]);
       if (m === mode) o.selected = true;
@@ -43,6 +45,8 @@ async function abilities(scope, box) {
       ...a.ops.sort((x, y) => y.write - x.write || (x.op < y.op ? -1 : 1)).map((o) =>
         line(o.op, o.label ? `${o.label} (${o.op})` : o.op, o.rule, o.mode, o.modes)));
     if (a.never.length) d.append(el("p", { class: "note" }, `Never here: ${a.never.join(", ")}`));
+    d.dataset.a = a.adapter;
+    d.open = open.has(a.adapter);
     box.append(d);
   }
   box.append(el("div", { class: "bar" }, save, hint));
@@ -54,7 +58,10 @@ async function abilities(scope, box) {
       const r = await api("POST", "/api/set", { scope, changes: c });
       await abilities(scope, box);
       say([r.changed ? `${r.changed} made stricter.` : "", r.approval ? `Request #${r.approval} waits for your Approve in Telegram (30 minutes), then reload.` : ""].join(" ").trim());
-    } catch (e) { say(e.message, true); save.disabled = false; }
+    } catch (e) {
+      await abilities(scope, box).catch(() => { save.disabled = false; });
+      say(e.message, true);
+    }
   }
 }
 if (location.pathname === "/abilities") {

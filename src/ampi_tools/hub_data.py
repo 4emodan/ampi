@@ -30,12 +30,28 @@ def rule(d: Any, scope: str, op: str) -> str:
             return "never for watchers"
         if not ws.is_write(op):
             return "reads freely"
-        return "labels up to 25 emails freely" if op == "gmail.label" else "asks, unless allowed for this watcher"
+        if op == "gmail.label":
+            return "its AI step labels up to 25 emails freely if you allowed all; moving out of the inbox counts as archiving"
+        if op in perms.REPORT_ONLY:
+            return "asks, unless allowed for this watcher; \"report\" only changes how you hear of it"
+        if op == "gmail.trash":
+            return "asks, unless allowed; with \"report\": 25 a request, 50 a day, new unimportant mail, never about security"
+        return "asks, unless allowed for this watcher"
     kind = op.split(".", 1)[0]
     if op in PRIVATE_ONLY or kind == "signin":
-        return "your private chat only; " + ("asks" if d.policy.critical(op) else "part of a task you approve")
+        return "your private chat only; " + ("asks" if d.policy.critical(op) else "doesn't ask by itself")
     if kind == "telegram" and ws.is_write(op):
         return "asks, unless you allowed the chat"
+    if kind in ("igweb", "thweb"):
+        return "social conversations only; changes ask"
+    if op in ("youtube.ids", "youtube.show", "gmail.meta"):
+        return "Ampi's own checks only"
+    if op == "gmail.download":
+        return "your private chat only"
+    if kind == "wolt" and ws.is_write(op):
+        return "your chat freely; elsewhere asks"
+    if op in ("phone.status", "phone.alarms", "phone.cancel"):
+        return "your private chat only"
     if kind == "phone":
         return "your chat freely; groups ask"
     if op in ALWAYS_CRITICAL:
@@ -186,6 +202,8 @@ def answer(d: Any, cmd: str, req: dict) -> dict:
                  for r in d.approvals.recent(60) if r.get("kind") != "watch.action"
                  and "info." not in (r.get("ops") or "")]
         acts = [{**a, "args_summary": d._mask_obj((a["args_summary"] or "")[:600], "all"),
-                 "result": d._mask_obj((a["result"] or "")[:200], "all")} for a in (d.keeper.activity() if d.keeper else [])]
+                 "result": d._mask_obj((a["result"] or "")[:200], "all"),
+                 "detail": d._mask_obj([f"{i['subject']} · {i['who']}" for i in
+                                        (json.loads(a["detail"] or "null") or {}).get("items", [])], "all")} for a in (d.keeper.activity() if d.keeper else [])]
         return {"ok": True, "watchers": acts, "chat": asked, "changes": d.permissions.log(50)}
     raise ToolError("unknown command")

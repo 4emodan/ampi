@@ -35,7 +35,7 @@ tools = ["Bash(gmail:*)"]
 '''
 SCOPE = "watcher:personal/sorter"
 AGENT_PID = 777
-SORTING = ("label", "archive", "mark_read", "mark_unread", "star", "unstar", "untrash", "trash")
+SORTING = ("label", "archive", "mark_read", "mark_unread", "star", "untrash", "trash")
 
 
 class Mail(FakeGmailServer):
@@ -183,16 +183,16 @@ def test_failed_and_interrupted_actions_are_reported(env, tmp_path):
     d, gm, store = env
     allow(d)
     d.keeper.audit_add("personal", "sorter", "h", None, "think", "gmail.trash", "x\n• y", None, "auto", None, 2,
-                       [{"subject": "S", "from": "F"}], True)
+                       {"as": "gmail.trash", "items": [{"subject": "S", "who": "F"}]}, True)
     k = Keeper(tmp_path / "w.sqlite3", clock=lambda: time.time() + 1000)
     (due,) = k.due_reports()
     assert "not known" in report.texts(due[1], due[2])[0]
 
 
 def test_outside_text_makes_no_links():
-    row = {"op": "gmail.star", "status": "done", "items": 1, "detail": json.dumps([{"subject": "see https://evil.example/x\n@bot", "from": "a@evil.example"}])}
+    row = {"op": "gmail.star", "status": "done", "items": 1, "detail": json.dumps({"items": [{"subject": "see https://evil.example/x\n@bot /start", "who": "a@evil.example"}]})}
     (t,) = report.texts("w", [row])
-    assert "evil.example" not in t and "https://" not in t and "\n@" not in t
+    assert "evil.example" not in t and "https://" not in t and "@bot" not in t and "/start" not in t
 
 
 def test_unknown_processes_ask_for_every_change(env):
@@ -318,3 +318,95 @@ def test_bad_rows_are_never_looser(env):
     d.permissions.db.execute("INSERT INTO settings VALUES (?, 'gmail.star', 'weird', 0)", (SCOPE,))
     assert d.permissions.get(SCOPE, "gmail.star") == "ask"
     assert files(SORTER)
+
+
+def due(d, store):
+    d.keeper.clock = lambda: time.time() + 200
+    d.send_reports()
+    return "".join(n["text"] for n in store.unsent_notices())
+
+
+@pytest.mark.parametrize("op,args", [("gmail.unstar", {}), ("gmail.label", {"remove": ["STARRED"]}), ("gmail.label", {"remove": ["important"]})])
+def test_what_protects_mail_isnt_taken_off_without_asking(env, op, args):
+    d, gm, _ = env
+    for grant in (False, True):
+        allow(d) if not grant else d.keeper.add_grant("personal", "sorter", d.keeper.watcher("personal", "sorter")["hash"], "think", op, {})
+        assert agent(d, op, ids=["star"], **args)["approval"] and not writes(gm)
+
+
+@pytest.mark.parametrize("op,args", [("gmail.label", {"add": ["CATEGORY_PROMOTIONS"]}), ("gmail.mark_read", {}), ("gmail.label", {"remove": ["UNREAD"]})])
+def test_security_mail_isnt_moved_aside(env, op, args):
+    d, gm, _ = env
+    allow(d)
+    assert not agent(d, op, ids=["sec"], **args)["ok"] and not writes(gm)
+    assert agent(d, op, ids=["n1"], **args)["ok"]
+
+
+@pytest.mark.parametrize("subject", ["Ваш код: 123456", "Your code is 123456", "Your GitHub launch code", "Forwarding address added",
+                                     "API key created", "Email address changed", "SIM swap request", "Вход в аккаунт", "Withdrawal request"])
+def test_security_subjects(subject):
+    assert perms.SECURITY_RE.search(subject)
+
+
+@pytest.mark.parametrize("subject", ["Входные билеты на концерт", "Weekly digest", "Your order has shipped", "Summer sale", "Чек за покупку"])
+def test_ordinary_subjects(subject):
+    assert not perms.SECURITY_RE.search(subject)
+
+
+def test_emoji_reports_fit_telegram():
+    items = [{"subject": "\U0001f600" * 90, "who": "from " + "\U0001f600" * 60} for _ in range(50)]
+    out = report.texts("w", [{"op": "gmail.trash", "status": "done", "items": 50, "detail": json.dumps({"as": "gmail.trash", "items": items})}])
+    assert all(report.units(t) <= 3900 for t in out) and sum(t.count("•") for t in out) == 50
+
+
+def test_archiving_by_label_is_reported_as_archiving(env):
+    d, gm, store = env
+    allow(d)
+    assert agent(d, "gmail.label", ids=["n1"], add=["Receipts"], remove=["INBOX"])["ok"]
+    t = due(d, store)
+    assert "Archived: 1" in t and "added Receipts; removed INBOX" in t
+
+
+def test_routine_labels_are_reported_once_any_report_is_on(env):
+    d, gm, store = env
+    allow(d, ops=("trash",))
+    assert agent(d, "gmail.label", ids=["n1"], remove=["INBOX"])["ok"]
+    assert "Archived: 1" in due(d, store)
+
+
+def test_drafts_are_reported_with_their_recipient(env):
+    d, gm, store = env
+    allow(d, ops=("draft",))
+    assert agent(d, "gmail.draft", body="x" * 5000, to="who@y.example", subject="Hi")["ok"]
+    t = due(d, store).replace("\u2060", "")
+    assert "who@y.example" in t and "Hi" in t
+
+
+def test_payments_off_stops_payments(env):
+    d, *_ = env
+    d.permissions.apply("chat", {"payment.*": ["default", "off"], "info.*": ["default", "off"]}, "t")
+    assert d.permissions.mode("chat", "checkout.pay") == d.permissions.mode("chat", "checkout.fill") == "off"
+    assert d.permissions.mode("chat", "checkout.open") == "default"
+
+
+def test_ask_isnt_offered_where_the_answer_is_needed():
+    crit = {n for n in OPS if OPS[n].critical}
+    for op in ("info.collect", "checkout.snapshot", "checkout.open", "checkout.click"):
+        assert "ask" not in perms.allowed_modes("chat", op, OPS, crit) and "ask" not in perms.allowed_modes(SCOPE, op, OPS, crit)
+    assert "ask" in perms.allowed_modes("chat", "checkout.pay", OPS, crit)
+
+
+def test_a_second_request_keeps_the_first(env):
+    d, *_ = env
+    hub_data.set_(d, SCOPE, {"gmail.star": ["default", "report"]})
+    hub_data.set_(d, SCOPE, {"gmail.archive": ["default", "report"]})
+    (item,) = pending(d)
+    assert "gmail.star" in item["summary"] and "gmail.archive" in item["summary"]
+    call(d, {"cmd": "watch.delete", "profile": "personal", "name": "sorter"})
+    assert not pending(d)
+
+
+def test_tools_that_run_other_commands_cant_be_proposed(env):
+    d, *_ = env
+    out = propose(d, SORTER.replace('"Bash(gmail:*)"', '"Bash(find:*)"'), name="sorter")
+    assert not out["ok"] and "find" in out["error"]

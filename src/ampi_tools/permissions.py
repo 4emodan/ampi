@@ -26,8 +26,8 @@ from .todoist import ToolError
 
 RANK = {"off": 0, "ask": 1, "default": 2, "report": 3}
 # Reach nobody else and can be undone (trash: for 30 days).
-REPORTABLE = frozenset({"gmail.label", "gmail.archive", "gmail.mark_read", "gmail.mark_unread", "gmail.star", "gmail.unstar",
-                        "gmail.untrash", "gmail.trash", "gmail.draft"})
+REPORTABLE = frozenset({"gmail.label", "gmail.archive", "gmail.mark_read", "gmail.mark_unread", "gmail.star", "gmail.untrash",
+                        "gmail.trash", "gmail.draft"})
 REPORT_ONLY = frozenset({"todoist.add", "todoist.move"})  # reported when the watcher may do it; never allowed by this alone
 MAX_ITEMS = 25          # emails per request without asking
 TRASH_PER_DAY = 50      # emails per watcher
@@ -51,9 +51,11 @@ FLOW_RE = re.compile(r"flow:[a-z0-9][a-z0-9_-]{0,39}")
 # Mail an outside text would like to see gone: kept in the inbox when an AI step wants it hidden without asking.
 SECURITY_RE = re.compile(
     r"secur|sign(ed)?[ -]?in|sign-?on|log(ged)?[ -]?in|password|passcode|passkey|verif|(one[- ]time|access|login|"
-    r"confirmation) code|\botp\b|2fa|two[- ]factor|2[- ]step|suspicious|unusual|unauthori[sz]|fraud|new device|recover|"
-    r"account (was|has|will|is)|безопасност|парол|вход|подтвер|подозрительн|мошенни|восстановл|"
-    r"ασφ[αά]λει|κωδικ|σύνδεση|επαλήθευσ|ύποπτ", re.I)
+    r"confirmation|launch) code|\botp\b|\byour\b.{0,25}\bcode\b|\bcode\b.{0,12}\d{4}|\d{4,8}\b.{0,15}\bcode|2fa|two[- ]factor|"
+    r"2[- ]step|suspicious|unusual|unauthori[sz]|fraud|new device|device (was |is |has been )?(added|linked)|recover|"
+    r"account (was|has|will|is)|(critical|account|bank) alert|forwarding|api key|(address|number|phone|email) (was |has been )?chang|"
+    r"sim swap|withdraw|new payee|безопасност|парол|вход в |входа|вошли|код.{0,12}\d{4}|ваш.{0,12}\bкод|подтвержд|подозрительн|"
+    r"мошенни|восстановл|ασφ[αά]λει|κωδικ|σύνδεση|επαλήθευσ|ύποπτ", re.I)
 
 
 def watcher_scope(profile: str, name: str) -> str:
@@ -74,8 +76,31 @@ def effects(op: str, args: dict) -> list[str]:
     return out
 
 
+def _label(op: str, args: dict, key: str) -> set[str]:
+    return {str(x).strip().upper() for x in args.get(key) or []} if op == "gmail.label" else set()
+
+
 def hides(op: str, args: dict) -> bool:
-    return bool({"gmail.archive", "gmail.trash"} & set(effects(op, args)))
+    return bool({"gmail.archive", "gmail.trash", "gmail.mark_read"} & set(effects(op, args))) \
+        or any(x.startswith("CATEGORY_") for x in _label(op, args, "add"))
+
+
+def unguards(op: str, args: dict) -> bool:
+    """Takes away what keeps an email from being hidden (check_hiding)."""
+    return "gmail.unstar" in effects(op, args) or "IMPORTANT" in _label(op, args, "remove")
+
+
+def strongest(op: str, args: dict) -> str:
+    """What the report calls it."""
+    found = effects(op, args)
+    return next((e for e in ("gmail.trash", "gmail.archive", "gmail.unstar", "gmail.star", "gmail.mark_read", "gmail.mark_unread",
+                             "gmail.untrash") if e in found), op)
+
+
+def change_text(op: str, args: dict) -> str:
+    if op != "gmail.label":
+        return ""
+    return "; ".join(f"{w} {', '.join(map(str, args[k]))}" for k, w in (("add", "added"), ("remove", "removed")) if args.get(k))
 
 
 def allowed_modes(scope: str, op: str, ops: Any, critical: Any) -> list[str]:
@@ -88,7 +113,10 @@ def allowed_modes(scope: str, op: str, ops: Any, critical: Any) -> list[str]:
     if op not in ops or (scope != "chat" and op in ws.NOT_FOR_WATCHERS):
         return []
     modes = ["default", "off"]
-    if ws.is_write(op) or op in critical:
+    # (An approved action's result goes to the owner, not back to Ampi: no use for the steps of a checkout, or reading.)
+    kind = op.split(".", 1)[0]
+    if kind != "info" and (op in critical if kind == "checkout" else ws.is_write(op) or op in critical) \
+            and not (kind == "checkout" and scope != "chat"):
         modes.insert(1, "ask")
     if scope != "chat" and op in REPORTABLE | REPORT_ONLY:
         modes.append("report")
@@ -114,7 +142,9 @@ class Permissions:
 
     def mode(self, scope: str, op: str, args: dict | None = None) -> str:
         """The strictest of everything the action falls under; "report" only if all of it is."""
-        if self.get(scope, op.split(".", 1)[0] + ".*") == "off":
+        kinds = {op.split(".", 1)[0]} | {"checkout.pay": {"payment"}, "checkout.flow": {"signin"},
+                                         "checkout.fill": {"info"}}.get(op, set())
+        if any(self.get(scope, f"{k}.*") == "off" for k in kinds):
             return "off"
         return min((self.get(scope, e) for e in effects(op, args or {})), key=RANK.__getitem__)
 
