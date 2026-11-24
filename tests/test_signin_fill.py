@@ -773,6 +773,11 @@ def test_links_that_say_they_do_something(text):
     assert oc.commits(g(text, kind="link")) in ("order", "commit")
 
 
+@pytest.mark.parametrize("kw", [{"text": "Next: •••"}, {"text": "Classes", "kind": "link", "dest": f"{SITE}/classes/•••"}, {"text": "Next", "label": "•••"}, {"text": "Next", "ident": "•••"}])
+def test_what_was_cut_out_of_it_is_not_known(kw):
+    assert oc.commits(g(**{"kind": "button", **kw})) == "commit"
+
+
 def test_a_price_next_to_a_plain_link():
     for text in ("Life drawing, Fri 18:00 - €45", "Pen €20", "Drawing"):
         assert oc.commits(g(text, kind="link", priced=True)) is None
@@ -1296,7 +1301,7 @@ def test_ampi_hears_only_known_words(env, tmp_path):
             return {"ok": False, "code": "page", "error": "x\u202e" + "y" * 900}
     _, r = run_op(env, tmp_path, service=Odd(), password_ref="f0:2")
     text = r if isinstance(r, str) else r["error"]
-    assert "not signed in" in text and "\u202e" not in text and len(text) < 300
+    assert "not signed in" in text and "\u202e" not in text and len(text) < 400
     _, r = run_op(env, tmp_path, press_ref="f0:3")
     assert "--user" in (r if isinstance(r, str) else r["error"])
 

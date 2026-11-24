@@ -29,7 +29,9 @@ final class Hosts {
             + "curve.com viva.com binance.com coinbase.com kraken.com bybit.com okx.com bitstamp.net "
             + "crypto.com metamask.io interactivebrokers.com interactivebrokers.ie degiro.eu degiro.nl nordnet.fi nordnet.se "
             + "etoro.com trading212.com nordea.fi nordea.com op.fi aktia.fi handelsbanken.se handelsbanken.fi "
-            + "swedbank.se seb.se").split(" "));
+            + "swedbank.se seb.se zoho.eu tutanota.com hey.com mailbox.org posteo.de aol.com "
+            + "bunq.com suomi.fi").split(" "));
+    private static final List<String> NOT_LABELS = List.of("google", "yahoo", "yandex", "hotmail", "gov", "govt", "gob", "gouv");
     private static final Pattern NOT_WORDS = Pattern.compile("bank|banque|banco|pankki|sparkasse");
     static final int MAX = 5;
 
@@ -73,6 +75,7 @@ final class Hosts {
 
     static boolean refused(String host) {
         for (String not : NOT) if (host.equals(not) || host.endsWith("." + not)) return true;
+        for (String label : host.split("\\.")) if (NOT_LABELS.contains(label)) return true;
         int last = host.lastIndexOf('.');
         return last > 0 && NOT_WORDS.matcher(host.substring(0, last)).find();
     }

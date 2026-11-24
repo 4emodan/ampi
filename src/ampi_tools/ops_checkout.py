@@ -248,6 +248,8 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
         return "order"
     origin = str(g.get("frame_origin") or "?")
     dest = str(g.get("dest") or "")
+    if any("•••" in str(x) for x in (*raw, g.get("label"), g.get("ident"), dest)):
+        return "commit"  # something was cut out of it: what it really says isn't known here
     if g.get("submits") and dest and not dest.startswith((origin + "/", origin + "?")) and dest != origin:
         return "commit"  # sends what is entered to another site
     money = bool(g.get("priced") or money_around(side, g.get("totals"), g.get("frames")))
@@ -995,7 +997,16 @@ async def _resolve_submit(s: Services, a: dict) -> dict:
                          **({"box": box, "checked": b.get("checked") is True} if box else {}),
                          **({"set": b["set"], "option": a["option"], "was": side.scrub(clean(b.get("was"), 60))} if opt else {}),
                          **({"pays": True} if still and pays else {}),
+                         "leads": _leads(dest, str(b.get("url") or "")),
                          "expires": side.clock() + REQUEST_TTL}}
+
+
+def _leads(dest: str, here: str) -> str:
+    """Where a press goes on the same site, for the owner: its path and what is asked for in it."""
+    if not dest or dest.split("#")[0] == here.split("#")[0]:
+        return ""
+    u = urllib.parse.urlsplit(dest)
+    return clean(u.path + ("?" + u.query if u.query else ""), 200)
 
 
 def _money(t: dict) -> bool:
@@ -1043,6 +1054,8 @@ async def describe_submit(s: Services, a: dict) -> str:
              f"Page: {clean(r.get('title'), 100)}", f"For (Ampi's words): {clean(r.get('what'), 200)}"]
     if r.get("dest_origin") and r["dest_origin"] != r.get("origin"):
         lines.append(f"⚠ Sends it to another site: {r['dest_origin']}")
+    elif r.get("leads"):
+        lines.append(f"Leads to: {clean(r['leads'], 200)}")
     if r.get("pays"):
         lines.append("⚠ It says something about paying")
     if r.get("form"):

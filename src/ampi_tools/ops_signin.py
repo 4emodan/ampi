@@ -20,7 +20,7 @@ from .todoist import ToolError
 
 SOCKET = "/run/ampi-signin.sock"
 TIMEOUT = 106  # the service ends by itself after 100 s; Claude Code's commands after 120 s
-FILL_TIMEOUT, CODE_TIMEOUT = 200, 250  # the phone, and the browser before and after it (the skill runs it with a longer timeout)
+FILL_TIMEOUT, CODE_TIMEOUT = 200, 235  # the phone, and the browser before and after it (the skill runs it with a longer timeout)
 REF_RE = re.compile(r"f\d{1,3}:\d{1,6}")
 HOST_RE = re.compile(r"(?=.{4,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])")
 AGAIN = "try again later"
@@ -52,7 +52,8 @@ WORDS = {
                    "one (a sign-in over two sites: the owner saves both addresses with the login)",
     "refused_site": "saved logins aren't used on that site (mail, sign-in providers, banks and the like): the owner signs in there",
     "no_signin": "the phone only gives a code for a login it unlocked in the last 10 minutes, for a site of that login (at most three "
-                 "times): start again with `signin fill`",
+                 "times). Start again with `signin fill`; if this page is on another address than the login was saved for, the owner adds that "
+                 "address to it in the app first",
     "no_session": "no session of that site was given: the owner signs in there in Firefox, taps the Ampi button there (Give, then Send to the "
                   "Ampi app), and asks again within 10 minutes",
     "unknown": "the browser stopped answering while the login was being filled in: it MAY have been sent. Look at the page (`checkout "
@@ -135,7 +136,7 @@ def _client(s: Services) -> Any:
 def _why(r: dict, what: str = "login") -> str:
     code = r.get("code")
     if code == "page":  # the controller's own words about the form
-        said = clean(r.get("error"), 200) or "the page isn't as expected"
+        said = clean(r.get("error"), 300) or "the page isn't as expected"
         return said + {"sent": f". The {what} WAS sent, and it may have worked: look with `checkout snapshot`, don't just try again",
                        "filled": ". Something was filled in already"}.get(r.get("phase"), "")
     return WORDS.get(code, "something went wrong") if isinstance(code, str) else "something went wrong"
@@ -174,7 +175,7 @@ async def _then(s: Services, side: Any, st: dict, done: str) -> str:
     from .ops_checkout import _show
 
     try:
-        page = await side.client.call({"cmd": "snapshot", "session": st["session"]}, timeout=60)
+        page = await side.client.call({"cmd": "snapshot", "session": st["session"]}, timeout=40)
         shown = await _show(s, page)
     except ToolError as e:
         shown = f"(The page can't be read right now: {e}. Don't sign in again; look with `checkout snapshot`.)"

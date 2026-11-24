@@ -33,7 +33,8 @@ signin test example.com                                  only tests: the phone u
    when there is one box per digit); leave `--press` out if the page sends it by itself. Anything else you do first, even a click,
    ends that. Only these may come in between, through `checkout submit` (it asks): "Send code", "Try another way", "Use authenticator
    app" and the like; and a plain click on a cookie banner or on which way the code should come. Close banners before signing in.
-   A wrong code: `signin code` again, in the same field (three in all). Password and code in one form: `signin fill … --code REF`.
+   A wrong code: `signin code` again, in the same field (three in all). Password and code in one form: `signin fill … --code REF`
+   (also with `timeout: 290000`).
 5. "Approve it in your app" / "check your phone": tell the owner to open the app themselves and that it must name that site, then look
    again with `checkout snapshot` for up to 3 minutes. **Never pass on a number to pick or type there.**
 
@@ -48,8 +49,9 @@ signin test example.com                                  only tests: the phone u
   Firefox). When they say it's done: no checkout session open, `signin session example.com` (with the Bash tool's `timeout: 240000`;
   `--engine lightpanda` where the site needs that one), and they confirm with a fingerprint. From then on it is their account, as after
   `signin fill`. A session is good for 10 minutes and once. If the site doesn't take it (it shows a sign-in page): say so, and stop.
-- Open the site's plain sign-in page (or its start page): after an address with another one in it (`?next=…`), or a settings,
-  security or payment page, no code can be filled in.
+- For a site that asks for codes: in a **new** session open its plain sign-in page (or its start page, then its own "Log in"), and do
+  nothing else there before `signin fill`: no other pages, no typing. After an address with another one in it (`?next=…`) no code can be
+  filled in.
 - A code that confirms a payment, an order or a change of the account is never for you: the owner does that themselves.
 - The browser forgets everything when the session closes: sign in once per task, and `checkout close` at the end.
 - **Never ask the owner to send a password or a one-time code in the chat**, and don't accept one: it belongs in the app.
