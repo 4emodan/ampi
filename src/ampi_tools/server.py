@@ -669,7 +669,7 @@ class Daemon:
             note = "" if op.endswith(".*") or op.startswith("flow:") else f" ({cards.note_of(op)})"
             lines.append(f"• {op}: {old} → {new}{note}")
         summary = "\n".join(lines)
-        if len(summary) > 2800:
+        if len(summary) > 2800 or len(changes) > 60:
             raise ToolError("too many changes at once; save a few at a time")
         for i in replaced:
             self.approvals.claim(i, "expired")
@@ -1137,18 +1137,19 @@ class Daemon:
         # `fits` / declared actions keep their own rules; "ask each time" watchers still ask.
         mode = self.permissions.mode(scope, op, raw_args)
         before = granted
+        opted = "report" in self.permissions.all(scope).values()  # then the checks cover what was approved with it too
         many = len(id_list(o["args"])) if op in perms.REPORTABLE and op != "gmail.draft" else 0
         if mode == "report" and op in perms.REPORTABLE and op not in self.policy.require_approval:
             granted = granted or (many <= perms.MAX_ITEMS and self.tg_store is not None)
         by_report = granted and not before
-        if agent and not fits and perms.unguards(op, raw_args):
+        if (agent or by_report) and (opted or not fits) and perms.unguards(op, raw_args):
             granted = by_report = False
         routine = (agent and not granted and not perms.unguards(op, raw_args) and not declared and op in AGENT_ROUTINE and w["mode"] == "all"
                    and op not in self.policy.require_approval and len(id_list(o["args"])) <= AGENT_ROUTINE_MAX)
         granted = (granted or routine) and mode != "ask"
-        free = by_report or routine or (agent and not fits)  # not among the actions approved with the watcher
+        free = by_report or routine or (agent and (opted or not fits))  # not just what was approved with the watcher
         hiding = free and perms.hides(op, raw_args)
-        reports = mode == "report" or (routine and "report" in self.permissions.all(scope).values())
+        reports = mode == "report" or (opted and (agent or routine))
         items: list[dict] = []
         if granted and many and (reports or hiding):
             if many > perms.MAX_ITEMS and free:

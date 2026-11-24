@@ -54,7 +54,7 @@ SECURITY_RE = re.compile(
     r"confirmation|launch) code|\botp\b|\byour\b.{0,25}\bcode\b|\bcode\b.{0,12}\d{4}|\d{4,8}\b.{0,15}\bcode|2fa|two[- ]factor|"
     r"2[- ]step|suspicious|unusual|unauthori[sz]|fraud|new device|device (was |is |has been )?(added|linked)|recover|"
     r"account (was|has|will|is)|(critical|account|bank) alert|forwarding|api key|(address|number|phone|email) (was |has been )?chang|"
-    r"sim swap|withdraw|new payee|безопасност|парол|вход в |входа|вошли|код.{0,12}\d{4}|ваш.{0,12}\bкод|подтвержд|подозрительн|"
+    r"sim swap|withdraw|new payee|безопасност|парол|\bвход(а|е)?\b|вошли|код.{0,12}\d{4}|ваш.{0,12}\bкод|подтвер[дж]|подозрительн|"
     r"мошенни|восстановл|ασφ[αά]λει|κωδικ|σύνδεση|επαλήθευσ|ύποπτ", re.I)
 
 

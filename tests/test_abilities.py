@@ -343,7 +343,7 @@ def test_security_mail_isnt_moved_aside(env, op, args):
 
 
 @pytest.mark.parametrize("subject", ["Ваш код: 123456", "Your code is 123456", "Your GitHub launch code", "Forwarding address added",
-                                     "API key created", "Email address changed", "SIM swap request", "Вход в аккаунт", "Withdrawal request"])
+                                     "API key created", "Email address changed", "SIM swap request", "Вход в аккаунт", "Новый вход", "Выполнен вход с нового устройства", "Подтвердите адрес", "Withdrawal request"])
 def test_security_subjects(subject):
     assert perms.SECURITY_RE.search(subject)
 
@@ -410,3 +410,18 @@ def test_tools_that_run_other_commands_cant_be_proposed(env):
     d, *_ = env
     out = propose(d, SORTER.replace('"Bash(gmail:*)"', '"Bash(find:*)"'), name="sorter")
     assert not out["ok"] and "find" in out["error"]
+
+
+def test_declared_actions_are_checked_too_once_reports_are_on(env):
+    d, gm, store = env
+    toml = SORTER.replace('tools = ["Bash(gmail:*)"]', 'tools = ["Bash(gmail:*)"]\nactions = [{ op = "gmail.label" }, { op = "gmail.archive" }]')
+    h = activate(d, toml, name="sorter")
+    d.runs.origin_of = lambda pid: f"watcher:personal/sorter@{h[:12]}#think"
+    assert "approval" not in agent(d, "gmail.archive", ids=["sec"])  # as approved
+    allow(d, ops=("label", "trash"))
+    n = len(writes(gm))
+    assert agent(d, "gmail.label", ids=["imp"], remove=["IMPORTANT"])["approval"]
+    assert not agent(d, "gmail.archive", ids=["sec"])["ok"]
+    assert len(writes(gm)) == n
+    assert agent(d, "gmail.label", ids=["n1"], remove=["INBOX"])["ok"]
+    assert "Archived: 1" in due(d, store)
