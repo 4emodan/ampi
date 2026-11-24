@@ -434,7 +434,12 @@ def test_a_total_that_cannot_be_read_is_not_guessed(tmp_path):
     ("Total €99.00\nTotal savings: €120.00\nTotal tax €200.00", "99.00"), ("Total after discount €99.00", "99.00"), ("Total VAT included €99", "99.00"),
     ("Total savings: €12.00\nYou pay: €99.00", None), ("Total tax €20.00", None), ("Total excl. VAT €80", None), ("Total per person €8", None),
     ("Total €50.00\nGrand total 1234.00", None), ("Order total\nIncl. VAT €20.00\n€99.00", None), ("Total €50\nTotal 3 x €40", None),
-    ("Total €50\nTotal weight: 2.5 kg\nTotal items: 3", "50.00"),
+    ("Total €50\nTotal weight: 2.5 kg\nTotal items: 3", "50.00"), ("Total €50\nTotal weight: 2.5 kg\n3 items in total", "50.00"),
+    ("Total 85 incl. VAT €13.71", None), ("Summa 85 sis. alv 16,45 €", None), ("Total: 85 (incl. delivery €4.90)", None),
+    ("Total (incl. fees €4.90): $1,234.00", None), ("Total CHF 1'234.00\nTotal tip €2.00", None), ("Total fees €4.00\nYou pay €104.00", None),
+    ("Total €100.00 excl. VAT\nAmount payable €124.00", None), ("Total: 12 payments of €99.00", None), ("Total due now €4", None),
+    ("Total loyalty balance €4", None), ("Total for 2 nights: €200", "200.00"), ("Order total (3 items)\n€50.00", "50.00"),
+    ("Grand total EUR 1 234,50", "1234.50"), ("Total €50.00\nTotal extras €8", "50.00"), ("Total amount payable: 50 €", "50.00"),
 ])
 def test_the_total_that_is_charged(text, total):
     from ampi_tools import checkout as co

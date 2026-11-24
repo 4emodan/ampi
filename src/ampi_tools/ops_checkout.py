@@ -282,10 +282,17 @@ def commits(g: dict, side: "CheckoutSide | None" = None) -> str | None:
 
 # A total line that isn't the amount charged; what it says it includes (VAT, delivery) doesn't count for that.
 TOTAL_EXCLUDE = re.compile(r"sub|\bvat\b|alv|\btax|vero|mwst|moms|shipping|delivery|toimitus|versand|discount|alennus|rabatt|"
-                           r"sav(e|ed|ings?)\b|säästä|\bexcl|\bbefore\b|\bwithout\b|per (person|night|item|month)", re.I)
+                           r"sav(e|ed|ings?)\b|säästä|\bfees?\b|\bextras?\b|cash ?back|deposit|\btips?\b|\bexcl|\bbefore\b|\bwithout\b|per (person|night|item|month)", re.I)
 _INCLUDED = re.compile(r"\b(incl\w*|inkl\w*|inc|sis\w*|with|after)\b\.?:?.{0,25}?\b(discounts?|alennu\w*|vat|tax(es)?|alv|mwst|moms|gst|btw|iva|tva|fees?|"
                        r"shipping|delivery|toimitus\w*|versand\w*)\b|\b(vat|tax(es)?|alv|mwst|moms|gst|btw|iva|tva|shipping|delivery)\b\.? "
                        r"(incl\w*|inkl\w*|sis\w*)", re.I)
+# What may stand between "total" and the amount charged; any other word may make it something else.
+TOTAL_KNOWN = frozenset("""
+    grand order orders total totals totalt totalsumma sum summa summan summe gesamt gesamtsumme gesamtbetrag amount to pay payable due price cost
+    yhteensä maksettava maksettavaa hinta tilaus tilauksen loppusumma att betala pris zu zahlen preis bestellung incl including inkl inklusive inc
+    sis sisältäen vat tax taxes alv mwst moms gst item items product products article articles tuote tuotetta tuotteet kpl st stk artikel varor
+    night nights yötä day days person persons people guest guests adult adults ticket tickets henkilöä for of your the is in a all and ja och und
+    cart basket bag checkout booking varaus shipping delivery eur euro euros usd gbp sek nok dkk pln chf czk huf isk cad aud nzd jpy kr zł""".split())
 REF_RE = re.compile(r"f\d{1,3}:\d{1,5}")
 
 
@@ -842,14 +849,15 @@ def grand_total(totals: list[dict], currency: str, card_currency: str) -> Decima
     best = None
     for t in totals:
         cur = str(t.get("currency") or "").upper()
-        if TOTAL_EXCLUDE.search(_INCLUDED.sub(" ", str(t.get("label") or ""))):
+        label = _INCLUDED.sub(" ", str(t.get("label") or "")).lower()
+        if TOTAL_EXCLUDE.search(label):
             continue
-        if cur == "?":  # a number without a readable currency on a total line: it may be the amount charged
-            return None
+        if cur == "?" or any(w not in TOTAL_KNOWN for w in re.findall(r"[^\W\d_]+", label)):
+            return None  # a number without a readable currency, or with other words: it may be the amount charged, or something else
         if cur == "KR" and card_currency in ("SEK", "NOK", "DKK"):
             cur = card_currency
         if cur != currency:
-            continue
+            return None  # it may be charged in that one
         try:
             amount = Decimal(str(t.get("amount")))
         except InvalidOperation:  # it may be the amount charged

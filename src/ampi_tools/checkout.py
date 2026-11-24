@@ -123,6 +123,10 @@ POST_CUR = re.compile(rf"(?:[.,][-–—]{{1,2}})?\s*\(?({_CUR}|{_CODE})")
 NOT_MONEY = re.compile(r"\s*(?:%|(?:kg|gr?|km|c?m|mm|min|hrs?|h|hours?|days?|nights?|items?|pcs|pieces?|points?|pts|products?|articles?|"
                        r"persons?|people|guests?|adults?|tickets?|seats?|reviews?|tuotetta|tuotteita|kpl|yötä|henkilöä|artikel|st|stk|"
                        r"товар\w*|шт)\b)", re.I)
+# Around an amount: a part of the price, a price per something, a price without something, or a piece of a longer number.
+PART = re.compile(r"\s*(?:/|per\b|each\b|pro\b|p\.?p\b|a month|monthly|x\b|×|\*|\(?\s*(?:excl|ex\.? ?(?:vat|tax)|before|without|plus\b|\+))", re.I)
+PARTS = re.compile(r"(?:(?<![^\W\d_])[x×*]|\b(?:payments?|instal\w*|rates?|months?|raten?|erää)(?: of)?)\s*$", re.I)
+COUNTED = re.compile(r"\b(items?|products?|articles?|quantity|qty|people|persons?|guests?|nights?|tickets?|pcs|tuotteita|määrä|artikel) ?: ?$", re.I)
 DATE_OR_TIME = re.compile(r"\d{1,2}\.(?:0?\d|1[0-2])\.(?:20)?\d\d|\d{1,2}:\d\d")
 CAPTCHA_FRAME = re.compile(r"hcaptcha\.com/captcha/.*frame=challenge|recaptcha/(api2|enterprise)/bframe|"
                            r"challenges\.cloudflare\.com|captcha-delivery\.com|arkoselabs\.com|funcaptcha", re.I)
@@ -196,13 +200,15 @@ def read_amounts(line: str, start: int = 0) -> list[tuple[int, str, str]]:
         pre, post = PRE_CUR.search(before[:-1] if dot else before), POST_CUR.match(after)
         head, tail = before[:pre.start()] if pre else before, after[post.end():] if post else after
         glued = (not pre and before[-1:].isalpha()) or (not post and after[:1].isalpha())
-        times = re.search(r"(?<![^\W\d_])[x×*]\s*$", head) or re.match(r"\s*[x×*]\s*\d", tail)
+        part = PARTS.search(head) or PART.match(tail) or re.search(r"\d\W{1,2}$", before)
         names = [c.group(1) for c in (pre, post) if c]
         if names:
             cur = {SYMBOLS.get(c) or SYMBOLS.get(c.lower()) or ("EUR" if c.lower().startswith("eur") else c.upper()) for c in names}
-            amount = None if dot or glued or times or len(cur) > 1 else norm_amount(num)
+            amount = None if dot or glued or part or len(cur) > 1 else norm_amount(num)
             out.append((off + len(head), amount or f"unreadable ({num[:20]})", sorted(cur)[0]))
-        elif dot or not (NOT_MONEY.match(after) or re.fullmatch(r"\d{1,2}", num) or DATE_OR_TIME.fullmatch(num) or glued and num.isdigit()):
+        elif dot or not (NOT_MONEY.match(after) or DATE_OR_TIME.fullmatch(num) or glued and num.isdigit()
+                         or num.isdigit() and len(num) < 4 and not after.strip() and COUNTED.search(before)
+                         or num.isdigit() and len(num) < 4 and re.search(r"\(\s*$", before) and re.match(r"\s*\)", after)):  # "(2)"
             out.append((off + len(head), f"unreadable ({num[:20]})", "?"))
     return out
 
@@ -217,6 +223,8 @@ def extract_totals(text: str, words: "re.Pattern | None" = None) -> list[dict]:
         if not word:
             continue
         found = [(line[word.start():min(at, word.start() + 200)], amount, cur) for at, amount, cur in read_amounts(line, word.end())]
+        if found and re.fullmatch(r"[\d.,'’\s]*\d[\d.,'’\s]*", next((x for x in lines[i + 1:i + 3] if x.strip()), "")):
+            found = [(label, f"unreadable ({amount})", cur) for label, amount, cur in found]  # the rest of the number, set apart
         if not found:
             after = next((x for x in lines[i + 1:i + 4] if x.strip()), "")
             for at, amount, cur in read_amounts(after):
