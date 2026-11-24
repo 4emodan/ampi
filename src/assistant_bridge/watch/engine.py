@@ -20,6 +20,7 @@ from typing import Any
 from ampi_tools import watch_spec as ws
 
 from ..services import ServiceError, ServiceUnavailable, ask
+from ..telegram import TelegramError
 from . import triggers as trig
 from .db import FINAL, WatchDB, iso, now
 from .pipeline import Active, Parked, Pipeline, RunState, Services, StepError, approval_until
@@ -49,6 +50,7 @@ TESTS_PER_DAY = 30
 class Caller:
     origin: str                 # private | group:… | forwarded:… | watcher:… | builder:<profile>/<name>
     tag: Any = None             # ("chat", chat_id, thread_id, owner_text) for private chat runs
+    limited: bool = False       # its topic has limits of its own (/topic)
 
 
 @dataclass
@@ -146,9 +148,22 @@ class WatchEngine:
         # defanged outside text); plain: exactly as written.
         styled = fmt in ("rich", "markdown")
         header = (f"🔔 **{name}**\n\n" if styled else f"🔔 {name}\n\n") if name else ""
+        thread = 0
+        if name:
+            try:
+                got = await self.tools({"cmd": "watch.settings", "name": name}, 5)
+                thread = got["thread"] if got.get("ok") and isinstance(got.get("thread"), int) else 0
+            except Exception as e:  # noqa: BLE001 (the main chat then)
+                log.info("[%s] where %s writes: %s", self.profile.name, name, e)
         try:
-            await self.bot._send_text(self.profile.owner_chat_id, 0, header + text, markdown=styled,
-                                      links=(fmt == "markdown"), **({"social": True} if social else {}))
+            try:
+                await self.bot._send_text(self.profile.owner_chat_id, thread, header + text, markdown=styled,
+                                          links=(fmt == "markdown"), **({"social": True} if social else {}))
+            except TelegramError as e:
+                if not thread or e.error_code != 400:
+                    raise
+                await self.bot._send_text(self.profile.owner_chat_id, 0, header + text, markdown=styled,
+                                          links=(fmt == "markdown"), **({"social": True} if social else {}))
         except Exception as e:  # noqa: BLE001
             if social:
                 log.warning("[%s] watcher message failed: %s", self.profile.name, type(e).__name__)

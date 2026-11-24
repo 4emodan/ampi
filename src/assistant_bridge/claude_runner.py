@@ -158,6 +158,10 @@ def parse_output(returncode: int, stdout: str, stderr: str) -> RunResult:
     return RunResult(ok=True, text=text, cost_usd=cost, duration_ms=duration)
 
 
+class NotRegistered(Exception):
+    """The run may not go on without ampi-tools knowing which limits apply to it."""
+
+
 class ClaudeRunner:
     def __init__(
         self,
@@ -178,7 +182,8 @@ class ClaudeRunner:
         self.on_exit: Callable[[int], Awaitable[None]] | None = None
 
     async def _exec(self, args: list[str], prompt: str, cwd: Path, origin: str | None = None,
-                    extra_env: Mapping[str, str] | None = None, tag: object = None) -> RunResult:
+                    extra_env: Mapping[str, str] | None = None, tag: object = None,
+                    topic: tuple[str, bool] | None = None) -> RunResult:
         env = {**self._env, **(extra_env or {})}
         if origin:
             # Tells the tool commands (and so the owner's approval requests) that this run handles outside
@@ -195,7 +200,14 @@ class ClaudeRunner:
         if self.on_spawn is not None:
             # Before claude reads its prompt (stdin), so no tool call can come before the registration.
             try:
-                await self.on_spawn(proc.pid, origin or "private", tag)
+                if topic is None:
+                    await self.on_spawn(proc.pid, origin or "private", tag)
+                else:
+                    await self.on_spawn(proc.pid, origin or "private", tag, topic)
+            except NotRegistered:
+                await _stop(proc)
+                return RunResult(ok=False, text="", error="the tools service isn't reachable, and this topic has limits of its own: "
+                                                          "nothing was run. Try again in a minute.")
             except Exception:
                 log.warning("could not register run %s with the tools service", proc.pid, exc_info=True)
         try:
@@ -235,6 +247,7 @@ class ClaudeRunner:
         watchers_edit: bool = False,
         extra_denied: Sequence[str] = (),
         setting_sources: str | None = None,
+        topic: tuple[str, bool] | None = None,  # (its scope, whether it has limits of its own)
     ) -> RunResult:
         """Send one message to the conversation's Claude session. `origin` (e.g. "watcher:gmail-inbox") marks
         runs that handle outside content rather than the owner's own messages.
@@ -263,7 +276,7 @@ class ClaudeRunner:
                     extra_denied=extra_denied,
                     setting_sources=setting_sources,
                 )
-                result = await self._exec(args, prompt, cwd, origin, extra_env, tag)
+                result = await self._exec(args, prompt, cwd, origin, extra_env, tag, topic)
                 if result.ok or attempt == 1 or not result.error:
                     break
                 if resume and _MISSING_SESSION.search(result.error):

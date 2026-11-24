@@ -269,7 +269,7 @@ def test_only_the_hub_may_ask(env, monkeypatch):
         for pid, uid in ((BRIDGE_PID, -1), (1, 1000)):
             assert not run(d.handle({"cmd": cmd, "scope": SCOPE, "changes": {"gmail.star": ["default", "off"]}}, pid, uid))["ok"]
     assert not d.permissions.all(SCOPE)
-    for cmd in HUB - {"hub.set"}:
+    for cmd in ("hub.overview", "hub.activity", "hub.abilities", "hub.watchers", "hub.home", "hub.topics", "hub.given"):
         assert run(d.handle({"cmd": cmd, "scope": SCOPE}, 1, 55))["ok"], cmd
 
 

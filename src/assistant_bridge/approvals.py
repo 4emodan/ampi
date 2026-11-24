@@ -176,8 +176,13 @@ class ApprovalRelay:
         """Reports of automatic Telegram writes etc. A notice is acknowledged only once it was really sent."""
         for n in notices:
             try:
-                await self.bot.api.send_message(self.bot.profile.owner_chat_id,
-                                                fit(str(n.get("text", "")), MAX_MESSAGE))
+                text, thread = fit(str(n.get("text", "")), MAX_MESSAGE), self._thread([n.get("profile"), n.get("thread")])
+                try:
+                    await self.bot.api.send_message(self.bot.profile.owner_chat_id, text, *((thread,) if thread else ()))
+                except TelegramError as e:
+                    if not thread or e.error_code != 400:
+                        raise
+                    await self.bot.api.send_message(self.bot.profile.owner_chat_id, text)  # (the topic is gone)
             except TelegramError as e:
                 log.warning("could not send notice #%s: %s", n.get("id"), e)
                 return  # try again next tick
@@ -221,19 +226,37 @@ class ApprovalRelay:
             if not notified.get("ok"):
                 log.warning("ampi-tools didn't record request #%s as shown: %s", approval_id, notified.get("error"))
 
+    def _thread(self, where: Any) -> int:
+        """The topic of the private chat a message belongs to; 0 for the main chat (or another profile's bot)."""
+        if isinstance(where, list) and len(where) == 2 and where[1] and isinstance(where[1], int) \
+                and where[0] == self.bot.profile.name:
+            return max(where[1], 0)
+        return 0
+
     async def _send_request(self, item: dict, text: str, buttons: list[list[dict]]) -> dict:
+        thread = self._thread(item.get("where"))
+        if thread:
+            try:
+                return await self._send_request_to(item, text, buttons, {"thread_id": thread})
+            except TelegramError as e:
+                if e.error_code != 400:
+                    raise
+                log.info("request #%s: topic %s refused (%s), main chat instead", item["id"], thread, e.description)
+        return await self._send_request_to(item, text, buttons, {})
+
+    async def _send_request_to(self, item: dict, text: str, buttons: list[list[dict]], to: dict) -> dict:
         owner = self.bot.profile.owner_chat_id
         card = card_of(item)
         if card is not None:
             styled = card_text(item, card)
             if shown_len(styled) <= MAX_MESSAGE:
                 try:
-                    return await self.bot.api.send_buttons(owner, styled, buttons, parse_mode="HTML")
+                    return await self.bot.api.send_buttons(owner, styled, buttons, parse_mode="HTML", **to)
                 except TelegramError as e:
                     if e.error_code != 400:
                         raise
                     log.info("formatted request #%s rejected (%s), sending plain text", item["id"], e.description)
-        return await self.bot.api.send_buttons(owner, text, buttons)
+        return await self.bot.api.send_buttons(owner, text, buttons, **to)
 
     async def answer_quietly(self, cq: dict, text: str | None = None) -> None:
         try:

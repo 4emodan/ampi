@@ -12,16 +12,15 @@ ALIASES = {"✅": "👌", "☑": "👌", "✔": "👌", "⏳": "👀", "⌛": "�
            "💡": "🤓", "❓": "🤔", "🚀": "🔥"}
 SEEN, DONE, FAILED = "👀", "👌", "👎"
 MAX_PER_REPLY = 10
-LINE = re.compile(r"^[ \t]*REACT(?:[ \t]+(\d{1,12}))?[ \t]*:[ \t]*(\S{1,12})[ \t]*$", re.M)
-FENCE = re.compile(r"```.*?(?:```|\Z)", re.S)
+LINE = re.compile(r"[ \t]*REACT(?:[ \t]+(\d{1,12}))?[ \t]*:[ \t]*(\S{1,12})[ \t]*")
 KEY = "react:"
 
 PROMPT = (
     "Each message of the owner starts with its id, e.g. [message 812] (not part of their words). You can put one emoji reaction on "
     "their messages in this conversation: a line `REACT: 👍` in your reply (their latest message) or `REACT 812: 🔥` (that one); a new "
-    "one replaces the old, `REACT 812: none` removes it. The lines aren't shown. Use it for status or category, and when a "
-    "reaction says enough instead of words (the reply may then be only that line). While you work 👀 is shown, and 👌 after, "
-    "unless you choose another. Telegram allows only: " + " ".join(sorted(ALLOWED - {"🖕", "💩", "🤮", "🤬"})) + "\n")
+    "one replaces the old, `REACT 812: none` removes it. Put these lines at the very end of the reply; they aren't shown. Use it for status or category, and when a "
+    "reaction says enough instead of words (the reply may then be only that line). In private chats 👀 is shown while you work and "
+    "👌 after, unless you choose another. Telegram allows only: " + " ".join(sorted(ALLOWED - {"🖕", "💩", "🤮", "🤬"})) + "\n")
 
 
 def clean(emoji: str) -> str | None:
@@ -37,17 +36,17 @@ def clean(emoji: str) -> str | None:
 
 
 def parse(text: str) -> tuple[str, list[tuple[int | None, str]]]:
-    """(the text without the lines, [(message id or None = the latest, emoji or "")]). Code blocks stay as they are."""
-    code = [m.span() for m in FENCE.finditer(text)]
-    found: list[tuple[int | None, str]] = []
-
-    def take(m: re.Match) -> str:
-        if any(a <= m.start() < b for a, b in code):
-            return m.group(0)
+    """(the text without its last REACT lines, [(message id or None = the latest, emoji or "")]). Only at the very end, so a quoted
+    email or a code block in the middle means nothing."""
+    lines, found = text.rstrip().split("\n"), []
+    while lines and (m := LINE.fullmatch(lines[-1])):
+        lines.pop()
         e = clean(m.group(2))
-        if e is not None and len(found) < MAX_PER_REPLY:
+        if e is not None:
             found.append((int(m.group(1)) if m.group(1) else None, e))
-        return ""
-
-    out = LINE.sub(take, text)
-    return (re.sub(r"\n{3,}", "\n\n", out).strip() if out != text else text), found
+        while lines and not lines[-1].strip():
+            lines.pop()
+    rest = "\n".join(lines)
+    if rest.count("```") % 2:  # inside an unclosed code block
+        return text, []
+    return (rest.strip() if len(rest) != len(text.rstrip()) else text), found[::-1][:MAX_PER_REPLY]

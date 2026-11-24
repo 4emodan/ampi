@@ -104,7 +104,7 @@ class TelegramAPI:
         )
 
     async def send_buttons(self, chat_id: int, text: str, buttons: list[list[dict]],
-                           parse_mode: str | None = None) -> dict:
+                           parse_mode: str | None = None, thread_id: int | None = None) -> dict:
         """Message (plain text by default) with an inline keyboard (rows of {"text", "callback_data"})."""
         return await self.call(
             "sendMessage",
@@ -112,6 +112,7 @@ class TelegramAPI:
                 "chat_id": chat_id,
                 "text": text,
                 **({"parse_mode": parse_mode} if parse_mode else {}),
+                **({"message_thread_id": thread_id} if thread_id else {}),
                 "reply_markup": {"inline_keyboard": buttons},
                 "link_preview_options": {"is_disabled": True},
             },

@@ -61,10 +61,10 @@ class Control:
 
     # --- run registry (fed by the claude runner) -------------------------------------------------------
 
-    async def on_spawn(self, pid: int, origin: str, tag: Any) -> None:
+    async def on_spawn(self, pid: int, origin: str, tag: Any, limited: bool = False) -> None:
         if isinstance(tag, tuple) and tag and tag[0] == "builder":
             origin = f"builder:{tag[1]}/{tag[2]}"
-        self.callers[pid] = Caller(origin, tag)
+        self.callers[pid] = Caller(origin, tag, limited)
 
     async def on_exit(self, pid: int) -> None:
         self.callers.pop(pid, None)
@@ -137,6 +137,9 @@ class Control:
         allowed = PRIVATE_CMDS if who.kind == "private" else {"run"} if who.kind == "social" else BUILDER_CMDS
         if cmd not in allowed:
             return {"ok": False, "text": f"`watchers {cmd}` isn't available here."}
+        if who.kind == "private" and cmd in ("build", "run", "retry") and who.caller is not None and who.caller.limited:
+            return {"ok": False, "text": f"The owner limited this topic: `watchers {cmd}` isn't available here (a watcher acts with "
+                                         "its own permissions)."}
         engine = self.engines.get(who.profile)
         if engine is None:
             return {"ok": False, "text": "No watcher engine for this profile."}

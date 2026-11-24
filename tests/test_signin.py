@@ -712,7 +712,7 @@ def test_a_command_that_goes_away_ends_the_request(tmp_path):
 
     async def go():
         d = Daemon(Services(signin_client=Slow()), Approvals(tmp_path / "a.sqlite3"), Policy(), trusted)
-        d.runs = type("R", (), {"origin_of": lambda self, pid: "private"})()
+        d.runs = type("R", (), {"origin_of": lambda self, pid: "private", "topic_of": lambda self, pid: None})()
         rd = asyncio.StreamReader()
         req = {"cmd": "run", "ops": [{"op": "signin.test", "args": {"site_host": "example.com"}}]}
         task = asyncio.create_task(d._while_there(req, 1, rd))

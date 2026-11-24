@@ -1359,10 +1359,14 @@ class Approvals:
                 value = json.loads(item.pop(key) or "null")
                 if value:
                     item[key] = value
+            meta = json.loads(item["meta"] or "{}")
             if ops_social_session.is_social_request({"ops": item.pop("ops"), "meta": item.pop("meta")}):
                 item["social"] = True
             if not item.get("kind"):
                 item.pop("kind", None)
+            where = (meta or {}).get("where")
+            if isinstance(where, list) and len(where) == 2:  # [profile, topic of its private chat]
+                item["where"] = where
             grants = json.loads(item.pop("grants") or "null")
             if grants:  # what the "always" button would allow, shown in the request text
                 item["grant_label"] = "; ".join(

@@ -362,14 +362,28 @@ class Keeper:
         self.db.executemany("UPDATE audit SET reported=1 WHERE id=?", [(i,) for i in ids])
         self.db.commit()
 
-    def activity(self, limit: int = 150) -> list[dict]:
-        rows = self.db.execute("SELECT id, profile, name, step, op, args_summary, status, approval_id, result, at, items, detail "
-                               "FROM audit ORDER BY id DESC LIMIT ?", (limit,))
+    def activity(self, limit: int = 60, before: int | None = None, name: str | None = None, op: str | None = None,
+                 status: str | None = None) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT id, profile, name, step, op, args_summary, status, approval_id, result, at, items, detail FROM audit "
+            "WHERE id < ? AND (? IS NULL OR name=?) AND (? IS NULL OR op=?) AND (? IS NULL OR status=?) ORDER BY id DESC LIMIT ?",
+            (before or 2 ** 62, name, name, op, op, status, status, limit))
         return [dict(r) for r in rows]
+
+    def today(self) -> dict[str, int]:
+        rows = self.db.execute("SELECT status, COUNT(*) n FROM audit WHERE at > ? GROUP BY status", (self.clock() - 86400,))
+        return {r["status"]: r["n"] for r in rows}
+
+    def remove_grant(self, grant_id: int) -> int:
+        n = self.db.execute("DELETE FROM grants WHERE id=?", (grant_id,)).rowcount
+        self.db.commit()
+        return n
 
     def list_all(self) -> list[dict]:
         rows = self.db.execute("SELECT * FROM watchers WHERE status NOT IN ('deleted', 'proposed') ORDER BY profile, name")
-        return [{**dict(r), "actions_today": self.actions_today(r["profile"], r["name"])} for r in rows.fetchall()]
+        return [{**dict(r), "actions_today": self.actions_today(r["profile"], r["name"]), "last": self.db.execute(
+            "SELECT MAX(at) FROM audit WHERE profile=? AND name=?", (r["profile"], r["name"])).fetchone()[0]}
+                for r in rows.fetchall()]
 
     def pays_this_month(self, profile: str, name: str) -> int:
         return self.db.execute("SELECT COUNT(*) FROM audit WHERE profile=? AND name=? AND op='checkout.pay' AND at > ? "

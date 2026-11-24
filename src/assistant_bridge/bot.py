@@ -52,6 +52,7 @@ COMMANDS = [
     {"command": "cancel", "description": "Stop the current task"},
     {"command": "model", "description": "Show or set the model for this conversation"},
     {"command": "persona", "description": "Tone and character of my replies"},
+    {"command": "topic", "description": "This topic: its role, its limits, its watchers"},
     {"command": "react", "description": "Emoji reactions on your messages here: on or off"},
     {"command": "protect", "description": "Answer here only when you tag me"},
     {"command": "status", "description": "Show this conversation's status"},
@@ -71,6 +72,7 @@ HELP_TEXT = (
     "/model [name|default] – show or change the model here\n"
     "/persona – tone and character of my replies\n"
     "/protect – in this chat or topic I act only when you tag me (/protect chat: with all its topics; /protect off)\n"
+    "/topic – this topic: my role here, what I may do here, which watchers write here\n"
     "/react – my emoji reactions on your messages here (/react off, /react on)\n"
     "/status – session info and usage\n"
     "/watchers – your watchers; /watcher NAME – details and buttons\n"
@@ -201,6 +203,7 @@ class ProfileBot:
         self._stopped_by_owner: set[Key] = set()
         self.watch_ui: Any = None  # WatchUI (watchers v2), set by main
         self.info_ui: Any = None  # InfoUI (/info), set by main
+        self.topics: Any = None  # Topics (/topic), set by main
 
     # --- polling --------------------------------------------------------------------
 
@@ -275,6 +278,8 @@ class ProfileBot:
                     self.profile.name, chat.get("id"), msg["migrate_to_chat_id"],
                 )
                 self.store.move_settings(self.profile.name, f"protected:{chat.get('id')}:", f"protected:{msg['migrate_to_chat_id']}:")
+                for k in ("topic-title", reactions.KEY.rstrip(":")):
+                    self.store.move_settings(self.profile.name, f"{k}:{chat.get('id')}:", f"{k}:{msg['migrate_to_chat_id']}:")
                 return
             group = self.profile.group(chat.get("id"))
             if group is None:
@@ -300,11 +305,14 @@ class ProfileBot:
         chat_id = chat["id"]
         thread_id = msg.get("message_thread_id", 0) if msg.get("is_topic_message") else 0
         key = (chat_id, thread_id)
+        named = (msg.get("forum_topic_created") or msg.get("forum_topic_edited") or {}).get("name")
+        if named and thread_id:
+            self.store.set_setting(self.profile.name, f"topic-title:{chat_id}:{thread_id}", str(named)[:80])
         text = (msg.get("text") or msg.get("caption") or "").strip()
 
         if text.startswith("/") and "forward_origin" not in msg:
             command, _, args = text[1:].partition(" ")
-            if (text[1:].split(None, 1) or [""])[0].lower().split("@", 1)[0] == "persona":  # the one command that takes several lines
+            if (text[1:].split(None, 1) or [""])[0].lower().split("@", 1)[0] in ("persona", "topic"):  # the one command that takes several lines
                 command, *rest = text[1:].split(None, 1)
                 args = rest[0] if rest else ""
             command, _, target = command.partition("@")
@@ -438,7 +446,13 @@ class ProfileBot:
                 prompt = _join_items([f"[message {m.get('message_id')}]\n{b}" for m, b in bodies])
             for m, body in bodies if not social else ():
                 chatlog.append(log_dir, "Owner", body, chatlog.message_time(m))
-            system_prompt = self._system_prompt() + ("\n\n" + reactions.PROMPT if react else "")
+            topic = await self.topics.get(chat_id, thread_id, self._topic_title(chat_id, thread_id, conv.title, title)) \
+                if self.topics is not None else None
+            if topic is not None and not topic.known:
+                await self._send_text(chat_id, thread_id, "⚠️ The tools service isn't reachable; I work without web and Telegram "
+                                      "reading for now.", markdown=False)
+            system_prompt = self._system_prompt() + (
+                "\n\n" + topic.prompt() if topic is not None and topic.role and not social else "") + ("\n\n" + reactions.PROMPT if react else "")
             if group is not None:
                 system_prompt += "\n\n" + self._group_prompt(group, title)
             # Every social turn until /new is kept apart, because the context holds text written by strangers (feeds,
@@ -448,7 +462,7 @@ class ProfileBot:
             self._running[key] = asyncio.current_task()  # type: ignore[assignment]
             typing = asyncio.create_task(self._keep_typing(chat_id, thread_id))
             started_at = now_iso()
-            seen = asyncio.create_task(self._react(chat_id, ids, reactions.SEEN))
+            seen = asyncio.create_task(self._react(chat_id, ids if group is None else [], reactions.SEEN))  # (others don't need the status)
             try:
                 with contextlib.ExitStack() as stack:
                     allowed, extra_args, extra_env = self.profile.allowed_tools, self.profile.extra_args, None
@@ -473,11 +487,15 @@ class ProfileBot:
                         mcp_args, extra_env = self.permissions.mcp_setup(token, sys.executable)
                         extra_args = (*extra_args, *mcp_args)
                         allowed = (*allowed, "mcp__ampi__install_system_packages")
+                    if topic is not None and topic.off and not social:
+                        allowed = topic.without(allowed)
+                        denied = (*denied, *topic.denied())
                     result = await self.runner.run_turn(
                         prompt,
                         cwd=self.profile.workspace,
                         session_id=conv.session_id,
                         started=conv.started,
+                        **({"topic": (topic.scope, topic.restricted)} if topic is not None else {}),
                         model=conv.model or self.profile.model,
                         allowed_tools=allowed,
                         append_system_prompt=system_prompt,
@@ -501,7 +519,8 @@ class ProfileBot:
             except asyncio.CancelledError:
                 self._record(conv, started_at, RunResult(ok=False, text="", error="cancelled"), words)
                 with contextlib.suppress(Exception):
-                    await self._react(chat_id, ids, "")
+                    seen.cancel()
+                    await self._react(chat_id, ids if group is None else [], "")
                 if not social:
                     chatlog.append(log_dir, "Assistant", "(stopped by /cancel)")
                 with contextlib.suppress(Exception):
@@ -527,7 +546,7 @@ class ProfileBot:
             if reply and reply != NO_REPLY and not social:
                 chatlog.append(log_dir, "Assistant", reply)
             if react:
-                await self._final_reactions(chat_id, thread_id, ids, own, result.ok)
+                await self._final_reactions(chat_id, thread_id, ids, own, result.ok, status=group is None)
             if own and result.ok and not result.text:
                 return  # a reaction says it all
             await self._deliver(chat_id, thread_id, result, quiet_ok=group is not None, social=social)
@@ -547,11 +566,11 @@ class ProfileBot:
                 return
 
     async def _final_reactions(self, chat_id: int, thread_id: int, ids: list[int], own: list[tuple[int | None, str]],
-                               ok: bool) -> None:
+                               ok: bool, status: bool = True) -> None:
         chosen = {(i if i is not None else ids[-1]): e for i, e in own if i is not None or ids}
         chosen = {i: e for i, e in chosen.items()
                   if self.store.is_owner_message(self.profile.name, chat_id, thread_id, i)}
-        for i in ids:
+        for i in ids if status else ():
             chosen.setdefault(i, reactions.DONE if ok else reactions.FAILED)
         for i, e in chosen.items():
             await self._react(chat_id, [i], e)
@@ -1012,6 +1031,17 @@ class ProfileBot:
             await self._send_text(chat_id, thread_id, "The dashboard is only for the private chat.", markdown=False)
             return
         await self.info_ui.cmd_dashboard(chat_id, thread_id, args)
+
+    def _topic_title(self, chat_id: int, thread_id: int, conv_title: str | None, chat_title: str) -> str:
+        saved = self.store.get_setting(self.profile.name, f"topic-title:{chat_id}:{thread_id}")
+        return saved or conv_title or (chat_title if not thread_id else "")
+
+    async def _cmd_topic(self, chat_id: int, thread_id: int, args: str) -> None:
+        if self.topics is None:
+            await self._send_text(chat_id, thread_id, "Topics need the tools service ([tools] approvals).", markdown=False)
+            return
+        text = await self.topics.command(chat_id, thread_id, args, self._topic_title(chat_id, thread_id, None, ""))
+        await self._send_text(chat_id, thread_id, text, markdown=False)
 
     async def _cmd_watchers(self, chat_id: int, thread_id: int, args: str) -> None:
         if self.watch_ui is None or chat_id != self.profile.owner_chat_id:

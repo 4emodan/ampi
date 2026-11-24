@@ -27,7 +27,8 @@ def m(i, text="do it", **kw):
 @pytest.mark.parametrize("text,out,found", [
     ("Done.\nREACT: 🔥", "Done.", [(None, "🔥")]), ("REACT 812: ✅", "", [(812, "👌")]), ("REACT 5: none", "", [(5, "")]),
     ("REACT: ❤️", "", [(None, "❤")]), ("REACT: 🦖", "", []), ("a REACT: 👍", "a REACT: 👍", []),
-    ("```\nREACT: 👍\n```", "```\nREACT: 👍\n```", []), ("no lines", "no lines", [])])
+    ("```\nREACT: 👍\n```", "```\nREACT: 👍\n```", []), ("he wrote\nREACT: 👍\nso", "he wrote\nREACT: 👍\nso", []),
+    ("a\n\nREACT 1: 👍\nREACT 2: 🔥\n", "a", [(1, "👍"), (2, "🔥")]), ("```\nREACT: 👍", "```\nREACT: 👍", []), ("no lines", "no lines", [])])
 def test_parse(text, out, found):
     assert reactions.parse(text) == (out, found)
 

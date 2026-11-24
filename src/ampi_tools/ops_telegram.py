@@ -126,19 +126,36 @@ class RunRegistry:
 
     proc: Path = Path("/proc")
     runs: dict[tuple[int, int], str] = field(default_factory=dict)
+    topics: dict[tuple[int, int], str] = field(default_factory=dict)  # the topic a run belongs to (permissions.py)
 
-    def register(self, pid: int, origin: str) -> None:
+    def register(self, pid: int, origin: str, topic: str | None = None) -> None:
         st = proc_stat(pid, self.proc)
         if st is None:
             raise ToolError("no such process")
+        self.topics.pop((pid, st[1]), None)
+        if topic:
+            self.topics[(pid, st[1])] = topic
         self.runs[(pid, st[1])] = origin
         self._prune()
 
     def unregister(self, pid: int) -> None:
         self.runs = {k: v for k, v in self.runs.items() if k[0] != pid}
+        self.topics = {k: v for k, v in self.topics.items() if k[0] != pid}
 
     def _prune(self) -> None:
         self.runs = {k: v for k, v in self.runs.items() if (proc_stat(k[0], self.proc) or (0, -1))[1] == k[1]}
+        self.topics = {k: v for k, v in self.topics.items() if k in self.runs}
+
+    def topic_of(self, pid: int) -> str | None:
+        seen = 0
+        while pid > 1 and seen < 64:
+            st = proc_stat(pid, self.proc)
+            if st is None:
+                return None
+            if (pid, st[1]) in self.runs:
+                return self.topics.get((pid, st[1]))
+            pid, seen = st[0], seen + 1
+        return None
 
     def origin_of(self, pid: int) -> str:
         seen = 0
@@ -212,6 +229,10 @@ class TelegramStore:
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_TG_SCHEMA)
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(notices)")}
+        for column, kind in (("profile", "TEXT"), ("thread", "INTEGER")):  # a topic of that profile's private chat
+            if column not in have:
+                self.db.execute(f"ALTER TABLE notices ADD COLUMN {column} {kind}")
         self.db.commit()
 
     # grants
@@ -291,12 +312,13 @@ class TelegramStore:
         return [dict(r) for r in self.db.execute("SELECT * FROM writes ORDER BY id DESC LIMIT ?", (limit,))]
 
     # notices for the owner (posted by the bridge's relay)
-    def notice(self, text: str) -> None:
-        self.db.execute("INSERT INTO notices (created, text) VALUES (?, ?)", (self.clock(), text))
+    def notice(self, text: str, where: tuple[str, int] | None = None) -> None:
+        self.db.execute("INSERT INTO notices (created, text, profile, thread) VALUES (?, ?, ?, ?)",
+                        (self.clock(), text, *(where or (None, None))))
         self.db.commit()
 
     def unsent_notices(self) -> list[dict]:
-        return [dict(r) for r in self.db.execute("SELECT id, text FROM notices WHERE sent=0 ORDER BY id LIMIT 20")]
+        return [dict(r) for r in self.db.execute("SELECT id, text, profile, thread FROM notices WHERE sent=0 ORDER BY id LIMIT 20")]
 
     def ack_notice(self, notice_id: int) -> None:
         self.db.execute("UPDATE notices SET sent=1 WHERE id=?", (notice_id,))

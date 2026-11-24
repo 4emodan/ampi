@@ -23,9 +23,10 @@ from .watch.engine import WatchEngine
 from .watch.migrate import migrate
 from .watch.tgui import WatchUI
 from .info_ui import InfoUI
-from .claude_runner import BILLING_ENV_VARS, ClaudeRunner, clean_env
+from .topics import Topics
+from .claude_runner import BILLING_ENV_VARS, ClaudeRunner, NotRegistered, clean_env
 from .config import Config, ConfigError, load_config
-from .services import ask
+from .services import ServiceError, ask
 from .store import Store
 from .telegram import TelegramAPI, TelegramError
 
@@ -187,6 +188,7 @@ async def serve(config: Config) -> None:
             engines[b.profile.name] = engine
             b.watch_ui = WatchUI(b, engine)
             b.info_ui = InfoUI(b, config.tools.socket) if config.tools.approvals else None
+            b.topics = Topics(b, config.tools.socket) if config.tools.approvals else None
         control = Control(engines, watchers_socket)
         await control.start()
         for b in bots:
@@ -207,12 +209,20 @@ async def serve(config: Config) -> None:
         else:
             socket_path = None
 
-        async def on_spawn(pid: int, origin: str, tag: object = None) -> None:
-            await control.on_spawn(pid, origin, tag)
+        async def on_spawn(pid: int, origin: str, tag: object = None, topic: tuple[str, bool] | None = None) -> None:
+            await control.on_spawn(pid, origin, tag, bool(topic and topic[1]))
             # The builder never talks to ampi-tools; leaving it unregistered makes it "unknown" there.
             if socket_path is None or (isinstance(tag, tuple) and tag and tag[0] == "builder"):
                 return
-            reply = await ask(socket_path, {"cmd": "runs.register", "pid": pid, "origin": origin}, timeout=10)
+            try:
+                reply = await ask(socket_path, {"cmd": "runs.register", "pid": pid, "origin": origin,
+                                                **({"topic": topic[0]} if topic else {})}, timeout=10)
+            except ServiceError:
+                if topic and topic[1]:
+                    raise NotRegistered from None
+                raise
+            if not reply.get("ok") and topic and topic[1]:
+                raise NotRegistered
             if not reply.get("ok"):  # the run then counts as "unknown" (everything asks the owner)
                 log.warning("ampi-tools refused to register run %s: %s", pid, reply.get("error"))
 

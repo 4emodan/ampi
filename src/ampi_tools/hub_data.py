@@ -8,15 +8,16 @@ from typing import Any
 
 from . import ops_flow, permissions as perms, watch_spec as ws
 from .cards import LABELS
-from .ops import ALWAYS_CRITICAL, OPS
+from .ops import ALWAYS_CRITICAL, OPS, clean_block
 from .ops_checkout import PRIVATE_ONLY
+from .ops_social_session import is_social_request
 from .todoist import ToolError
 
 ADAPTER_NAMES = {"todoist": "Todoist", "gmail": "Gmail", "youtube": "YouTube", "threads": "Threads", "instagram": "Instagram",
                  "igweb": "Instagram (your session)", "thweb": "Threads (your session)", "telegram": "Telegram as you",
                  "maps": "Google Maps", "wolt": "Wolt", "info": "Personal info", "checkout": "Checkout browser",
                  "payment": "Payments", "phone": "Your phone", "signin": "Saved logins", "tg-read": "Reading your Telegram",
-                 "web": "Web search"}
+                 "web": "Web search", "browse": "Web browser"}
 
 
 def critical_ops(d: Any) -> set[str]:
@@ -25,7 +26,7 @@ def critical_ops(d: Any) -> set[str]:
 
 def rule(d: Any, scope: str, op: str) -> str:
     """The built-in rule, in a few words."""
-    if scope != "chat":
+    if perms.kind(scope) == "watcher":
         if op in ws.NOT_FOR_WATCHERS:
             return "never for watchers"
         if not ws.is_write(op):
@@ -63,14 +64,64 @@ def rule(d: Any, scope: str, op: str) -> str:
     return "reads freely"
 
 
-def check_changes(d: Any, scope: str, changes: Any) -> None:
+def check_scope(d: Any, scope: Any) -> None:
     if not isinstance(scope, str) or not perms.SCOPE_RE.fullmatch(scope):
         raise ToolError("bad scope")
-    if scope != "chat":
+    if perms.kind(scope) == "watcher":
         profile, name = scope.removeprefix("watcher:").split("/", 1)
         w = d.keeper.watcher(profile, name) if d.keeper else None
         if not w or w["status"] in ("deleted", "proposed"):
             raise ToolError("no such watcher")
+    elif perms.kind(scope) == "topic" and not any(t["scope"] == scope for t in d.permissions.topics()):
+        raise ToolError("no such topic (write something there first)")
+
+
+def check_role(role: Any) -> str:
+    if not isinstance(role, str) or len(role) > perms.MAX_ROLE:
+        raise ToolError(f"a role is text of at most {perms.MAX_ROLE} characters")
+    lines = clean_block(role.strip()).split("\n") if role.strip() else []
+    return "\n".join(x.removeprefix("│ ") for x in lines)
+
+
+def extra_lines(d: Any, extra: dict) -> list[str]:
+    out = []
+    if "role" in extra:
+        out.append("• Role (instructions for Ampi there):\n" + (clean_block(extra["role"]) if extra["role"] else "(none)"))
+    if extra.get("resume"):
+        out.append("• Turn on again: " + ", ".join(s.split("/", 1)[1] for s in extra["resume"]))
+    if extra.get("deliver"):
+        out.append(f"• Its messages and requests go to: {perms.words(extra['deliver'])}")
+    return out
+
+
+def check_extra(d: Any, scope: str, extra: dict) -> None:
+    if set(extra) - {"role", "resume", "deliver"}:
+        raise ToolError("bad request")
+    if "role" in extra:
+        check_scope(d, scope)
+        if perms.kind(scope) != "topic" or check_role(extra["role"]) != extra["role"]:
+            raise ToolError("bad role")
+    for s in extra.get("resume") or []:
+        check_scope(d, s)
+    if extra.get("deliver"):
+        check_scope(d, scope)
+        if perms.kind(scope) != "watcher" or not perms.private_thread(extra["deliver"]):
+            raise ToolError("a watcher's messages go to a topic of the private chat")
+
+
+def apply_extra(d: Any, scope: str, extra: dict, how: str) -> None:
+    if "role" in extra:
+        d.permissions.set_role(scope, extra["role"], how)
+    for s in extra.get("resume") or []:
+        profile, name = s.removeprefix("watcher:").split("/", 1)
+        if (d.keeper.watcher(profile, name) or {}).get("status") == "paused":
+            d.keeper.set_status(profile, name, "active")
+    if extra.get("deliver"):
+        d.permissions.set_delivery(scope, extra["deliver"], how)
+
+
+def check_changes(d: Any, scope: str, changes: Any) -> None:
+    check_scope(d, scope)
     if not isinstance(changes, dict) or not 1 <= len(changes) <= 60:
         raise ToolError("no changes")
     for op, pair in changes.items():
@@ -99,17 +150,20 @@ def waiting(d: Any, scope: str) -> dict[str, str]:
         if r["status"] == "pending" and r.get("kind") == "settings.change":
             meta = json.loads(r.get("meta") or "{}")
             if meta.get("scope") == scope:
-                return {op: c[1] for op, c in meta["changes"].items()}
+                return {op: c[1] for op, c in meta["changes"].items()} | (
+                    {"role": meta["extra"]["role"] or "(none)"} if "role" in (meta.get("extra") or {}) else {})
     return {}
 
 
 def ops_rows(d: Any, scope: str) -> list[dict]:
     now, crit, rows = d.permissions.all(scope), critical_ops(d), []
-    extra = [f"flow:{f['name']}" for f in flows(d) if f["ok"]] if scope == "chat" else []
-    for adapter in (*perms.ADAPTERS, *(perms.OUTSIDE_TOOLS if scope != "chat" else ())):
+    watcher = perms.kind(scope) == "watcher"
+    extra = [] if watcher else [f"flow:{f['name']}" for f in flows(d) if f["ok"]]
+    for adapter in (*perms.ADAPTERS, *(k for k in perms.OUTSIDE_TOOLS if scope != "chat" and perms.allowed_modes(scope, f"{k}.*", OPS, crit))):
         mine = sorted(o for o in OPS if o.split(".", 1)[0] == adapter) + (extra if adapter == "checkout" else [])
         items = [{"op": o, "mode": now.get(o, "default"), "modes": perms.allowed_modes(scope, o, OPS, crit),
-                  "write": ws.is_write(o) or o in crit, "label": (LABELS.get(o) or OPS[o].label if o in OPS else "Booking script"),
+                  "write": ws.is_write(o) or o in crit or o in perms.CHANGES,
+                  "now": d.permissions.mode(scope, o, {"flow": o[5:]} if o.startswith("flow:") else {}) if o in OPS else None, "label": (LABELS.get(o) or OPS[o].label if o in OPS else "Booking script"),
                   "rule": rule(d, scope, o) if o in OPS else "asks once, then runs"} for o in mine]
         rows.append({"adapter": adapter, "name": ADAPTER_NAMES[adapter], "mode": now.get(f"{adapter}.*", "default"),
                      "ops": [i for i in items if i["modes"]],
@@ -176,7 +230,9 @@ def watchers(d: Any) -> list[dict]:
     for w in d.keeper.list_all() if d.keeper else []:
         entries = json.loads(w["manifest"] or "[]")
         out.append({"scope": perms.watcher_scope(w["profile"], w["name"]), "name": w["name"], "status": w["status"],
-                    "risk": w["risk"], "mode": w["mode"], "description": w["description"], "actions_today": w["actions_today"],
+                    "risk": w["risk"], "mode": w["mode"], "last": w.get("last"),
+                    "deliver": d.permissions.delivery(perms.watcher_scope(w["profile"], w["name"])),
+                    "limits": d._limits_of(w["hash"]) if w["hash"] else {}, "description": w["description"], "actions_today": w["actions_today"],
                     "triggers": [ws.trigger_text(e) for e in entries if e.get("kind") == "trigger"],
                     "tools": sorted({t for e in entries if e.get("kind") == "llm" for t in e.get("tools", [])}),
                     "grants": [{"op": g["op"], "step": g["step"], "route": g["route"]} for g in
@@ -184,10 +240,183 @@ def watchers(d: Any) -> list[dict]:
     return out
 
 
+def topics(d: Any) -> list[dict]:
+    p = d.permissions
+    going = {}
+    for w in d.keeper.list_all() if d.keeper else []:
+        s = perms.watcher_scope(w["profile"], w["name"])
+        if p.delivery(s):
+            going.setdefault(p.delivery(s), []).append(w["name"])
+    return [{"scope": t["scope"], "title": t["title"], "where": perms.words(t["scope"]), "role": t["role"], "seen": t["seen"],
+             "set": len(p.all(t["scope"])), "changes": p.get(t["scope"], "changes.*"), "off": p.off(t["scope"]),
+             "watchers": going.get(t["scope"], []), "private": perms.private_thread(t["scope"]) is not None,
+             "waiting": waiting(d, t["scope"])} for t in p.topics()]
+
+
+def pending(d: Any) -> list[dict]:
+    d.approvals.expire()
+    return [{"id": r["id"], "at": r["created"], "expires": r.get("expires"), "kind": r.get("kind") or "chat",
+             "summary": d._mask_obj((r["summary"] or "")[:400], "all")}
+            for r in d.approvals.recent(200) if r["status"] == "pending" and "info." not in (r.get("ops") or "")
+            and not is_social_request(r)]
+
+
+def home(d: Any) -> dict:
+    ws_ = watchers(d)
+    k = d.keeper
+    today = k.today() if k else {}
+    return {"ok": True, "pending": pending(d), "stopped": d.permissions.get("chat", "changes.*") == "off",
+            "watchers": [{x: w[x] for x in ("scope", "name", "status", "actions_today", "last")} for w in ws_],
+            "today": today, "recent": activity_rows(d, 6),
+            "limits": {"chat": len(d.permissions.all("chat")), "topics": sum(1 for t in topics(d) if t["set"] or t["role"])}}
+
+
+def given(d: Any) -> dict:
+    """Standing permissions, each with what removes it."""
+    out = []
+    tg, side = d.services.telegram_side, d.services.checkout_side
+    for g in tg.store.grants() if tg is not None else []:
+        out.append({"kind": "telegram", "key": [g["peer_id"], g["action"]], "what": f"{g['action']} in {g['title']} as you",
+                    "until": g["expires"]})
+    for g in side.vault.grants() if side is not None else []:
+        out.append({"kind": "site", "key": [g["origin"], g["fields"]], "what": f"fill {g['fields']} on {g['origin']}",
+                    "until": g["expires"]})
+    for w in d.keeper.list_all() if d.keeper else []:
+        for g in d.keeper.grants(w["profile"], w["name"], w["hash"] or ""):
+            to = " / ".join(str(v) for v in g["route"].values() if v not in (None, ""))
+            out.append({"kind": "watcher", "key": [g["id"]], "what": f"watcher {w['name']}: {g['op']}" + (f" → {to}" if to else ""),
+                        "until": None, "source": g["source"]})
+    return {"ok": True, "given": out}
+
+
+def revoke(d: Any, kind: Any, key: Any) -> dict:
+    ok = isinstance(key, list) and all(isinstance(x, (str, int)) and not isinstance(x, bool) for x in key)
+    n = 0
+    if kind == "telegram" and ok and len(key) == 2 and isinstance(key[0], int) and d.services.telegram_side is not None:
+        n = d.services.telegram_side.store.revoke(key[0], str(key[1]))
+    elif kind == "site" and ok and len(key) == 2 and d.services.checkout_side is not None:
+        db = d.services.checkout_side.vault.db
+        n = db.execute("DELETE FROM grants WHERE origin=? AND fields=?", (str(key[0]), str(key[1]))).rowcount
+        db.commit()
+    elif kind == "watcher" and ok and len(key) == 1 and isinstance(key[0], int) and d.keeper is not None:
+        n = d.keeper.remove_grant(key[0])
+    else:
+        raise ToolError("bad request")
+    if not n:
+        raise ToolError("it was gone already; reload the page")
+    return {"ok": True, "changed": n}
+
+
+def pause(d: Any, scopes: Any) -> int:
+    if not isinstance(scopes, list) or not 1 <= len(scopes) <= 100:
+        raise ToolError("which watchers?")
+    n = 0
+    for s in scopes:
+        check_scope(d, s)
+        if perms.kind(s) != "watcher":
+            raise ToolError("not a watcher")
+        profile, name = s.removeprefix("watcher:").split("/", 1)
+        if d.keeper.watcher(profile, name)["status"] in ("active", "failing"):
+            d.keeper.set_status(profile, name, "paused")
+            n += 1
+    return n
+
+
+def stop(d: Any) -> dict:
+    """Nothing is changed by Ampi any more: every watcher paused, every change in chats and groups off."""
+    running = [perms.watcher_scope(w["profile"], w["name"]) for w in (d.keeper.list_all() if d.keeper else [])
+               if w["status"] in ("active", "failing")]
+    n = pause(d, running) if running else 0
+    now = d.permissions.get("chat", "changes.*")
+    if now != "off":
+        d.permissions.apply("chat", {"changes.*": [now, "off"]}, "hub: stop everything")
+    d.permissions.remember("stopped", running or d.permissions.remembered("stopped"))
+    return {"ok": True, "changed": n + (now != "off"), "paused": n}
+
+
+def resume(d: Any, scopes: Any, everything: bool) -> dict:
+    changes: dict = {}
+    if everything:
+        scopes = d.permissions.remembered("stopped")
+        if d.permissions.get("chat", "changes.*") == "off":
+            changes = {"changes.*": ["off", "default"]}
+    if not isinstance(scopes, list) or len(scopes) > 100:
+        raise ToolError("which watchers?")
+    again = []
+    for s in scopes:
+        try:
+            check_scope(d, s)
+        except ToolError:
+            continue  # deleted meanwhile
+        profile, name = s.removeprefix("watcher:").split("/", 1)
+        if perms.kind(s) == "watcher" and d.keeper.watcher(profile, name)["status"] == "paused":
+            again.append(s)
+    if not again and not changes:
+        raise ToolError("nothing to turn on")
+    return {"ok": True, "changed": 0, "approval": d.ask_settings("chat", changes, {"resume": again} if again else {})}
+
+
+def activity_rows(d: Any, limit: int, before: Any = None, name: Any = None, op: Any = None, status: Any = None) -> list[dict]:
+    rows = d.keeper.activity(limit, before if isinstance(before, int) else None, *(x if isinstance(x, str) and x else None
+                                                                                  for x in (name, op, status))) if d.keeper else []
+    return [{**{k: a[k] for k in ("id", "name", "op", "status", "at", "items", "approval_id")},
+             "label": LABELS.get(a["op"]) or a["op"],
+             "args_summary": d._mask_obj((a["args_summary"] or "")[:600], "all"),
+             "result": d._mask_obj((a["result"] or "")[:200], "all"),
+             "detail": d._mask_obj([f"{i['subject']} · {i['who']}" for i in (_json(a["detail"]) or {}).get("items", [])], "all")}
+            for a in rows]
+
+
+def _json(raw: Any) -> dict | None:
+    try:
+        v = json.loads(raw or "null")
+    except ValueError:
+        return None
+    return v if isinstance(v, dict) else None
+
+
 def answer(d: Any, cmd: str, req: dict) -> dict:
     scope = req.get("scope", "chat")
     if cmd == "hub.overview":
         return overview(d)
+    if cmd == "hub.home":
+        return home(d)
+    if cmd == "hub.topics":
+        return {"ok": True, "topics": topics(d)}
+    if cmd == "hub.given":
+        return given(d)
+    if cmd == "hub.revoke":
+        return revoke(d, req.get("kind"), req.get("key"))
+    if cmd == "hub.pause":
+        return {"ok": True, "changed": pause(d, req.get("scopes"))}
+    if cmd == "hub.resume":
+        return resume(d, req.get("scopes"), req.get("everything") is True)
+    if cmd == "hub.stop":
+        return stop(d)
+    if cmd == "hub.role":
+        check_scope(d, scope)
+        if perms.kind(scope) != "topic":
+            raise ToolError("a role belongs to a topic")
+        role = check_role(req.get("role"))
+        if role == d.permissions.role(scope):
+            raise ToolError("that is the role now")
+        return {"ok": True, "changed": 0, "approval": d.ask_settings(scope, {}, {"role": role})}
+    if cmd == "hub.forget":
+        check_scope(d, scope)
+        if perms.kind(scope) != "topic" or d.permissions.all(scope):
+            raise ToolError("only a topic without limits can be forgotten; set it to the built-in rules first")
+        d.permissions.forget_topic(scope)
+        return {"ok": True, "changed": 1}
+    if cmd == "hub.deliver":
+        check_scope(d, scope)
+        topic = req.get("topic") or ""
+        if topic:  # (where requests and reports appear: the owner should know)
+            extra = {"deliver": topic}
+            check_extra(d, scope, extra)
+            check_scope(d, topic)
+            return {"ok": True, "changed": 0, "approval": d.ask_settings(scope, {}, extra)}
+        d.permissions.set_delivery(scope, "", "hub")
+        return {"ok": True, "changed": 1}
     if cmd == "hub.set":
         return set_(d, scope, req.get("changes"))
     if cmd == "hub.watchers":
@@ -200,10 +429,7 @@ def answer(d: Any, cmd: str, req: dict) -> dict:
         asked = [{"id": r["id"], "at": r["created"], "status": r["status"], "kind": r.get("kind") or "chat",
                   "summary": d._mask_obj((r["summary"] or "")[:600], "all")}
                  for r in d.approvals.recent(60) if r.get("kind") != "watch.action"
-                 and "info." not in (r.get("ops") or "")]
-        acts = [{**a, "args_summary": d._mask_obj((a["args_summary"] or "")[:600], "all"),
-                 "result": d._mask_obj((a["result"] or "")[:200], "all"),
-                 "detail": d._mask_obj([f"{i['subject']} · {i['who']}" for i in
-                                        (json.loads(a["detail"] or "null") or {}).get("items", [])], "all")} for a in (d.keeper.activity() if d.keeper else [])]
-        return {"ok": True, "watchers": acts, "chat": asked, "changes": d.permissions.log(50)}
+                 and "info." not in (r.get("ops") or "") and not is_social_request(r)]
+        acts = activity_rows(d, 60, req.get("before"), req.get("name"), req.get("op"), req.get("status"))
+        return {"ok": True, "watchers": acts, "chat": asked, "changes": d.permissions.log(50), "pending": pending(d)}
     raise ToolError("unknown command")

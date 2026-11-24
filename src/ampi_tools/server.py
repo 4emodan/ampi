@@ -75,9 +75,10 @@ ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide", "notices
          # watchers v2: only the bridge's engine talks to the keeper
          "watch.propose", "watch.get", "watch.list", "watch.status", "watch.delete", "watch.space_get",
          "watch.space_put", "watch.audit", "watch.run", "watch.settings",
-         "web.link", "web.out"}
+         "web.link", "web.out", "topic.get", "topic.set", "topic.deliver"}
 # The hub (the same user as this service; Ampi and the bridge run as another).
-HUB = {"hub.overview", "hub.activity", "hub.abilities", "hub.watchers", "hub.set"}
+HUB = {"hub.overview", "hub.activity", "hub.abilities", "hub.watchers", "hub.set", "hub.home", "hub.topics", "hub.role", "hub.pause",
+       "hub.resume", "hub.stop", "hub.forget", "hub.deliver", "hub.given", "hub.revoke"}
 WATCHER_ONLY = {"youtube.ids", "youtube.show", "gmail.meta"} | ops_social.WATCHER_ONLY
 ACTIVATE_CHOICES = [{"key": "all", "label": "✅ Turn on and allow all"},
                     {"key": "ask", "label": "▶️ Turn on, ask each time"},
@@ -233,7 +234,8 @@ class Daemon:
                 origin = self.runs.origin_of(pid)
                 # The bridge's own reads (its watchers' checks) aren't a chat's.
                 own = origin == "unknown" and not any(ws.is_write(o["op"]) for o in ops) and await self.trusted(pid)
-                resp = self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin, own), ops)
+                resp = self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin, own,
+                                                    self.runs.topic_of(pid)), ops)
                 if origin == SOCIAL_ORIGIN and isinstance(resp.get("text"), str):
                     resp["text"] = clip(resp["text"])
                 return resp
@@ -300,13 +302,19 @@ class Daemon:
                     raise ToolError("bad watcher origin (watcher:<profile>/<name>@<hash12>#<step>)")
                 if len(origin) > 200:
                     raise ToolError("origin too long")
-                self.runs.register(_int(request.get("pid")), origin)
+                topic = request.get("topic")
+                if topic is not None and not (isinstance(topic, str) and perms.SCOPE_RE.fullmatch(topic)
+                                              and perms.kind(topic) == "topic"):
+                    raise ToolError("bad topic")
+                self.runs.register(_int(request.get("pid")), origin, topic)
                 return {"ok": True}
             if isinstance(cmd, str) and cmd.startswith("watch."):
                 return await self.watch_cmd(cmd, request)
             if cmd == "runs.unregister":
                 self.runs.unregister(_int(request.get("pid")))
                 return {"ok": True}
+            if isinstance(cmd, str) and cmd.startswith("topic."):
+                return self.topic_cmd(cmd, request)
             if cmd == "telegram.protect":
                 ids = request.get("ids")
                 if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
@@ -326,14 +334,16 @@ class Daemon:
             return {"ok": False, "error": redact(f"{type(e).__name__}: {e}")}
 
     async def run(self, ops: list[dict], reason: Any, claimed_origin: Any = None, origin: str = "unknown",
-                  own: bool = False) -> dict:
+                  own: bool = False, topic: str | None = None) -> dict:
         """`origin` is where the request really came from ("private", "group:…", "watcher:…" or "unknown");
         `claimed_origin` is what the caller said, used only to label approvals from unknown processes."""
         # Instagram/Threads web-session reads: only social-mode conversations; direct messages: never through here.
         check_social_origin(ops, origin, "run")
-        scope = self._scope(origin)
+        scope = topic or self._scope(origin)
         if not own:
             self.permissions.refuse(scope, ops)
+            if origin == "unknown":
+                self.permissions.refuse_lost(ops)
         ops_phone.check_phone(ops, origin)
         ops_signin.check(ops, origin)
         if any(o["op"].startswith(("checkout.", "signin.")) for o in ops):
@@ -428,7 +438,9 @@ class Daemon:
                 # Not the owner typing in chat: a run that read outside content (or an unknown process).
                 summary = (f"⚠ Asked for by {clean(who, 80)} while handling outside content, not by you in "
                            f"chat.\n{summary}")
-            always_ask = any(self.permissions.mode(scope, o["op"], o["args"]) == "ask" for o in asked)
+            # (A standing permission holds everywhere: none is offered where the owner set limits.)
+            always_ask = self.permissions.restricted(scope) \
+                or any(self.permissions.mode(scope, o["op"], o["args"]) == "ask" for o in asked)
             grants = grant_offer(self.services, ops, origin) if telegram and not always_ask else None
             if ops[0]["op"] == "checkout.fill" and not always_ask:  # "✅ + always here": these fields on this exact site, 30 days
                 r = ops[0]["args"]["resolved"]
@@ -450,7 +462,8 @@ class Daemon:
                                                          "an unidentified process"), OUTSIDE if who else None)
             # A phone action approved much later would do something else than meant (an alarm for tomorrow, a timer).
             ttl = ops_phone.APPROVAL_TTL if any(o["op"] in ops_phone.WRITES for o in ops) else None
-            approval_id = self.approvals.add(ops, summary, reason, grants, meta={"origin": origin}, card=card, ttl=ttl)
+            approval_id = self.approvals.add(ops, summary, reason, grants, meta={"origin": origin, "scope": scope, **self._where(scope)},
+                                             card=card, ttl=ttl)
             for o in telegram:
                 if o["op"] == "telegram.send":  # the duplicate guard also sees requests that are waiting
                     note_requested(self.services, o)
@@ -638,7 +651,9 @@ class Daemon:
         try:
             ops = json.loads(item["ops"])
             try:  # (switched off while the request waited)
-                self.permissions.refuse(self._scope(str(json.loads(current.get("meta") or "{}").get("origin") or "")), ops)
+                meta = json.loads(current.get("meta") or "{}")
+                scope = str(meta.get("scope") or self._scope(str(meta.get("origin") or "")))
+                self.permissions.refuse(scope, ops)
             except ToolError as e:
                 text = f"Not done: {e}"
                 return {"ok": True, "status": "failed", "text": text}
@@ -649,7 +664,7 @@ class Daemon:
         finally:
             self.approvals.finish(approval_id, status, text)
             log.info("approval #%s %s", approval_id, status)
-        if always and any(self.permissions.mode(self._scope(""), o["op"]) == "ask" for o in json.loads(item["ops"])):
+        if always and any(self.permissions.mode(scope, o["op"]) == "ask" for o in json.loads(item["ops"])):
             always = False  # set to ask each time meanwhile
         if always and ok and grants and grants[0].get("kind") == "site":
             g = grants[0]  # from the stored request, never from the button
@@ -687,9 +702,11 @@ class Daemon:
             self.web.logout(req["session"])
             return {"ok": True}
         out = hub_data.answer(self, cmd, req)
-        if cmd == "hub.set" and out.get("changed") and self.tg_store:
-            self.tg_store.notice(f"🔒 Dashboard: {out['changed']} permission(s) made stricter for "
-                                 f"{perms.words(str(req.get('scope')))}.")
+        if out.get("changed") and self.tg_store:
+            what = {"hub.set": f"made stricter for {perms.words(str(req.get('scope')))}", "hub.stop": "changed: everything stopped",
+                    "hub.pause": "watcher(s) paused", "hub.revoke": "permission removed", "hub.forget": "topic forgotten",
+                    "hub.deliver": "watcher sends to the main chat again"}.get(cmd, "changed")
+            self.tg_store.notice(f"🔒 Dashboard: {out['changed']} {what}.")
         return out
 
     @staticmethod
@@ -697,7 +714,50 @@ class Daemon:
         parsed = parse_origin(origin)
         return perms.watcher_scope(parsed[0], parsed[1]) if parsed else "chat"
 
-    def ask_settings(self, scope: str, changes: dict[str, list[str]]) -> int:
+    @staticmethod
+    def _where(scope: str) -> dict:
+        """Where its approval request is shown: the topic of the private chat it came from."""
+        where = perms.private_thread(scope)
+        return {"where": list(where)} if where and where[1] else {}
+
+    def topic_cmd(self, cmd: str, req: dict) -> dict:
+        """The bridge: what applies to a topic (before every run there), and the owner's /topic command."""
+        scope = req.get("scope")
+        if not isinstance(scope, str) or not perms.SCOPE_RE.fullmatch(scope):
+            raise ToolError("bad topic")
+        p = self.permissions
+        if cmd == "topic.deliver":
+            topic = req.get("topic") or ""
+            if perms.kind(scope) != "watcher" or (topic and not perms.private_thread(topic)):
+                raise ToolError("a watcher's messages go to a topic of the private chat")
+            hub_data.check_scope(self, scope)
+            p.set_delivery(scope, topic, "Telegram")
+            return {"ok": True}
+        if perms.kind(scope) != "topic":
+            raise ToolError("bad topic")
+        if cmd == "topic.get":
+            title = req.get("title")
+            p.seen(scope, clean(title, 80) if isinstance(title, str) else "")
+        else:
+            role = req.get("role")
+            if role is not None:
+                p.set_role(scope, hub_data.check_role(role), "Telegram")
+            changes = req.get("changes") or {}
+            if changes:
+                pairs = {op: [p.get(scope, op), new] for op, new in changes.items() if p.get(scope, op) != new} \
+                    if isinstance(changes, dict) else {}
+                if pairs:
+                    hub_data.check_changes(self, scope, pairs)
+                    p.apply(scope, pairs, "Telegram")
+            if req.get("reset") is True:
+                p.apply(scope, {op: [p.get(scope, op), "default"] for op in p.all(scope)}, "Telegram")
+                p.set_role(scope, "", "Telegram")
+        return {"ok": True, "role": p.role(scope), "off": p.off(scope), "settings": p.all(scope), "chat": p.all("chat"),
+                "restricted": p.restricted(scope) or bool(p.all("chat").get("changes.*")),
+                "watchers": [w["name"] for w in (self.keeper.list_all() if self.keeper else [])
+                             if p.delivery(perms.watcher_scope(w["profile"], w["name"])) == scope]}
+
+    def ask_settings(self, scope: str, changes: dict[str, list[str]], extra: dict | None = None) -> int:
         """Anything looser asks in Telegram, whoever sent it here."""
         replaced: list[int] = []
         self.approvals.expire()
@@ -705,11 +765,13 @@ class Daemon:
             meta = json.loads(row.get("meta") or "{}") if row.get("kind") == "settings.change" else {}
             if row["status"] == "pending" and meta.get("scope") == scope:
                 changes = {**{op: c for op, c in meta["changes"].items() if self.permissions.get(scope, op) == c[0]}, **changes}
+                extra = {**(meta.get("extra") or {}), **(extra or {})}
                 replaced.append(row["id"])
         lines = [f"Change what {perms.words(scope)} may do:"]
         for op, (old, new) in changes.items():
             note = "" if op.endswith(".*") or op.startswith("flow:") else f" ({cards.note_of(op)})"
             lines.append(f"• {op}: {old} → {new}{note}")
+        lines += hub_data.extra_lines(self, extra or {})
         summary = "\n".join(lines)
         if len(summary) > 2800 or len(changes) > 60:
             raise ToolError("too many changes at once; save a few at a time")
@@ -719,7 +781,7 @@ class Daemon:
         card = {"who": "you, in the Ampi hub", "what": "Change permissions", "details": "\n".join(lines[1:]), "level": "high",
                 "risks": [f"For {perms.words(scope)}", "Approve only if you just changed this yourself"]}
         return self.approvals.add([], summary, None, kind="settings.change", ttl=SETTINGS_TTL,
-                                  meta={"scope": scope, "changes": changes}, card=card)
+                                  meta={"scope": scope, "changes": changes, "extra": extra or {}}, card=card)
 
     def _decide_settings(self, current: dict, approve: bool) -> dict:
         item = self.approvals.claim(current["id"], "approved" if approve else "rejected")
@@ -731,8 +793,11 @@ class Daemon:
             meta = json.loads(item["meta"])
             status, text = "done", "Changed."
             try:
-                hub_data.check_changes(self, meta["scope"], meta["changes"])
+                if meta["changes"]:
+                    hub_data.check_changes(self, meta["scope"], meta["changes"])
+                hub_data.check_extra(self, meta["scope"], meta.get("extra") or {})
                 self.permissions.apply(meta["scope"], meta["changes"], f"hub, approved in Telegram (#{current['id']})")
+                hub_data.apply_extra(self, meta["scope"], meta.get("extra") or {}, f"hub, approved in Telegram (#{current['id']})")
             except ToolError as e:
                 status, text = "failed", str(e)
         self.approvals.finish(current["id"], status, text)
@@ -743,10 +808,11 @@ class Daemon:
         if self.keeper is None or self.tg_store is None:
             return 0
         n = 0
-        for _, name, rows in self.keeper.due_reports():
+        for profile, name, rows in self.keeper.due_reports():
             try:
+                where = perms.private_thread(self.permissions.delivery(perms.watcher_scope(profile, name)))
                 for text in report.texts(name, rows):
-                    self.tg_store.notice(text)
+                    self.tg_store.notice(text, where)
                     n += 1
             except Exception:  # (tried again at the next round, without holding up the others)
                 log.exception("report of %s failed", name)
@@ -881,7 +947,8 @@ class Daemon:
             return {"ok": True}
         if cmd == "watch.settings":
             scope = perms.watcher_scope(profile, name)
-            return {"ok": True, "off": self.permissions.off(scope),
+            where = perms.private_thread(self.permissions.delivery(scope))
+            return {"ok": True, "off": self.permissions.off(scope), "thread": where[1] if where else 0,
                     "reports": "report" in self.permissions.all(scope).values()}
         if cmd == "watch.space_get":
             return {"ok": True, "files": b64encode_files(k.space_get(profile, name))}
@@ -1246,7 +1313,8 @@ class Daemon:
                 if st.get("session"):
                     k.checkout_sessions[st["session"]] = (profile, name, site)
             if ok and w["risk"] == "high" and self.tg_store and not routine and not reports:
-                self.tg_store.notice(f"🔴 Watcher “{name}” did: {summary.split(chr(10), 2)[min(1, summary.count(chr(10)))][:300]}")
+                self.tg_store.notice(f"🔴 Watcher “{name}” did: {summary.split(chr(10), 2)[min(1, summary.count(chr(10)))][:300]}",
+                                     perms.private_thread(self.permissions.delivery(scope)))
             out = {"ok": ok, "text": text, "audit_id": audit_id, **extra} if ok else \
                 {"ok": False, "error": text, "audit_id": audit_id}
             return out
@@ -1279,7 +1347,8 @@ class Daemon:
         approval_id = self.approvals.add(
             ops, summary, reason, kind="watch.action", choices=choices, ttl=ttl, idem_key=idem_key,
             confirm_keys=["watcher"] if pinnable and info is not None and info.level == "high" else None,
-            meta={"watcher": who, "profile": profile, "name": name, "hash": h, "step": step, "op": op, "route": route}, card=card)
+            meta={"watcher": who, "profile": profile, "name": name, "hash": h, "step": step, "op": op, "route": route,
+                  **self._where(self.permissions.delivery(scope))}, card=card)
         if op == "telegram.send":
             note_requested(self.services, o)
         audit_id = k.audit_add(profile, name, h, run_id, step, op, summary, idem_key, "requested", amount)

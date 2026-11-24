@@ -123,8 +123,9 @@ def test_the_service_may_do_nothing_without_a_session_and_nothing_else_with_one(
     s = ask({"cmd": "web.login", "key": key(d.web.new_link())})["session"]
     assert "signed in" in store.unsent_notices()[-1]["text"]
     for c in cmds:
-        assert ask({**c, "session": s, "changes": {}})["ok"] == (c["cmd"] in ("hub.activity", "hub.abilities", "hub.watchers")) \
-            or c["cmd"] == "hub.overview", c
+        assert ask({**c, "session": s, "changes": {}})["ok"] == (c["cmd"] in ("hub.activity", "hub.abilities", "hub.watchers", "hub.home", "hub.topics",
+                                                                              "hub.given")) or c["cmd"] in ("hub.overview", "hub.stop", "hub.resume", "hub.deliver"), c
+    d.permissions.apply("chat", {"changes.*": ["off", "default"]}, "t")
     assert ask({"cmd": "hub.set", "scope": SCOPE, "session": s, "changes": {"gmail.star": ["default", "off"], "gmail.archive": ["default", "report"]}})["approval"]
     assert d.permissions.all(SCOPE) == {"gmail.star": "off"} and "stricter" in store.unsent_notices()[-1]["text"]
     for cmd in ("web.login", "web.logout", "hub.overview"):
