@@ -120,7 +120,15 @@ done
 echo "    engine port refused for other users: ok"
 # A real page, with everything it runs under (firewall, no writable code, filtered system calls).
 title=$(ask '{"cmd": "open", "url": "https://example.com/", "engine": "lightpanda"}' snapshot.title) || title=
+engines() { { pgrep -u ampicheckout; pgrep -u "$LP_USER"; true; } | sort; }
+before=$(engines)
 ask "{\"cmd\": \"close\", \"session\": \"$(ask '{"cmd": "status"}' session || true)\"}" ok >/dev/null || true
+ask '{"cmd": "status"}' state >/dev/null || true  # (waiting while the session ends: it must get new engines)
+after=$(engines)
 [[ $title == "Example Domain" ]] || give_up "it didn't open a page (${title:-no answer}); see: systemctl status ampi-checkout-lp"
 echo "    opened a page: ok"
+if [[ -z $before || -z $after || -n $(comm -12 <(echo "$before") <(echo "$after")) ]]; then
+  give_up "SECURITY: an engine outlived its session; see: journalctl -u ampi-checkout"
+fi
+echo "    new engines for a new session: ok"
 echo "Done."

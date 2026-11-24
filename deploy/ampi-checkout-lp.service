@@ -23,6 +23,8 @@ ExecStart=/usr/local/lib/lightpanda/current/lightpanda serve --host 127.0.0.1 --
 # Nothing from pages (console output, errors) reaches the journal.
 StandardOutput=null
 StandardError=null
+# (How ampi-checkout.service ends it.)
+SuccessExitStatus=SIGKILL
 Restart=always
 RestartSec=2
 RuntimeMaxSec=1d
