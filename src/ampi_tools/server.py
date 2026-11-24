@@ -40,6 +40,7 @@ from .ops import (
     MAX_PENDING, MAX_SUMMARY, OPS, Approvals, Policy, Services, clean, clean_block, execute, id_list, pre_resolve,
     prepare, shares_with_others, summarize, validate,
 )
+from . import web_sessions
 from . import cards, hub_data, permissions as perms, report, watch_spec as ws
 from .keeper import (
     ACTIVATE_TTL, ALL_WATCHERS_PENDING_CAP, DEFAULT_ACTION_TTL, MAX_ACTION_TTL, ORIGIN_RE, WATCHER_PENDING_CAP, Keeper,
@@ -73,7 +74,8 @@ ADMIN = {"approvals.pending", "approvals.notified", "approvals.decide", "notices
          "runs.unregister", "telegram.protect",
          # watchers v2: only the bridge's engine talks to the keeper
          "watch.propose", "watch.get", "watch.list", "watch.status", "watch.delete", "watch.space_get",
-         "watch.space_put", "watch.audit", "watch.run", "watch.settings"}
+         "watch.space_put", "watch.audit", "watch.run", "watch.settings",
+         "web.link", "web.out"}
 # The hub (the same user as this service; Ampi and the bridge run as another).
 HUB = {"hub.overview", "hub.activity", "hub.abilities", "hub.watchers", "hub.set"}
 WATCHER_ONLY = {"youtube.ids", "youtube.show", "gmail.meta"} | ops_social.WATCHER_ONLY
@@ -92,6 +94,7 @@ AGENT_ROUTINE_MAX = 25  # emails per request; more asks
 OUTSIDE = "Not asked by you in chat: outside content (emails, messages, pages) may be behind it"
 PROPOSALS_PENDING_CAP = 5
 RISK_ICON = ws.RISK_ICON
+DASH_USER = "ampidash"  # the dashboard on the web
 SETTINGS_TTL = 1800
 log = logging.getLogger("ampi-tools")
 
@@ -174,10 +177,20 @@ def peer_uid(writer: asyncio.StreamWriter) -> int:
         return -1
 
 
+def dash_uid() -> int:
+    """The user of the dashboard service; -1 without one."""
+    try:
+        import pwd
+        return pwd.getpwnam(DASH_USER).pw_uid
+    except (ImportError, KeyError):
+        return -1
+
+
 class Daemon:
     def __init__(self, services: Services, approvals: Approvals, policy: Policy, trusted: PidCheck,
                  runs: RunRegistry | None = None, keeper: Keeper | None = None,
-                 permissions: Permissions | None = None):
+                 permissions: Permissions | None = None, web: web_sessions.WebSessions | None = None):
+        self.web = web or web_sessions.WebSessions()
         self.services = services
         self.approvals = approvals
         self.policy = policy
@@ -198,12 +211,19 @@ class Daemon:
     async def handle(self, request: dict, pid: int, uid: int = -1) -> dict:
         try:
             cmd = request.get("cmd")
+            if uid >= 0 and uid == dash_uid():
+                return self.web_cmd(cmd, request)  # (nothing else for that user)
             if cmd in HUB:
                 if uid < 0 or uid != os.geteuid():
                     raise ToolError("only for the Ampi hub")
                 return hub_data.answer(self, cmd, request)
             if cmd in ADMIN and not await self.trusted(pid):
                 raise ToolError("only the owner can answer approval requests (Telegram buttons)")
+            if cmd in ("web.link", "web.out"):  # (ADMIN: the bridge, for the owner's /dashboard)
+                if cmd == "web.link":
+                    return {"ok": True, "url": self.web.new_link()}
+                self.web.logout()
+                return {"ok": True}
             if cmd == "run":
                 ops = validate(request.get("ops"))
                 # The watchers' YouTube ops use their own reserve of quota and requests; only the bridge has it.
@@ -649,6 +669,26 @@ class Daemon:
         if self.keeper is None:
             raise ToolError("the watcher keeper isn't set up")
         return self.keeper
+
+    def web_cmd(self, cmd: Any, req: dict) -> dict:
+        """The dashboard service: signing in with the owner's one-time link, and then the hub's pages."""
+        if cmd == "web.login":
+            session = self.web.login(req.get("key"))
+            if self.tg_store:
+                self.tg_store.notice("🔓 Someone signed in to the dashboard with your link. Not you? Send /dashboard off")
+            log.info("dashboard: signed in")
+            return {"ok": True, "session": session}
+        if cmd not in HUB and cmd != "web.logout":
+            raise ToolError("not for the dashboard")
+        self.web.check(req.get("session"))
+        if cmd == "web.logout":
+            self.web.logout(req["session"])
+            return {"ok": True}
+        out = hub_data.answer(self, cmd, req)
+        if cmd == "hub.set" and out.get("changed") and self.tg_store:
+            self.tg_store.notice(f"🔒 Dashboard: {out['changed']} permission(s) made stricter for "
+                                 f"{perms.words(str(req.get('scope')))}.")
+        return out
 
     @staticmethod
     def _scope(origin: str) -> str:
@@ -1336,7 +1376,8 @@ class Daemon:
                         except asyncio.TimeoutError:
                             wr.transport.abort()
                     return
-                response = await (self.handle(request, pid, peer_uid(wr)) if request.get("cmd") in HUB
+                uid = peer_uid(wr)
+                response = await (self.handle(request, pid, uid) if request.get("cmd") in HUB or uid == dash_uid() >= 0
                                   else self._while_there(request, pid, rd))
                 if response is None:
                     return
@@ -1484,7 +1525,10 @@ async def _serve(home: Path) -> None:
             store.notice(f"⚠️ Request #{approval_id} was approved, but the tools service stopped while running it; "
                          "the outcome is unknown. Check before asking again.")
         daemon = Daemon(services, approvals, policy, systemd_main_pid_check(unit), keeper=Keeper(home / "watch.sqlite3"),
-                        permissions=Permissions(home / "permissions.sqlite3"))
+                        permissions=Permissions(home / "permissions.sqlite3"),
+                        web=web_sessions.WebSessions(web_sessions.home_url(home / "config.toml")))
+        if daemon.web.url:
+            certs = asyncio.create_task(web_sessions.watch_cert(daemon.web.url, store.notice))  # noqa: F841
         reporter = asyncio.create_task(daemon.keep_reporting())  # noqa: F841
         refresher = asyncio.create_task(refresh_meta_tokens(services))  # noqa: F841 (runs for the daemon's life)
         teller = asyncio.create_task(keep_telling_tg_reader(services))  # noqa: F841

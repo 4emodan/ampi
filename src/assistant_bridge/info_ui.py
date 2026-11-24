@@ -53,6 +53,21 @@ class InfoUI:
         for nonce, origin, fields in made:  # valid only on the message they were sent with
             self.buttons[nonce] = (origin, fields, sent.get("message_id"), now)
 
+    async def cmd_dashboard(self, chat_id: int, thread_id: int, args: str) -> None:
+        """The link goes straight to Telegram: never into the chat logs Ampi reads."""
+        out = args.strip().lower() == "off"
+        try:
+            resp = await self.ask(self.socket, {"cmd": "web.out" if out else "web.link"}, timeout=20)
+        except ServiceError as e:
+            resp = {"ok": False, "error": str(e)}
+        if not resp.get("ok"):
+            text = f"The dashboard: {resp.get('error')}"
+        elif out:
+            text = "Signed out everywhere."
+        else:
+            text = f"Your dashboard (works once, for 5 minutes; don't forward it):\n{resp['url']}"
+        await self.bot.api.send_message(chat_id, text, thread_id or None)
+
     async def handle_callback(self, cq: dict) -> None:
         user = (cq.get("from") or {}).get("id")
         message = cq.get("message") or {}

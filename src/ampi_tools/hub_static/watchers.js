@@ -2,7 +2,7 @@
 (async () => {
   const { el, api, say } = Hub, out = document.getElementById("out");
   try {
-    for (const w of (await api("GET", "/api/watchers")).watchers) {
+    for (const w of (await api("GET", "api/watchers")).watchers) {
       const box = el("div", {});
       let loaded = false;
       const d = el("details", { class: "panel" },

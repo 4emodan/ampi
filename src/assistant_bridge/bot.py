@@ -54,6 +54,7 @@ COMMANDS = [
     {"command": "status", "description": "Show this conversation's status"},
     {"command": "watchers", "description": "List watchers (automations)"},
     {"command": "info", "description": "Personal info (masked) and site permissions"},
+    {"command": "dashboard", "description": "A one-time link to your settings page"},
     {"command": "watcher", "description": "One watcher: details, pause, resume, run, delete"},
     {"command": "social", "description": "Social mode here: read Instagram/Threads, no web, until /new"},
     {"command": "help", "description": "How to use this assistant"},
@@ -70,6 +71,7 @@ HELP_TEXT = (
     "/status – session info and usage\n"
     "/watchers – your watchers; /watcher NAME – details and buttons\n"
     "/info – your personal info (masked) and which sites may fill it\n"
+    "/dashboard – a one-time link to your settings page (/dashboard off: sign out everywhere)\n"
     "/social – social mode for this conversation: I can read Instagram and Threads here, without web access, "
     "until /new\n\n"
     "You can send photos and files; I save them to my workspace and can read them."
@@ -946,6 +948,12 @@ class ProfileBot:
             await self._send_text(chat_id, thread_id, "Personal info is shown only in the private chat.", markdown=False)
             return
         await self.info_ui.cmd_info(chat_id, thread_id)
+
+    async def _cmd_dashboard(self, chat_id: int, thread_id: int, args: str) -> None:
+        if self.info_ui is None or chat_id != self.profile.owner_chat_id:
+            await self._send_text(chat_id, thread_id, "The dashboard is only for the private chat.", markdown=False)
+            return
+        await self.info_ui.cmd_dashboard(chat_id, thread_id, args)
 
     async def _cmd_watchers(self, chat_id: int, thread_id: int, args: str) -> None:
         if self.watch_ui is None or chat_id != self.profile.owner_chat_id:

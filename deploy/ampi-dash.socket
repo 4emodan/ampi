@@ -1,0 +1,12 @@
+[Unit]
+Description=Ampi dashboard: socket for nginx
+
+[Socket]
+ListenStream=/run/ampi-dash.sock
+SocketUser=root
+SocketGroup=www-data
+SocketMode=0660
+Accept=no
+
+[Install]
+WantedBy=sockets.target

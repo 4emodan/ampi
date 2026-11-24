@@ -94,6 +94,7 @@ src/ampi_phone/         the phone gateway (user `ampiphone`, stdlib, socket-acti
                         signin.py = ampi-signin (user `ampisignin`): has the phone unlock a saved login, over TLS of
                         its own inside a connection the gateway only passes on, and gives it to the checkout controller
                         (bind_login / fill_login) for the site its page is really on
+src/ampi_dash/dash.py   the dashboard on the web (user `ampidash`, stdlib, docs/DASHBOARD.md); sessions: ampi_tools/web_sessions.py
 companion/              the Android app: plain Java, no libraries, built by companion/build.ps1 with the SDK tools only;
                         scripts/companion.ps1 installs and pairs it over USB (docs/COMPANION.md)
 tests/                  pytest; fake claude CLI + fake Telegram API, no network

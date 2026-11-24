@@ -82,7 +82,7 @@
 
   async function load(selectName) {
     try {
-      places = (await api("GET", "/api/places")).places;
+      places = (await api("GET", "api/places")).places;
     } catch (e) {
       say(e.message, true);
       return;
@@ -119,8 +119,8 @@
     $("save").disabled = true;
     try {
       let saved;
-      if (current) saved = (await api("PUT", `/api/places/${encodeURIComponent(current.name)}`, { ...body, rev: current.rev })).place;
-      else saved = (await api("POST", "/api/places", body)).place;
+      if (current) saved = (await api("PUT", `api/places/${encodeURIComponent(current.name)}`, { ...body, rev: current.rev })).place;
+      else saved = (await api("POST", "api/places", body)).place;
       say(`Saved ${saved.name}.`);
       await load(saved.name);
     } catch (e) {
@@ -135,7 +135,7 @@
     const extra = ["home", "work"].includes(current.name) ? " Ampi and watchers use it by name." : "";
     if (!confirm(`Delete “${current.name}” and its site permissions?${extra}`)) return;
     try {
-      await api("DELETE", `/api/places/${encodeURIComponent(current.name)}`, { rev: current.rev });
+      await api("DELETE", `api/places/${encodeURIComponent(current.name)}`, { rev: current.rev });
       say(`Deleted ${current.name}.`);
       current = null;
       cancel();
@@ -151,7 +151,7 @@
     if (!a.line1 && !a.city) { say("Type the street and city first.", true); return; }
     $("find").disabled = true;
     try {
-      const r = await api("POST", "/api/geocode", { address: query });
+      const r = await api("POST", "api/geocode", { address: query });
       $("f-location").value = r.location;
       const note = $("found");
       note.replaceChildren("Found: " + (r.title || "a match") + " · ");
