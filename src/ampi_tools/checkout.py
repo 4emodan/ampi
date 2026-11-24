@@ -164,20 +164,22 @@ CODE_FRAME = re.compile(r"3-?ds|threeds|three-d|/acs\b|acs\.", re.I)
 CODE_SIGNUP = re.compile(r"\b(regist(er|ration)|sign ?up|creat(e|ing) (an? |your )?(new )?account|new account|join (us|now)|reset|forgot(ten)?|new pin|set (a|your) pin|"
                          r"rekisteröidy|luo tili|registrieren|konto erstellen|skapa konto|регистрация|εγγραφή)\b", re.I)
 # Where a session may begin for a code to go in later: a site's start page, or an address that is plainly its sign-in page.
-ENTRY_LOGIN = re.compile(r"([a-z]+[-_])?(log|sign)[-_]?(in|on)([-_][a-z]+)?|auth|authenticate|authentication|sso|sessions?|(my[-_]?)?account|kirjaudu(-sisaan)?|oma-?tili|logga-in|"
-                         r"anmelden|anmeldung|connexion|mon-compte|acceso|entrar|accedi|inloggen|zaloguj|vhod", re.I)
+ENTRY_LOGIN = re.compile(r"([a-z]+[-_])?(log|sign)[-_]?(in|on)([-_][a-z]+)?|auth|authenticate|authentication|sso|kirjaudu(-sisaan)?|logga-in|"
+                         r"anmelden|anmeldung|connexion|acceso|entrar|accedi|inloggen|zaloguj|vhod", re.I)
+ENTRY_HOME = re.compile(r"sessions?(/new)?|(my[-_]?)?account|oma-?tili|mon-compte", re.I)  # only as they are
 ENTRY_LAST = re.compile(r"e-?mail|password|new|start|identifier|username|user|form|index", re.I)
 ENTRY_LANG = re.compile(r"(en|de|fr|es|it|pt|nl|sv|fi|nb|nn|da|pl|cs|sk|hu|ro|bg|el|et|lv|lt|sl|hr|ru|uk|tr|ja|ko|zh|he|ar|ca|eu|ga|mt)([-_][a-z]{2})?", re.I)
 ENTRY_QUERY = re.compile(r"lang|locale|language|hl|utm_\w+", re.I)
 ENTRY_NEXT = frozenset("next redirect redirect_to redirecturl redirect_uri return returnto return_to returnurl return_url callbackurl callback continue dest destination route page from r".split())
 # Of the sign-in for another app: says nothing about where it leads.
-LEAD_SKIP = frozenset("scope response_type response_mode prompt claims acr_values ui_locales audience resource code_challenge code_challenge_method state nonce".split())
+LEAD_SKIP = frozenset("response_type response_mode prompt claims acr_values ui_locales audience resource code_challenge code_challenge_method state nonce".split())
 LOGIN_NAV = re.compile(
     r"(log|sign) ?(in|on)( here| now)?|(log|sign) ?in ?(/|or|&|and) ?(sign ?up|register|join|create( an)? account)|open (the )?(log|sign) ?in( dialog| form| menu| window)?|"
     r"toggle (navigation|menu)|(main )?navigation|(my )?account|my page|members?( area| log ?in)?|(client|customer|member) (log|sign) ?in|"
     r"((log|sign) ?in|continue) with (your )?(e-?mail|password)( address)?|(use|with)( your| my)? (e-?mail|password)( instead)?|e-?mail|password|menu|open menu|already a member\??( (log|sign) ?in)?|"
     r"i already have an account|kirjaudu( sisään)?|oma tili|logga in|mina sidor|anmelden|einloggen|mein konto|inloggen|connexion|se connecter|mon compte|"
     r"iniciar sesión|mi cuenta|accedi|zaloguj( się)?|войти|вход|личный кабинет|σύνδεση|είσοδος|ο λογαριασμός μου", re.I)
+NAV_NOT = re.compile(r"\b(order|book(ing)?|confirm|cancel|accept|approve|agree|reserve|subscribe|buy|checkout|submit|send|pay)\b", re.I)
 LOGOUT = re.compile(r"(log|sign) ?(out|off)|kirjaudu ulos|logga ut|logg ut|log ud|ausloggen|uitloggen|(se )?déconnecter|déconnexion|cerrar sesión|"
                     r"disconnetti|wyloguj( się)?|выйти|αποσύνδεση|logi välja", re.I)
 COOKIE_CAPTION = re.compile(r"(decline|reject|deny|accept|allow)( all)?( cookies)?|got it|ok(ay)?|i (agree|accept|understand)|agree|understood|(only )?necessary( cookies)?( only)?|close|×|dismiss", re.I)
@@ -415,9 +417,11 @@ def _entry_path(path: str) -> tuple[bool, str]:
         parts = parts[1:]
     if not parts or parts in (["index"], ["home"], ["default"], ["start"]):
         return True, ""
+    if ENTRY_HOME.fullmatch("/".join(parts)):
+        return True, ""
     if len(parts) > 1 and ENTRY_LAST.fullmatch(parts[-1]) and ENTRY_LOGIN.fullmatch(parts[-2]):  # /login/email
         parts = parts[:-1]
-    return bool(ENTRY_LOGIN.fullmatch(parts[-1])) and all(re.fullmatch(r"[a-z][a-z_-]{0,24}", x, re.I) for x in parts[:-1]), "/".join(parts)
+    return bool(ENTRY_LOGIN.fullmatch(parts[-1])) and len(parts) <= 3 and all(re.fullmatch(r"[a-z][a-z_-]{0,24}", x, re.I) for x in parts[:-1]), "/".join(parts)
 
 
 def _leads_home(address: str, url: str) -> bool:
@@ -448,10 +452,10 @@ def lead_words(url: str, depth: int = 0) -> list[str]:
     inside = u.fragment.partition("?")[2] or ("" if u.fragment.startswith(("/", "!")) else u.fragment)
     out = []
     for k, v in urllib.parse.parse_qsl(f"{u.query}&{inside}", keep_blank_values=True):
-        if k.lower() in LEAD_SKIP:
-            continue
         for _ in range(3):
             v = urllib.parse.unquote(v)
+        if k.lower() == "scope" or k.lower() in LEAD_SKIP and "/" not in v:
+            continue
         if "/" in v and depth < 3:
             out += [_as_words(urllib.parse.urlsplit(v).path), *lead_words(v, depth + 1)]
         else:
@@ -1636,9 +1640,10 @@ class Controller:
         no = Refused("that field is for a one-time code: only the owner enters one, on the phone (`signin code`, right after `signin fill`)")
         if code_field(d, loose=s.account):
             raise no
-        bare = re.sub(r"[\s-]+", "", text)
-        if a_code(bare) and len(bare) <= 10 and re.search(r"\d", bare) and d.get("kind") == "input" and d.get("type") in CODE_TYPES and not any(
-                PLAIN_FIELD.fullmatch(_spaced(d, k).strip(" *:")) for k in ("name", "id", "label")):
+        bare = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", text))
+        like_one = 0 < len(bare) <= 10 and any(c.isdigit() for c in bare) or re.fullmatch(r"[A-Z]{4,10}", bare)
+        if like_one and d.get("kind") == "input" and d.get("type") in CODE_TYPES and not any(
+                PLAIN_FIELD.fullmatch(x := _spaced(d, k).strip(" *:")) or QUANTITY.fullmatch(x) for k in ("name", "id", "label")):
             r = self._run(s, frame, {"op": "code", "n": n}) or {}
             if CODE_SENT.search(br.clean(str(r.get("words") or ""))) and not NOT_CODE.search(_spaced(d, "label") if d.get("label") else _spaced(d, "name", "id")):
                 raise no
@@ -2136,7 +2141,7 @@ class Controller:
         if s.account:
             return False
         texts = [t for t in (login_caption(t) for t in g["texts"]) if t]
-        named = any(LOGIN_NAV.fullmatch(t) for t in texts)
+        named = any(LOGIN_NAV.fullmatch(t) for t in texts) and not any(CODE_DANGER.search(t) or NAV_NOT.search(t) for t in texts)
         if d.get("kind") == "link":
             if g["dest"].lower().startswith("javascript:"):
                 return named
@@ -2226,7 +2231,8 @@ class Controller:
         sends = " \n ".join([*(br.clean(str(x)) for x in (r.get("captions") or [])[:10]), address_words(str(r.get("action") or ""))])
         if self._to_pay(snap, frames) or snap["risky_checked"] or priced(words):
             raise Refused("there is something to pay on this page; the owner does that")
-        if (CODE_DANGER.search(words) or CODE_HEAD.search(br.clean(str(r.get("heads") or ""))) or CODE_DANGER.search(sends) or CODE_DANGER.search(address_words(frames[0]["url"]))
+        if (CODE_DANGER.search(words) or CODE_HEAD.search(br.clean(str(r.get("heads") or ""))) or any(
+                x.search(y) for x in (CODE_DANGER, CODE_HEAD) for y in (sends, address_words(frames[0]["url"])))
                 or any(CODE_FRAME.search(f["url"]) for f in frames[1:])):
             raise Refused("this page seems to ask for a code to confirm something else than a sign-in; the owner does that")
 

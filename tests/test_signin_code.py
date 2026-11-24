@@ -200,6 +200,8 @@ def test_what_to_pay_ends_it(env):
                                     (f"{SITE}/login?a=1#/x", True), (f"{SITE}/payment/login", False), (f"{SITE}/login?to=security-settings", False),
                                     (f"{SITE}/Account/Login?ReturnUrl=%2Fconnect%2Fauthorize%2Fcallback%3Fclient_id%3Dweb%26scope%3Dopenid%2520profile%2520email%26state%3Dx", True),
                                     (f"{SITE}/auth/realms/x?client_id=web&response_type=code&scope=openid+profile+email&redirect_uri=https%3A%2F%2Fwww.club.example%2Fsignin-oidc", True),
+                                    (f"{SITE}/login?state=/settings/security", False), (f"{SITE}/login?state=%2Fwallet%2Fsend", False), (f"{SITE}/login?state=x1.profile", True),
+                                    (f"{SITE}/login?resource=/wallet/send", False),
                                     (f"{SITE}/Account/Login?ReturnUrl=%2Fconnect%2Fauthorize%3Fredirect_uri%3D%2Fwallet%2Fsend", False)])
 def test_where_the_sites_own_sign_in_page_leads(env, url, ok):
     c, eng, sid, refs = env
@@ -213,7 +215,9 @@ def test_where_the_sites_own_sign_in_page_leads(env, url, ok):
     (f"{SITE}/#/login", True), (f"{SITE}/en/log-in?lang=en", True), (f"{SITE}/?utm_source=x", True), (f"{SITE}/en-gb/", True), (f"{SITE}/me", False), (f"{SITE}/my", False), (f"{SITE}/go?x=1", False),
     (f"{SITE}/tx?to=evil&amount=500", False), (f"{SITE}/?do=sendmoney&to=evil", False), (f"{SITE}/login?next=L3NlY3VyaXR5", False), (f"{SITE}/login?returnTo=billing", False),
     (f"{SITE}/login?user_code=ABCD-EFGH", False), (f"{SITE}/login?token=MAGIC", False), (f"{SITE}/#send?to=evil", False), (f"{SITE}/#x", False), (f"{SITE}/index.html", True), (f"{SITE}/account", True), (f"{SITE}/my-account/", True), (f"{SITE}/session/new", True), (f"{SITE}/member-login", True),
-    (f"{SITE}/shop/login", True), (f"{SITE}/user-login", True), (f"{SITE}/index.php?route=account/login", True), (f"{SITE}/login?next=/", True), (f"{SITE}/login/email", True),
+    (f"{SITE}/shop/login", True), (f"{SITE}/account/email", False), (f"{SITE}/account/password", False), (f"{SITE}/login?next=/account/email", False),
+    (f"{SITE}/session/password", False), (f"{SITE}/en/my-account", True), (f"{SITE}/login?state=abc", False), (f"{SITE}/orders/cancel/session", False), (f"{SITE}/billing/topup/account", False),
+    (f"{SITE}/a/b/c/login", False), (f"{SITE}/a/b/login", True), (f"{SITE}/user-login", True), (f"{SITE}/index.php?route=account/login", True), (f"{SITE}/login?next=/", True), (f"{SITE}/login/email", True),
     (f"{SITE}/login?callbackUrl={SITE}/", True), (f"{SITE}/login?callbackUrl=https://evil.example/", False), (f"{SITE}/login?next=//evil.example/", False),
     (f"{SITE}/login?next=/account?do=x", False), (f"{SITE}/login?go=/", False), (f"{SITE}/wallet/account", False), (f"{SITE}/transfer-login", False), (f"{SITE}/x9/login", False),
     (f"{SITE}/settings/security", False),
@@ -239,7 +243,7 @@ def started(env, url=f"{SITE}/"):
 
 @pytest.mark.parametrize("n,press,ok", [
     (1, {"plain": True, "dest": f"{SITE}/login", "submits": False}, True), (2, {"dest": f"{SITE}/settings/security", "submits": False}, False),
-    (3, {"submits": False}, True), (3, {"submits": True}, False), (3, {"submits": False, "texts": ["Open login dialog", "☰"]}, True), (3, {"submits": False, "texts": ["Sign in / Register"]}, True),
+    (3, {"submits": False}, True), (3, {"submits": True}, False), (3, {"submits": False, "texts": ["Open login dialog", "☰"]}, True), (3, {"submits": False, "texts": ["Sign in / Register"]}, True), (3, {"submits": False, "texts": ["Confirm booking", "Menu"]}, False),
     (1, {"dest": "javascript:void(0)", "submits": False}, True), (2, {"dest": "javascript:void(0)", "submits": False}, False), (8, {"dialog": "cookies", "submits": False, "texts": ["Got it"]}, True), (4, {"dest": f"{SITE}/login?next=/transfer/confirm", "submits": False}, False),
     (5, {"submits": False}, False), (7, {"dest": "https://evil.example/login", "submits": False}, False),
     (1, {"plain": True, "dest": f"{SITE}/login?state=abc", "submits": False}, True), (2, {"plain": True, "dest": f"{SITE}/login", "submits": False}, True),
@@ -328,7 +332,7 @@ def test_another_route_of_the_same_page_is_another_place(env):
         assert bind_code(c, sid, r, press=None)["ok"]
 
 
-@pytest.mark.parametrize("facts", [{"captions": ["Pay now"]}, {"captions": ["Verify https://www.club.example/transfer"]}, {"action": f"{SITE}/transfer/confirm"}])
+@pytest.mark.parametrize("facts", [{"captions": ["Pay now"]}, {"action": f"{SITE}/checkout/verify"}, {"captions": ["Complete checkout"]}, {"captions": ["Verify https://www.club.example/transfer"]}, {"action": f"{SITE}/transfer/confirm"}])
 def test_what_would_send_it_counts_too(env, facts):
     c, eng, sid, _ = env
     r = signed_in(env)
@@ -466,7 +470,7 @@ def test_codes_for_signing_in(env, words):
     assert bind_code(c, sid, r)["ok"]
 
 
-@pytest.mark.parametrize("what", ["captcha", "total", "psp", "3ds", "url", "frame", "field", "disabled", "link", "caption"])
+@pytest.mark.parametrize("what", ["captcha", "total", "psp", "3ds", "url", "url2", "frame", "field", "disabled", "link", "caption"])
 def test_pages_it_is_not_for(env, what):
     c, eng, sid, _ = env
     r, kw = signed_in(env), {}
@@ -479,8 +483,8 @@ def test_pages_it_is_not_for(env, what):
         eng.frames.append(Frame("p", "https://js.stripe.com/v3/x", parent="main"))
     elif what == "3ds":
         eng.frames.append(Frame("p", "https://acs.bank.example/x", parent="main"))
-    elif what == "url":
-        top.url = f"{SITE}/payments/verify"
+    elif what.startswith("url"):
+        top.url = f"{SITE}/payments/verify" if what == "url" else f"{SITE}/checkout/verify"
     elif what == "frame":
         eng.frames.append(Frame("g", "https://www.club.example/f", parent="main", elements=[el("input", name="otp", label="Inner")]))
         snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
@@ -665,7 +669,8 @@ def test_words_go_into_any_field_there(env):
     snap = c.handle({"cmd": "snapshot", "session": sid})["snapshot"]
     ref = next(e["ref"] for e in snap["elements"] if e["ref"].endswith(":10"))
     assert c.handle({"cmd": "type", "session": sid, "ref": ref, "text": "nuts and shellfish"})["ok"]
-    assert not c.handle({"cmd": "type", "session": sid, "ref": ref, "text": "482 913"})["ok"]
+    for code in ("482 913", "48.29.13", "48\u200b2913", "４８２９１３", "ABCDEF", "4", "G-482913"):
+        assert not c.handle({"cmd": "type", "session": sid, "ref": ref, "text": code})["ok"], code
     b = c.handle({"cmd": "bind", "session": sid, "refs": [ref]})
     assert c.handle({"cmd": "fill", "session": sid, "origin": b["origin"], "fields": [{"ref": ref, "binding": b["bindings"][0], "value": "00100"}]})["ok"]
 
