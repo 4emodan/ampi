@@ -289,11 +289,18 @@ window.browser = {
   permissions: { request: async (p) => { asked.push(p.origins); return window.allow !== false; }, remove: async (p) => { removed.push(p.origins); return true; },
     getAll: async () => ({ origins: ['https://left.example/*'] }) },
   cookies: { getAll: async (q) => { asked.push(q); return [{ name: 'sid', value: 'Zx9'.repeat(14), domain: 'www.club.example', hostOnly: true, path: '/', secure: true, httpOnly: true, sameSite: 'lax' }]; } } };
+// (A headless page with its time sped up ends before a real database answers.)
+const kept = new Map(), later = (f) => setTimeout(f, 1);
+Object.defineProperty(window, 'indexedDB', { value: { open: () => {
+  const r = { result: { createObjectStore: () => {}, transaction: () => {
+    const t = { objectStore: () => ({ get: (k) => ({ result: kept.get(k) }), put: (v, k) => { kept.set(k, v); return {}; }, delete: (k) => { kept.delete(k); return {}; } }) };
+    later(() => t.oncomplete()); return t; } } };
+  later(() => { r.onupgradeneeded && r.onupgradeneeded(); r.onsuccess(); }); return r; } } });
 Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (t) => { copied.push(t); } } });
 """
 DRIVE = r"""
 (async () => {
-  const out = {}, $ = (id) => document.getElementById(id), wait = (f) => new Promise((ok, no) => { let n = 0; const t = setInterval(() => { if (f()) { clearInterval(t); ok(); } else if (++n > 100) { clearInterval(t); no(new Error('waited: ' + f)); } }, 20); });
+  const out = {}, $ = (id) => document.getElementById(id), wait = (f) => new Promise((ok, no) => { let n = 0; const t = setInterval(() => { if (f()) { clearInterval(t); ok(); } else if (++n > 400) { clearInterval(t); no(new Error('waited: ' + f)); } }, 20); });
   await wait(() => !$('setup').hidden); out.left = removed.slice();
   $('key').value = 'nonsense'; $('save').click(); await wait(() => $('note').textContent); out.bad = $('note').textContent;
   $('key').value = 'ampi-key2.""" + SECRET + r""".PUBLIC'; $('save').click(); await wait(() => !$('give').hidden);
@@ -301,7 +308,7 @@ DRIVE = r"""
   window.allow = false; $('go').click(); await wait(() => $('note').textContent); out.no = [$('note').textContent, asked.length];
   window.allow = true; $('go').click(); await wait(() => !$('hand').hidden);
   out.done = $('done').textContent; out.asked = asked.slice(1); out.removed = removed.slice(1);
-  $('copy').click(); await wait(() => copied.length); out.copied = copied[0].slice(0, 14); out.html = document.documentElement.outerHTML.includes('Zx9Zx9');
+  $('copy').click(); await wait(() => copied.length); out.copied = copied[0].slice(0, 14); out.html = document.documentElement.outerHTML.includes(['Zx9', 'Zx9'].join(''));
   $('reset').click(); await wait(() => !$('setup').hidden); out.reset = true;
   document.title = 'RESULT' + JSON.stringify(out);
   const p = document.createElement('pre'); p.textContent = 'RESULT' + JSON.stringify(out); document.body.append(p);
@@ -318,14 +325,12 @@ def test_the_popup(tmp_path, pair):
     page = page.replace('<script src="logic.js"></script>', f"<script>{POPUP}</script><script src=\"logic.js\"></script>")
     page = page.replace("</html>", "<script>" + DRIVE.replace("PUBLIC", pair[1]) + "</script></html>")
     (tmp_path / "t.html").write_text(page, encoding="utf-8")
-    r = subprocess.run([EDGE, "--headless=new", "--disable-gpu", "--no-first-run", "--timeout=15000", f"--user-data-dir={tmp_path / 'profile'}", "--dump-dom",
+    r = subprocess.run([EDGE, "--headless=new", "--disable-gpu", "--no-first-run", "--virtual-time-budget=20000", f"--user-data-dir={tmp_path / 'profile'}", "--dump-dom",
                         (tmp_path / "t.html").as_uri()], capture_output=True, timeout=90)
     dom = r.stdout.decode("utf-8", "replace")
-    if "RESULT" not in dom.partition("</script></html>")[2] and "<pre>RESULT" not in dom:
+    if "<pre>RESULT" not in dom:
         pytest.skip(f"{EDGE} gave no page: {r.stderr.decode('utf-8', 'replace')[-300:]}")
     out = json.JSONDecoder().raw_decode(html.unescape(dom[dom.index("<pre>RESULT") + 11:]))[0]
-    if "indexedDB" in str(out.get("error")):
-        pytest.skip(out["error"])
     assert "error" not in out, out["error"]
     assert out["left"] == [["https://left.example/*"]] and "isn't the key" in out["bad"] and out["host"] == "www.club.example" and out["typed"] == ""
     assert out["no"] == ["Not given.", 1] and out["done"] == "Ready: 1 cookies of www.club.example." and out["copied"] == "ampi-session2." and out["html"] is False
