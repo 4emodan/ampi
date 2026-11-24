@@ -129,7 +129,7 @@ ACCOUNT_OWN = frozenset({"account", "my-account", "profile", "me", "dashboard", 
                          "reservations", "my-reservations", "my-classes", "my-schedule", "members", "member", "members-area", "membership",
                          "memberships", "subscriptions", "tickets", "history"})
 # A part of such an address that does something all the same (old sites book with a plain link).
-ACCOUNT_VERB = re.compile(r"(re|un|de)?-?(book|register|sign-?up|sign-?in|rsvp|attend|apply|request|use|order|add|start|check-?in|refund|like|vote|"
+ACCOUNT_VERB = re.compile(r"(re|un|de)?-?(book|participate|enter|going|interested|reserv(e|ation)|join|enrol|enroll|register|sign-?up|sign-?in|rsvp|attend|apply|request|use|order|add|start|check-?in|refund|like|vote|"
                           r"follow|go|do|run|set|put|post|take|get|hold|select|choose|schedule|call|action|process|complete|finish|done|varaa|ilmoittaudu|osta)"
                           r"([-_]?(now|it|this|me|in|up|off|out|class|lesson|course|event|session|spot|seat|place|ticket|online|free|\d+))*", re.I)
 ACCOUNT_VIEW = re.compile(r"\d+|[0-9a-f]{6,}(-[0-9a-f]+)*|details?|view|history|upcoming|past|list|overview|orders|bookings|reservations|profile|index", re.I)
@@ -157,7 +157,8 @@ def _place(dest: str, here: str, origin: str) -> bool:
     parts = [x.lower().removesuffix(".html").removesuffix(".php") for x in path.strip("/").split("/")]
     if re.fullmatch(r"[a-z]{2}(-[a-z]{2})?", parts[0]) and len(parts) > 1:  # /en/…
         parts = parts[1:]
-    if any(ACCOUNT_VERB.fullmatch(x) for x in parts[1:]):
+    values = [k.partition("=")[2] for k in query.split("&")]
+    if any(ACCOUNT_VERB.fullmatch(re.sub(r"\.[a-z]{1,5}$", "", x.split(";")[0].lower())) for x in [*parts[1:], *values]) or ";" in path:
         return False
     if parts[0] in ACCOUNT_OWN:
         if not all(ACCOUNT_VIEW.fullmatch(x) for x in parts[1:]):

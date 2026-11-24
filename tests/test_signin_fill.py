@@ -421,7 +421,8 @@ def test_a_field_set_with_the_owners_approval(env):
     assert not send(b)["ok"]  # an approval is good for one
     r = send(ask("People", "7"))
     assert not r["ok"] and "no such option" in r["error"] and r["phase"] == "verify"
-    assert send(ask("Search", "chess"))["ok"] and eng.sets[sets:] == [("main", 4, "chess")]
+    c.session.typed.clear()
+    assert send(ask("Search", "chess"))["ok"] and eng.sets[sets:] == [("main", 4, "chess")] and c.session.typed
 
 
 def test_a_box_the_owner_approves(env):
@@ -758,7 +759,9 @@ def test_links_to_places(dest):
     f"{SITE}/classes/../logout", f"{SITE}/classes//x", f"{SITE}/classes/5/cancel_booking", f"{SITE}/profile/x7",
     *(f"{SITE}/{x}" for x in ("classes/5/book", "classes/book/5", "events/5/register", "class/5/signup", "class/5/sign-up", "events/5/rsvp", "classes/5/attend",
                               "classes/5/apply", "services/5/use", "product/5/order", "class/5/unregister", "classes/5/checkin", "classes/5/refund",
-                              "classes/5/book-now", "classes/5/rebook", "events/book_spot/5", "blog/5/like", "news/5/vote", "shop/add/5")), f"{SITE}/anything-else", f"{SITE}/me/do-it"])
+                              "classes/5/book-now", "classes/5/rebook", "events/book_spot/5", "blog/5/like", "news/5/vote", "shop/add/5", "classes/5/participate", "classes/5/enter",
+                              "events/5/going", "classes/5/reservation", "classes/5;book", "classes/book.aspx", "classes/5/book.do",
+                              "classes/5?view=book", "classes/5?tab=register")), f"{SITE}/anything-else", f"{SITE}/me/do-it"])
 def test_links_that_may_do_something(dest):
     assert oc.commits(g("Drawing, Friday", kind="link", dest=dest)) in ("order", "commit")
 

@@ -1384,6 +1384,9 @@ class Controller:
         s.gen += 1  # an approval is good for one press
         self._phase = "sent"
         try:
+            if op["op"] != "click":
+                s.filled = True
+                s.typed.add(bframe["loader"])
             r = self._run(s, bframe, op) or {}
             if r.get("why") == "option":
                 self._phase = "verify"
