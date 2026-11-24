@@ -89,7 +89,7 @@ CODE_WORDS = re.compile(
     r"\b(verif\w*|auth\w*|security|sms|log.?in|sign.?in|backup|recovery|(e-?)?mail(ed)?|text(ed)?|confirm\w* e-?mail|e-?mail confirm\w*) (code|token|pin)\b|"
     r"\b(code|pin) (we|you|sent|from|by|in your|received)\b|"
     r"código de (verificaci|seguridad|acceso|verifica)|code de (vérification|sécurité|validation)|codice (di )?(verifica|sicurezza)|"
-    r"kod (weryfikacyjny|bezpieczeństwa)|verificatiecode|beveiligingscode|código de verificação|"
+    r"kod (weryfikacyjny|bezpieczeństwa|z (sms|e-?mail\w*))|verificatiecode|beveiligingscode|código de verificação|code (reçu|envoyé)|"
     r"vahvistuskoodi|kertakäyttö|todennuskoodi|turvakoodi|engångskod|verifieringskod|säkerhetskod|bestätigungscode|"
     r"sicherheitscode|einmal.?code|код подтверждения|код из (sms|смс|письма)|одноразов|κωδικός (επαλήθευσης|επιβεβαίωσης)|μιας χρήσης", re.I)
 NOT_CODE = re.compile(
@@ -104,7 +104,7 @@ CODE_TYPES = {"", "text", "tel", "number", "password"}
 CODE_SENT = re.compile(
     r"\b(sent|e-?mailed|texted|mailed)\b.{0,80}\b(code|pin|number)\b|\b(code|pin)\b.{0,60}\b(sent|e-?mailed|texted)\b|check your (e-?mail|inbox|phone|messages)|"
     r"\b(enter|type|use)\b.{0,40}\b(code|pin)\b.{0,80}\b(e-?mail|phone|sms|text|app|authenticator)|(verification|security|confirmation|one.?time|sign.?in|login) (code|password)|"
-    r"two.?(factor|step)|vahvistuskoodi|kertakäyttö|engångskod|bestätigungscode|código de|code de (vérification|sécurité)|codice di|"
+    r"two.?(factor|step)|\d chiffres|code (reçu|envoyé)|(wysłaliśmy|wysłano|podaj|wpisz).{0,40}\bkod|\bkod z\b|vahvistuskoodi|kertakäyttö|engångskod|bestätigungscode|código de|code de (vérification|sécurité)|codice di|"
     r"код подтверждения|отправили.{0,40}код|κωδικό.{0,20}(επαλήθευσης|που σας)", re.I)
 PLAIN_FIELD = re.compile(
     r"(your |the )?((first|last|full|given|family|user|company|card ?holder) ?)?name|e-?mail( address)?|(phone|mobile)( number)?|search|q|query|(street )?address( line)?( ?\d)?|"
@@ -125,6 +125,7 @@ CODE_METHOD = re.compile(r"((by|via|with|use) )?(text message|sms|text|e-?mail|a
 CODE_GENERIC = re.compile(r"continue|next|jatka|seuraava|fortsätt|nästa|weiter|далее|продолжить|συνέχεια|continuer|continuar|continua|verder|dalej", re.I)
 CODE_AGAIN = re.compile(r"((re)?send|get|request)( me)?( (a|the|my|another))?( new)?( (verification|security|login|one.?time|sms))? ?code( again)?|resend|lähetä( uusi)? koodi|"
                         r"skicka( ny)? kod|code (erneut )?senden|отправить код( ещё раз)?", re.I)
+STEP_AWAY = re.compile(r"\b(settings?|preferences|profile|account|wallet|billing|security|e-?mails?|phones?|devices?|members?|send)\b", re.I)
 STEP_QUERY = frozenset({"method", "channel", "via", "type", "factor", "provider", "lang", "locale", "resend", "mode", "step"})
 CODE_WAY = re.compile(r"\b(sms|text|e-?mail|phone|call|whatsapp|authenticator|app|code|koodi|kod|tekstiviesti|sähköposti|смс|почт\w*|κωδικό\w*)\b|•|\*\*", re.I)
 CODE_CAPTION = re.compile(
@@ -153,6 +154,8 @@ CODE_SIGNUP = re.compile(r"\b(regist(er|ration)|sign ?up|creat(e|ing) (an? |your
 # Where a session may begin for a code to go in later: a site's start page, or an address that is plainly its sign-in page.
 ENTRY_LOGIN = re.compile(r"(wp-?)?(log|sign)[-_]?(in|on)|auth|authenticate|authentication|sso|kirjaudu(-sisaan)?|logga-in|anmelden|anmeldung|connexion|acceso|entrar|accedi|"
                          r"inloggen|zaloguj|vhod", re.I)
+ENTRY_LANG = re.compile(r"(en|de|fr|es|it|pt|nl|sv|fi|nb|nn|da|pl|cs|sk|hu|ro|bg|el|et|lv|lt|sl|hr|ru|uk|tr|ja|ko|zh|he|ar|ca|eu|ga|mt)([-_][a-z]{2})?", re.I)
+ENTRY_QUERY = re.compile(r"(lang|locale|language|hl|utm_\w+)=[\w.-]{0,30}", re.I)
 ENTRY_WITH = re.compile(r"accounts?|users?|members?|customers?|clients?|my|my-?account|portal|identity|id|sessions?|new|web|app|index|home|default|u|s|en|v\d", re.I)
 LOGIN_NAV = re.compile(
     r"(log|sign) ?(in|on)( here| now)?|log ?in ?/ ?(sign ?up|register|join)|(my )?account|my page|members?( area| log ?in)?|(client|customer|member) (log|sign) ?in|"
@@ -388,18 +391,30 @@ def nested(url: str) -> list[str]:
     return out
 
 
-def plain_entry(url: str) -> bool:
-    """A site's start page, or plainly its sign-in page: an address that says nothing about where to go after it."""
+def plain_entry(url: str, asked: bool = False) -> bool:
+    """A site's start page, or plainly its sign-in page: an address that says nothing about where to go after it. `asked`: in a link
+    of the site's own that says "Log in", something may be asked for in it."""
     u = urllib.parse.urlsplit(url)
     if u.scheme != "https" or nested(url) or CODE_DEEP.search(address_words(url)):
+        return False
+    if not asked and (not all(ENTRY_QUERY.fullmatch(x) for x in u.query.split("&") if x) or u.fragment and not re.fullmatch(r"!?/[\w./-]*", u.fragment)):
         return False
     route = u.fragment.partition("?")[0]
     parts = [re.sub(r"\.(php|html?|aspx?|jsp|do)$", "", x, flags=re.I) for x in (u.path + "/" + (route if route.startswith(("/", "!")) else "")).split("/")]
     parts = [x for x in parts if x and x != "!"]
-    if parts and re.fullmatch(r"[a-z]{2}([-_][a-z]{2})?", parts[0], re.I):  # /en/…
+    if parts and ENTRY_LANG.fullmatch(parts[0]):  # /en/…
         parts = parts[1:]
     return not parts or parts in (["index"], ["home"]) or (any(ENTRY_LOGIN.fullmatch(x) for x in parts)
                                                            and all(ENTRY_LOGIN.fullmatch(x) or ENTRY_WITH.fullmatch(x) for x in parts))
+
+
+_NUMBER = r"\d(?:[\d.,'’\s]*\d)?"
+_PRICED = re.compile(rf"(?:€|\$|£|₽|₪|zł)\s?({_NUMBER})|({_NUMBER})\s?(?:€|\$|£|₽|₪|zł|(?:eur|usd|gbp|sek|nok|dkk|pln|chf|kr|руб)\b)", re.I)
+
+
+def priced(words: str) -> bool:
+    """A price, other than nothing ("Cart 0,00 €")."""
+    return any(re.search(r"[1-9]", m.group(1) or m.group(2)) for m in _PRICED.finditer(words))
 
 
 def same_site(a: str, b: str) -> bool:
@@ -817,7 +832,7 @@ PAGE_JS = r"""
     };
     // The words around it, without what links and buttons say ("Change number" next to a code is not what it is for).
     const codeWords = (C) => {
-      const skip = ['A', 'BUTTON', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SELECT', 'INPUT', 'TEXTAREA', 'NAV', 'HEADER', 'FOOTER'];
+      const skip = ['A', 'BUTTON', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SELECT', 'INPUT', 'TEXTAREA', 'NAV', 'FOOTER'];
       const says = (root, limit) => {
         let out = '';
         const go = (n) => {
@@ -832,12 +847,13 @@ PAGE_JS = r"""
       let around = C.closest('dialog,[role=dialog],section,article,main,[role=main]'), above = '';
       if (!around) {
         for (let n = box, i = 0; i < 3 && n.parentElement && n.parentElement !== document.body && n !== document.body; i++) around = n = n.parentElement;
-        if (!around) for (let n = box.previousElementSibling, i = 0; n && i < 4; n = n.previousElementSibling, i++) above += ' ' + says(n, 500);
       }
+      const before = (from) => { for (let n = from.previousElementSibling, i = 0; n && i < 4; n = n.previousElementSibling, i++) if (n.tagName !== 'HEADER') above += ' ' + says(n, 500); };
+      before(box); if (around) before(around);
       const hs = (r) => Array.from(r.querySelectorAll('h1,h2,h3,h4,[role=heading],legend')).filter(h => visible(h) && !h.closest('footer,nav,aside') && (r !== document || !h.closest('header')))
         .map(h => txt(h.textContent, 200));
       const near = around ? hs(around) : [], heads = near.concat(hs(document).filter(h => !near.includes(h))).slice(0, 30);
-      return [txt(document.title, 200) + ' \n ' + txt(heads.join(' \n '), 2500), says(box, 1500) + ' \n ' + (around ? says(around, 3000) : above)];
+      return [txt(document.title, 200) + ' \n ' + txt(heads.join(' \n '), 2500), says(box, 1500) + ' \n ' + (around ? says(around, 3000) : '') + ' \n ' + above];
     };
     // What the buttons say that would send it.
     const codeCaptions = (C) => {
@@ -1054,7 +1070,7 @@ class Session:
         self.gen = 0         # counts everything done in the session: an approved press needs it unchanged
         self.filled = False  # the owner's details were filled in
         self.secrets: list[str] = []  # the login filled in: cut out of every reply
-        self.code: list[tuple[Code, str, int]] = []  # one-time codes filled in, and the document and field each is in
+        self.code: list[tuple[Code, str, int, float]] = []  # one-time codes filled in, the document and field each is in, and since when
         self.salt = secrets.token_bytes(16)
         self.seen_account = False  # a page offered to sign out
         # A one-time code goes in only where a sign-in itself led, and that began at the site's own start or sign-in page: `chain` is
@@ -1076,7 +1092,11 @@ class Session:
     @property
     def account(self) -> bool:
         """Perhaps signed in to the owner's account (some sites need no more than the name, or a link from an email)."""
-        return self.signed_in or self.user_step or self.seen_account
+        return self.login_used or self.seen_account
+
+    @property
+    def login_used(self) -> bool:
+        return self.signed_in or self.user_step
 
     @property
     def hide(self) -> list[str]:
@@ -1400,7 +1420,9 @@ class Controller:
         frames = self._frames(s)
         top = frames[0]
         for x in s.code:  # used up; a few digits are cut out no longer than they have to be
-            if x[1] != top["loader"] or not ((self._run(s, top, {"op": "inspect", "n": x[2]}, quiet=True) or {}).get("visible", False)):
+            gone = x[1] == top["loader"] and self.clock() - x[3] > 60 and (
+                self._run(s, top, {"op": "inspect", "n": x[2]}, quiet=True) or {}).get("connected") is False
+            if x[1] != top["loader"] or gone:
                 s.code = [y for y in s.code if y is not x]
         snap: dict[str, Any] = {"url": self._m(s, top["url"])[:500], "origin": top["origin"], "title": "", "text": "",
                                 "frames": [], "elements": [], "readonly": s.readonly}
@@ -1450,7 +1472,7 @@ class Controller:
         snap["risky_checked"] = list(dict.fromkeys(x for x in labels if RISKY.search(x or "")))
         snap["captcha"] = any(CAPTCHA_FRAME.search(u) for u in frame_urls) or br.looks_like_bot_check(
             snap["text"], snap["title"])
-        if snap["captcha"] and s.account and s.chain == s.gen:  # ("Please verify it's you" is what a short page that asks for a code says)
+        if snap["captcha"] and s.login_used and s.chain == s.gen:  # ("Please verify it's you" is what a short page that asks for a code says)
             snap["captcha"] = any(CAPTCHA_FRAME.search(u) for u in frame_urls) or bool(
                 br.BOT_STRONG.search(snap["text"]) or br.BOT_TITLE.search(snap["title"]))
         snap["threeds"] = any(THREEDS_FRAME.search(urllib.parse.urlsplit(u).netloc + urllib.parse.urlsplit(u).path)
@@ -1541,7 +1563,7 @@ class Controller:
         if d.get("kind") == "input" and d.get("type") in CODE_TYPES and not any(
                 PLAIN_FIELD.fullmatch(_spaced(d, k).strip(" *:")) for k in ("name", "id", "label")):
             r = self._run(s, frame, {"op": "code", "n": n}) or {}
-            if CODE_SENT.search(br.clean(str(r.get("words") or ""))) and not NOT_CODE.search(_spaced(d, "name", "id", "label")):
+            if CODE_SENT.search(br.clean(str(r.get("words") or ""))) and not NOT_CODE.search(_spaced(d, "label") if d.get("label") else _spaced(d, "name", "id")):
                 raise no
 
     def _part_of_a_form(self, s: Session, frame: dict, n: int, d: dict) -> None:
@@ -1842,7 +1864,7 @@ class Controller:
             self._code_in_time(s)
             r = self._run(s, top, {"op": "code", "n": cn}) or {}
             self._code_place_ok(s, frames, self.snapshot(s), cd, r)
-            if CODE_SIGNUP.search(br.clean(str(r.get("words") or ""))):
+            if CODE_SIGNUP.search(br.clean(" \n ".join([str(r.get("words") or ""), *map(str, r.get("captions") or []), address_words(top["url"])]))):
                 raise Refused("that form seems to be for something else than signing in; the owner does that")
         # A lone password field is how sites ask "is it really you?" before something important. It is a sign-in only as the
         # second page of one.
@@ -1947,7 +1969,7 @@ class Controller:
             raise Refused("bad request")
         if "code" in values:
             values["code"] = self._code_fits(values["code"], els["code"][0].get("max"), els["code"][0].get("type"))
-            s.code.append((Code(values["code"]), top["loader"], els["code"][1]))
+            s.code.append((Code(values["code"]), top["loader"], els["code"][1], self.clock()))
         live = s.chain is not None and s.chain == s.gen
         u = urllib.parse.urlsplit(top["url"])
         further = CODE_DANGER.search(address_words(top["url"])) or CODE_LEADS.search(_as_words(
@@ -2028,7 +2050,7 @@ class Controller:
         if g["dialog"] == "cookies" and g["tag"] in ("button", "input") and not g["submits"] and texts and all(COOKIE_CAPTION.fullmatch(t) for t in texts):
             return True
         label = str(d.get("label") or "")
-        return s.account and d.get("kind") == "radio" and g["tag"] == "input" and bool(CODE_WAY.search(label)) and not CODE_DANGER.search(label)
+        return s.login_used and d.get("kind") == "radio" and g["tag"] == "input" and bool(CODE_WAY.search(label)) and not CODE_DANGER.search(label)
 
     @staticmethod
     def _leads_to_login(s: Session, frame: dict, d: dict, g: dict) -> bool:
@@ -2038,7 +2060,8 @@ class Controller:
         texts = [t for t in (login_caption(t) for t in g["texts"]) if t]
         named = bool(texts) and all(LOGIN_NAV.fullmatch(t) for t in texts)
         if d.get("kind") == "link":
-            return same_site(g["dest"], frame["url"]) and plain_entry(g["dest"]) and (named or g["dest"].split("#")[0] != frame["url"].split("#")[0])
+            elsewhere = g["dest"].split("#")[0] != frame["url"].split("#")[0]
+            return same_site(g["dest"], frame["url"]) and plain_entry(g["dest"], asked=named) and (named or g["plain"] and elsewhere)
         return d.get("kind") == "button" and named and not g["submits"]
 
     @staticmethod
@@ -2061,11 +2084,15 @@ class Controller:
     def _step_to(g: dict, here: str) -> bool:
         """Does a step stay within the sign-in? The same site, no address inside the address, nothing new asked for in it."""
         dest = str(g["dest"] or "")
-        if not dest or dest.lower().startswith("javascript:") or dest.split("#")[0] == here.split("#")[0]:
+        if not dest or dest.lower().startswith("javascript:"):
+            return True
+        route = lambda u: x if (x := urllib.parse.urlsplit(u).fragment).startswith(("/", "!")) else ""  # noqa: E731
+        if dest.split("#")[0] == here.split("#")[0] and route(dest) in ("", route(here)):
             return True
         keys = lambda u: {k.lower() for k, _ in urllib.parse.parse_qsl(urllib.parse.urlsplit(u).query, keep_blank_values=True)}  # noqa: E731
+        away = lambda u: {x.lower() for x in STEP_AWAY.findall(address_words(u))}  # noqa: E731
         return (login_host(dest) == login_host(here) != "" and not nested(dest) and not CODE_DANGER.search(address_words(dest))
-                and keys(dest) <= keys(here) | STEP_QUERY)
+                and away(dest) <= away(here) and keys(dest) <= keys(here) | STEP_QUERY)
 
     def _carries(self, s: Session, frames: list[dict], bframe: dict, d: dict, n: int, g: dict, snap: dict) -> bool:
         """Does this press (the owner approved it) belong to a sign-in, so that its code may still be filled in after it?"""
@@ -2073,7 +2100,7 @@ class Controller:
             return False
         if self._to_pay(snap, frames):
             return False
-        if not s.account:
+        if not s.login_used:
             return False
         loader, field, what = s.step_form
         if bframe["loader"] == loader and d.get("kind") == "button":
@@ -2092,7 +2119,7 @@ class Controller:
         here = bframe["url"]
         if s.codes:  # a code was filled in: only a new one
             return bool(texts) and all(CODE_AGAIN.fullmatch(t) for t in texts) and self._step_to(g, here)
-        if texts and all(CODE_STEP.fullmatch(t) or CODE_METHOD.fullmatch(t) for t in texts):
+        if texts and all(CODE_STEP.fullmatch(t) or d["kind"] == "button" and CODE_METHOD.fullmatch(t) for t in texts):
             return self._step_to(g, here)
         return (d["kind"] == "button" and g["submits"] and g["method"] == "post" and bool(texts) and all(CODE_GENERIC.fullmatch(t) for t in texts)
                 and self._step_to(g, here))
@@ -2116,7 +2143,7 @@ class Controller:
         """Nothing on this page says that a code would confirm something else than a sign-in. (A net, not a wall: the chain is that.)"""
         words = " \n ".join([br.clean(str(r.get("words") or "")), _spaced(d, "name", "id", "label")])
         sends = " \n ".join([*(br.clean(str(x)) for x in (r.get("captions") or [])[:10]), address_words(str(r.get("action") or ""))])
-        if self._to_pay(snap, frames) or snap["risky_checked"] or PRICE.search(re.sub(r"(?<!\d)0+([.,]0+)?(?!\d)", "", words)):
+        if self._to_pay(snap, frames) or snap["risky_checked"] or priced(words):
             raise Refused("there is something to pay on this page; the owner does that")
         if (CODE_DANGER.search(words) or CODE_HEAD.search(br.clean(str(r.get("heads") or ""))) or CODE_DANGER.search(sends) or CODE_DANGER.search(address_words(frames[0]["url"]))
                 or any(CODE_FRAME.search(f["url"]) for f in frames[1:])):
@@ -2234,7 +2261,7 @@ class Controller:
         code = self._code_fits(req["code"], facts["max"], d.get("type"), facts["count"])
         s.gen += 1
         s.filled = True
-        s.code.append((Code(code), top["loader"], n))
+        s.code.append((Code(code), top["loader"], n, self.clock()))
         s.chain, s.codes, s.step_form = s.gen, s.codes + 1, (top["loader"], n, self._what(d))
         s.code_place = s.code_place or place
         expect = {k: v for k, v in facts.items() if k != "targets"}
