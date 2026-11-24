@@ -568,6 +568,21 @@ remove the old pairing on the server). Going back to app 0.1 means uninstalling 
 `ampi-phone status` and `ampi-phone devices` (root) show the state; **lost phone:** `ampi-phone remove phone`. Updating the
 app: build again and `-Install`; the pairing stays. `sudo bash deploy/install-phone.sh --uninstall` removes everything.
 
+**One-time codes** (app 0.4 and later): when a site asks for one after Ampi filled a saved login in, the phone asks you to type it. With the
+site's authenticator key in the saved login (the letters under the QR code, or its `otpauth://` link) the phone works it out itself.
+
+**Sessions from Firefox** (app 0.5 and later; for Google sign-in, passkeys and the like): Ampi gets one site's session from your own Firefox,
+for one task. Once:
+
+1. `.\companion\firefox\build.ps1` packs `companion\firefox\out\ampi-session.zip`. Upload it at https://addons.mozilla.org/developers/
+   ("Submit a new add-on", **On your own**: signed, not listed), and download the signed file to the phone. (A later version needs a higher
+   `version` in `manifest.json`.)
+2. Firefox on the phone: Settings, About Firefox, tap the logo five times; then Settings, Install extension from file. Allow it nothing else.
+3. Ampi app: Sessions from Firefox, Make a key, Copy. Firefox: the Ampi button in the menu, paste, Save. Back in the Ampi app: Done.
+
+Then, for a site: sign in there in Firefox, the Ampi button, Give, Send to the Ampi app; ask Ampi to use your session on exactly that
+address, and confirm with your fingerprint. Some sites sign you out in Firefox when their session is used elsewhere, or don't accept it.
+
 ## 9. Watchers (automations)
 
 A watcher wakes on **triggers** (a time, a new email, a new Telegram message, a new Todoist task, a YouTube

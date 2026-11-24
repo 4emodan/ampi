@@ -207,7 +207,9 @@ def test_where_the_sites_own_sign_in_page_leads(env, url, ok):
 
 @pytest.mark.parametrize("url,ok", [
     (f"{SITE}/", True), (f"{SITE}/en", True), (f"{SITE}/login", True), (f"{SITE}/account/login", True), (f"{SITE}/wp-login.php", True), (f"{SITE}/users/sign_in", True),
-    (f"{SITE}/#/login", True), (f"{SITE}/en/log-in?lang=en", True), (f"{SITE}/index.html", True), (f"{SITE}/account", False), (f"{SITE}/settings/security", False),
+    (f"{SITE}/#/login", True), (f"{SITE}/en/log-in?lang=en", True), (f"{SITE}/?utm_source=x", True), (f"{SITE}/en-gb/", True), (f"{SITE}/me", False), (f"{SITE}/my", False), (f"{SITE}/go?x=1", False),
+    (f"{SITE}/tx?to=evil&amount=500", False), (f"{SITE}/?do=sendmoney&to=evil", False), (f"{SITE}/login?next=L3NlY3VyaXR5", False), (f"{SITE}/login?returnTo=billing", False),
+    (f"{SITE}/login?user_code=ABCD-EFGH", False), (f"{SITE}/login?token=MAGIC", False), (f"{SITE}/#send?to=evil", False), (f"{SITE}/#x", False), (f"{SITE}/index.html", True), (f"{SITE}/account", False), (f"{SITE}/settings/security", False),
     (f"{SITE}/login?next=/x", False), (f"{SITE}/login/return/security", False), (f"{SITE}/wallet", False), (f"{SITE}/login?return=security-settings", False),
     (f"{SITE}/#/wallet/send", False), (f"{SITE}/login#x?next=/y", False), (f"{SITE}/oauth/authorize?client_id=1", False), ("http://www.club.example/login", False),
     (f"{SITE}/classes", False), (f"{SITE}/login/confirm", False)])
@@ -232,6 +234,8 @@ def started(env, url=f"{SITE}/"):
     (1, {"plain": True, "dest": f"{SITE}/login", "submits": False}, True), (2, {"dest": f"{SITE}/settings/security", "submits": False}, False),
     (3, {"submits": False}, True), (3, {"submits": True}, False), (4, {"dest": f"{SITE}/login?next=/transfer/confirm", "submits": False}, False),
     (5, {"submits": False}, False), (7, {"dest": "https://evil.example/login", "submits": False}, False),
+    (1, {"plain": True, "dest": f"{SITE}/login?state=abc", "submits": False}, True), (2, {"plain": True, "dest": f"{SITE}/login", "submits": False}, True),
+    (2, {"plain": False, "dest": f"{SITE}/login", "submits": False}, False), (2, {"plain": True, "dest": f"{SITE}/login?state=abc", "submits": False}, False),
     (8, {"dialog": "cookies", "submits": False}, True), (9, {"dialog": "cookies", "submits": False, "dest": f"{SITE}/wallet"}, False)])
 def test_what_was_done_before_the_sign_in_counts(env, n, press, ok):
     c, eng, _, _ = env
@@ -274,7 +278,8 @@ def test_a_second_page_revives_nothing(env):
 
 @pytest.mark.parametrize("press,ok", [
     ({"dest": f"{SITE}/verify"}, True), ({"dest": f"{SITE}/verify/sms?method=sms"}, True), ({"dest": "javascript:void(0)"}, True), ({"dest": f"{SITE}/challenge?action=send"}, False),
-    ({"dest": "https://evil.example/verify"}, False), ({"dest": f"{SITE}/transfer"}, False), ({"dest": f"{SITE}/verify?method=/x"}, False)])
+    ({"dest": "https://evil.example/verify"}, False), ({"dest": f"{SITE}/transfer"}, False), ({"dest": f"{SITE}/settings/security"}, False), ({"dest": f"{SITE}/account/email"}, False),
+    ({"dest": f"{SITE}/verify#/wallet/send"}, False), ({"dest": f"{SITE}/verify#top"}, True), ({"dest": f"{SITE}/verify?method=/x"}, False)])
 def test_where_a_step_leads(env, press, ok):
     c, eng, sid, _ = env
     r = signed_in(env)
@@ -652,6 +657,43 @@ def test_ways_as_buttons(env, label, ok):
     assert (c.session.chain == c.session.gen) is ok
 
 
+def test_ways_only_as_buttons(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    eng.frames[0].els[3]["label"] = "Email"
+    eng.press = {"submits": False, "dest": f"{SITE}/verify/email"}
+    assert submit(c, sid, r["Try another way"])["ok"] and c.session.chain != c.session.gen
+
+
+def test_nothing_is_a_step_before_the_login_was_used(env):
+    c, eng, sid, refs = env
+    eng.frames[0].els[20] = el("link", label="Log out")
+    c.handle({"cmd": "snapshot", "session": sid})
+    assert c.session.account and c.session.chain == c.session.gen
+    eng.frames[0].els[9]["label"] = "Continue"
+    eng.press = {"submits": True, "method": "post", "dest": f"{SITE}/login"}
+    submit(c, sid, refs["Next"])
+    assert c.session.chain != c.session.gen
+
+
+@pytest.mark.parametrize("words,yes", [("500,00 €", True), ("500.00 EUR", True), ("10 000 €", True), ("1 000 EUR", True), ("€0.50", True), ("5 000,00 kr", True), ("Cart 0,00 €", False),
+                                       ("€0", False), ("0.00 EUR", False), ("Room 5", False), ("$ 12", True), ("2026", False)])
+def test_prices(words, yes):
+    assert co.priced(words) is yes
+
+
+def test_the_mask_stays_while_it_is_not_sure(env):
+    c, eng, sid, _ = env
+    r = signed_in(env)
+    assert fill_code(c, sid, bind_code(c, sid, r, press=None))["ok"]
+    eng.frames[0].text = f"x {CODE}"
+    show = lambda: c.handle({"cmd": "snapshot", "session": sid})["snapshot"]["text"]  # noqa: E731
+    eng.frames[0].els[1]["connected"] = False
+    assert show() == "x •••"  # gone, but just now
+    c.clock.sleep(61)
+    assert show() == f"x {CODE}"
+
+
 @pytest.mark.parametrize("label,box,ok", [("Log in", True, True), ("Log in", False, False), ("Transfer", True, False), ("Verify", True, True)])
 def test_a_sign_in_without_a_form(env, label, box, ok):
     c, eng, sid, refs = env
@@ -805,6 +847,7 @@ PAGE = """<!doctype html><meta charset=utf-8><title>Sign in</title><h1>Two-step 
 <form id=way method=post><input name=w1><input type=radio name=via value=sms><button>Go</button></form>
 <form id=lg method=post><input type=email name=e><input type=password name=s><input name=totp maxlength=6><button id=bl>Log in</button></form>
 <main><p>Confirm your transfer</p><p>500 EUR</p><div><div>Deep</div><div><label>Payee</label><form id=z method=post><input name=z1><button>Go</button></form></div></div></main>
+<div><p>Above it</p><section role=dialog><header><p>Send money</p></header><form id=y method=post><input name=y1><button>Go</button></form></section></div>
 <footer>Footer offer</footer>
 <pre id=out></pre>"""
 SCRIPT = r"""
@@ -818,6 +861,7 @@ out.one = facts('otp', 'b1'); out.other = facts('otp', 'b6').press; out.again = 
 out.six = facts('d1', 'b6'); out.second = facts('d2').count; out.free = facts('f1', 'bf'); out.wrongBox = facts('f1', 'b1').press;
 out.extra = ['m1', 'p1', 'r1', 'w1'].map(n => facts(n).extra);
 out.near = ['Confirm your transfer', '500 EUR', 'Deep', 'Payee', 'Footer offer'].map(x => facts('z1').words.includes(x));
+out.dialog = ['Send money', 'Above it'].map(x => facts('y1').words.includes(x));
 const expect = (f) => Object.fromEntries(['hasForm','count','max','type','extra','boxes','shown','method','action','boxed','press'].map(k => [k, f[k]]));
 out.stale = run({ op: 'setcode', n: N.otp.n, i: 0, value: 'x', press: I.b1.n, expect: { ...expect(out.one), max: 8 } });
 out.look = run({ op: 'setcode', n: N.d1.n, i: 0, look: true, value: '', press: I.b6.n, expect: expect(out.six) });
@@ -862,7 +906,7 @@ def test_the_page_script_in_a_browser(tmp_path):
     assert "Two-step verification" in one["words"] and "Enter the code." in one["words"]
     assert "Change phone" not in one["words"] and "Pay now" not in one["words"] and not co.CODE_DANGER.search(one["words"])
     assert [x.strip() for x in one["captions"]] == ["Verify"] and [x.strip() for x in out["free"]["captions"]] == ["Continue"]
-    assert out["near"] == [True, True, True, True, False]
+    assert out["near"] == [True, True, True, True, False] and out["dialog"] == [True, True]
     assert out["other"] == "" and out["again"] == ""  # another form's button, one that doesn't send
     assert (out["six"]["count"], out["six"]["extra"], out["six"]["press"], out["second"]) == (6, False, "form", 1)
     assert (out["free"]["count"], out["free"]["hasForm"], out["free"]["press"], out["wrongBox"]) == (4, False, "box", "")

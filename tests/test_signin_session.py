@@ -80,7 +80,7 @@ def test_a_session_opens_signed_in(env):
     g = c.handle({"cmd": "gate", "session": r["session"], "ref": snap["elements"][0]["ref"]})
     assert g["signed_in"] is True
     assert "signed in here" in c.handle({"cmd": "open", "session": r["session"], "url": f"https://{HOST}/x"})["error"]
-    assert "right after" in c.handle({"cmd": "bind_code", "session": r["session"], "code": snap["elements"][1]["ref"]}, signin=True)["error"]
+    assert "a code goes in only in a session" in c.handle({"cmd": "bind_code", "session": r["session"], "code": snap["elements"][1]["ref"]}, signin=True)["error"]
     c.handle({"cmd": "close", "session": r["session"]})
     assert c.retire  # the engine goes with it
 
