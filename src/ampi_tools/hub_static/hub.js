@@ -19,6 +19,7 @@ const Hub = (() => {
   }
   const key = web && location.hash.match(/^#k=([A-Za-z0-9_-]{43})$/);
   if (key) history.replaceState(null, "", location.pathname);
+  if (web) window.addEventListener("hashchange", () => { if (/^#k=/.test(location.hash)) location.reload(); });
   const ready = key ? login(key[1]) : Promise.resolve();
   ready.catch(() => {});
   async function login(k) {
@@ -31,13 +32,15 @@ const Hub = (() => {
     const b = document.getElementById("out-btn");
     b.classList.remove("hidden");
     b.addEventListener("click", async () => {
-      try { await api("POST", "api/logout", {}); } catch (e) { /* signed out already */ }
+      try { await api("POST", "api/logout", {}); } catch (e) {
+        if (e.status !== 401) { say(`Not signed out: ${e.message}`, true); return; }
+      }
       document.querySelector("main").textContent = "Signed out. Send /dashboard to Ampi for a new link.";
       b.remove();
     });
   });
   async function api(method, path, body) {
-    if (web) await ready;
+    if (web) await ready.catch(() => {});  // (a link used before: the session may still be there)
     const t = web ? "web" : token();
     if (!t) throw new Error("No access: open the hub with scripts/ampi-hub.ps1 on your computer.");
     const opts = { method, headers: { "X-Ampi-Hub": t }, credentials: web ? "same-origin" : "omit", cache: "no-store" };
@@ -53,7 +56,7 @@ const Hub = (() => {
     }
     let data = {};
     try { data = await resp.json(); } catch (e) { /* not JSON */ }
-    if (!resp.ok) throw new Error(data.error || `The hub answered ${resp.status}.`);
+    if (!resp.ok) throw Object.assign(new Error(data.error || `The hub answered ${resp.status}.`), { status: resp.status });
     return data;
   }
   function el(tag, attrs, ...children) {

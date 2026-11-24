@@ -3,4 +3,7 @@ Description=Ampi dashboard: renew the HTTPS certificate
 
 [Service]
 Type=oneshot
-ExecStart=/opt/certbot-ampi/bin/certbot renew --config-dir /etc/letsencrypt-ampi --work-dir /var/lib/letsencrypt-ampi --logs-dir /var/log/letsencrypt-ampi -q --no-random-sleep-on-renew --deploy-hook "nginx -t && systemctl reload nginx"
+ExecStart=/opt/certbot-ampi/bin/certbot renew --config-dir /etc/letsencrypt-ampi --work-dir /var/lib/letsencrypt-ampi --logs-dir /var/log/letsencrypt-ampi -q --no-random-sleep-on-renew
+# Every time: a renewal whose reload failed is picked up by the next run.
+ExecStartPost=/usr/sbin/nginx -t -q
+ExecStartPost=/usr/bin/systemctl reload nginx

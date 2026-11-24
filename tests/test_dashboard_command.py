@@ -26,3 +26,10 @@ def test_link_only_in_the_private_chat(setup, tmp_path):  # noqa: F811
     assert not runner.calls
     for p in bot.profile.workspace.rglob("*"):
         assert not p.is_file() or "SECRET" not in p.read_text(encoding="utf-8", errors="ignore")
+
+
+def test_a_link_sent_back_or_quoted_loses_its_key(setup):  # noqa: F811
+    bot, api, runner, _ = setup()
+    key = "k" * 43
+    run(bot.handle_message(msg(f"why https://192.0.2.1/ampi/#k={key}?", reply_to_message={"text": f"link #k={key}"})))
+    assert key not in runner.calls[0]["prompt"] and "#k=xxx" in runner.calls[0]["prompt"]

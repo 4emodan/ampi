@@ -118,7 +118,7 @@ class Handler(BaseHTTPRequestHandler):
             raise Refused(413, "too big")
         try:
             body = json.loads(self.rfile.read(int(n)))
-        except ValueError:
+        except (ValueError, RecursionError):
             raise Refused(400, "bad JSON") from None
         if not isinstance(body, dict):
             raise Refused(400, "send a JSON object")
@@ -152,8 +152,9 @@ class Handler(BaseHTTPRequestHandler):
         raise Refused(404, "not found")
 
     def _handle(self) -> None:
-        path = urlsplit(self.path).path
+        self.close_connection = True  # one request each: nothing left in a body is read as another
         try:
+            path = urlsplit(self.path).path
             if path.startswith("/api/"):
                 return self._api(path)
             if self.command not in ("GET", "HEAD"):
@@ -165,6 +166,8 @@ class Handler(BaseHTTPRequestHandler):
         except Refused as e:
             self.close_connection = True
             self._json(e.status, {"error": e.message})
+        except ValueError:
+            self.send_error(400)
         except OSError:
             self.close_connection = True
 

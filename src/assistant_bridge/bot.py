@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import sys
@@ -28,6 +29,7 @@ MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # Bot API download limit on Telegram's se
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+DASH_KEY = re.compile(r"#k=[A-Za-z0-9_-]{43}")
 SEND_FILE_RE = re.compile(r"^\s*SEND_FILE:\s*(.+?)\s*$", re.M)
 MAIL_FILES = "inbox/mail"  # files from emails (gmail download): the owner's private chat only
 PROTECT_SECONDS = 3.0  # in a protected private chat: what comes within this time belongs together (an album, a forward + words)
@@ -258,6 +260,8 @@ class ProfileBot:
     # --- message handling -------------------------------------------------------------
 
     async def handle_message(self, msg: dict) -> None:
+        if DASH_KEY.search(raw := json.dumps(msg)):  # a dashboard link quoted or sent back: its key is for nobody here
+            msg = json.loads(DASH_KEY.sub("#k=" + "x" * 43, raw))  # (the same length: entities stay in place)
         chat = msg.get("chat") or {}
         user = msg.get("from") or {}
         chat_type = chat.get("type")

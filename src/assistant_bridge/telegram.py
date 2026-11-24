@@ -142,6 +142,9 @@ class TelegramAPI:
         await self.call("setMessageReaction", {"chat_id": chat_id, "message_id": message_id,
                                                "reaction": [{"type": "emoji", "emoji": emoji}] if emoji else []}, attempts=1)
 
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        await self.call("deleteMessage", {"chat_id": chat_id, "message_id": message_id}, attempts=2)
+
     async def create_forum_topic(self, chat_id: int, name: str) -> dict:
         return await self.call("createForumTopic", {"chat_id": chat_id, "name": name[:128]})
 

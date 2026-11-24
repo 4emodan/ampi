@@ -3,6 +3,7 @@ permissions, with a button to remove each. Values never pass through here; entri
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import secrets
@@ -13,6 +14,7 @@ from .services import ServiceError, ask
 
 log = logging.getLogger(__name__)
 BUTTON_TTL = 3600
+LINK_SECONDS = 300  # a dashboard link is of no use after this
 
 
 class InfoUI:
@@ -66,7 +68,14 @@ class InfoUI:
             text = "Signed out everywhere."
         else:
             text = f"Your dashboard (works once, for 5 minutes; don't forward it):\n{resp['url']}"
-        await self.bot.api.send_message(chat_id, text, thread_id or None)
+        sent = await self.bot.api.send_message(chat_id, text, thread_id or None)
+        if resp.get("url") and isinstance((sent or {}).get("message_id"), int):
+            self.bot._spawn(self._delete_later(chat_id, sent["message_id"]))
+
+    async def _delete_later(self, chat_id: int, message_id: int) -> None:
+        await asyncio.sleep(LINK_SECONDS)
+        with contextlib.suppress(Exception):
+            await self.bot.api.delete_message(chat_id, message_id)
 
     async def handle_callback(self, cq: dict) -> None:
         user = (cq.get("from") or {}).get("id")
