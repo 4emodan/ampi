@@ -29,6 +29,8 @@ ExecStart=/usr/local/lib/obscura/current/obscura "--v8-flags=--jitless --max-old
 # Nothing from pages (console output, errors) reaches the journal.
 StandardOutput=null
 StandardError=null
+# (How ampi-checkout.service ends it.)
+SuccessExitStatus=SIGKILL
 Restart=always
 RestartSec=2
 # Never older than a day even if the controller keeps running (a payment always restarts it, see above).
