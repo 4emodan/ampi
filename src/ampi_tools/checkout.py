@@ -152,8 +152,11 @@ COOKIE_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}")
 COOKIE_VALUE, COOKIE_PATH = re.compile(r"[\x20-\x3a\x3c-\x7e]{0,4096}"), re.compile(r"/[\x21-\x3a\x3c-\x7e]{0,500}")
 # They vouch for "a person in that very browser": taking them along would get around a site's bot check. (The extension leaves them
 # out, too.)
-CLEARANCE = re.compile(r"(cf_clearance|__cf_bm|__cflb|_cfuvid|cf_chl.*|_abck|bm_.*|ak_bmsc|sec_cpt|datadome|_px.*|pxcts|reese84|incap_ses.*|visid_incap.*|"
-                       r"nlbi_.*|aws-waf-token|kp_uid.*|x-kpsdk.*|__ddg.*|_grecaptcha|rc::.*|frcaptcha.*|h-captcha.*)", re.I)
+CLEARANCE = re.compile(
+    r"(cf_clearance|__cf_bm|__cflb|__cfruid|_cfuvid|cf_chl_.*|_abck|ak_bmsc|bm_(sz|sv|mi|so|s|ss|lso)|sbsd(_.*)?|sec_cpt|"
+    r"datadome|_px(\d|hd|vid|de|ff.*)?|pxcts|reese84|___utmv.*|incap_ses_.*|visid_incap_.*|nlbi_.*|aws-waf-token|kp_uid.*|"
+    r"x-kpsdk-.*|__ddg.*|_grecaptcha|rc::.*|frcaptcha.*|h-captcha.*|_vcrcs|__uzm.*|uzm.*|rbzid.*|rbzsessionid|sucuri_.*|"
+    r".*anubis-auth.*|acw_sc__.*|acw_tc|_fs_ch_.*|qrator_.*|d_[a-z]id|arkose.*|_iidt|geetest.*)", re.I)
 CODE_FRAME = re.compile(r"3-?ds|threeds|three-d|/acs\b|acs\.", re.I)
 CODE_SIGNUP = re.compile(r"\b(regist(er|ration)|sign ?up|creat(e|ing) (an? |your )?(new )?account|new account|join (us|now)|reset|forgot(ten)?|new pin|set (a|your) pin|"
                          r"rekisteröidy|luo tili|registrieren|konto erstellen|skapa konto|регистрация|εγγραφή)\b", re.I)
@@ -415,6 +418,11 @@ def same_site(a: str, b: str) -> bool:
     return bool(x and y) and (x == y or x.endswith("." + y) or y.endswith("." + x))
 
 
+def login_host_of(cookie: dict, host: str) -> str:
+    """The name a cookie (as _cookie makes it) is for."""
+    return str(cookie.get("domain") or host).lstrip(".")
+
+
 def fillable(v: Any) -> bool:
     """A user name or password that can be filled in (and cut out again): ordinary characters."""
     return isinstance(v, str) and 0 < len(v) <= 200 and not any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in v)
@@ -473,12 +481,18 @@ def hidden(value: Any, secrets_: list[str], tokens: tuple[str, ...] = ()) -> Any
             urllib.parse.unquote(x), urllib.parse.unquote_plus(x), html.unescape(x), urllib.parse.unquote(urllib.parse.unquote(x)))) else x
 
     def cut(x: str) -> str:
-        for t in tokens:
-            x = x.replace(t, "•••")
-        if not rx:
-            return x
         m = re.match(r"https?://[^/?#\s]*", x)  # a site's name isn't a password, even when one is spelled the same
         start = m.end() if m else 0
+        if tokens:
+            rest = x[start:]
+            for t in tokens:
+                rest = rest.replace(t, "•••")
+                at = rest.rfind(t[:16])
+                if at >= 0 and t.startswith(rest[at:]):  # the beginning of one, where the text was cut
+                    rest = rest[:at] + "•••"
+            x = x[:start] + rest
+        if not rx:
+            return x
         return x[:start] + re.sub(r"\S+", other, (ends if len(x) >= 40 else rx).sub("•••", x[start:]))
 
     def walk(x: Any, words: bool) -> Any:
@@ -1205,7 +1219,7 @@ class Controller:
         s, self.session = self.session, None
         if s is None:
             return
-        if s.readonly or s.secrets or self.fresh or s.engine != "obscura":
+        if s.readonly or s.secrets or s.signed_in or self.fresh or s.engine != "obscura":
             self.retire = True  # it paid, or signed in, or is the second engine: start over with a fresh one
         try:
             s.cdp.call("Target.disposeBrowserContext", {"browserContextId": s.context}, timeout=5)
@@ -1246,13 +1260,9 @@ class Controller:
         return {"ok": True}
 
     def _new_session(self, engine: str) -> Session:
-        if self.retire:  # this engine is on its way out
-            raise Refused("the checkout browser is starting afresh; try again in a few seconds")
         if engine not in self.engines:
             raise Refused("the second browser engine isn't installed")
-        # (The first engine idles next to the second one's session, or the other way round.)
-        if self.mem_mb() < MIN_MEM_MB + (200 if len(self.engines) > 1 else 0):
-            raise Refused("the server is short of memory right now; try again later")
+        self._ready_for(engine)
         cdp = self._connect(engine)
         try:
             ctx = cdp.call("Target.createBrowserContext", {"disposeOnDetach": True}).get("browserContextId")
@@ -2310,9 +2320,15 @@ class Controller:
             raise Refused("the second browser engine isn't installed")
         if self.session is not None:
             raise Refused("another checkout session is open; close it first")
-        if self.retire:
-            raise Refused("the checkout browser is starting afresh; try again in a few seconds")
+        self._ready_for(engine)
         return engine
+
+    def _ready_for(self, engine: str) -> None:
+        if self.retire:  # this engine is on its way out
+            raise Refused("the checkout browser is starting afresh; try again in a few seconds")
+        # (The first engine idles next to the second one's session, or the other way round.)
+        if self.mem_mb() < MIN_MEM_MB + (200 if len(self.engines) > 1 else 0):
+            raise Refused("the server is short of memory right now; try again later")
 
     def bind_session(self, req: dict) -> dict:
         """Before the owner is asked: could a session be opened now?"""
@@ -2329,8 +2345,20 @@ class Controller:
         if not (COOKIE_NAME.fullmatch(c["n"]) and COOKIE_VALUE.fullmatch(c["v"]) and COOKIE_PATH.fullmatch(c["p"]) and c["x"] in ("", "Lax", "Strict", "None")
                 and (d == host or not c["o"] and LOGIN_HOST.fullmatch(d) and host.endswith("." + d))):
             raise bad
-        return {"name": c["n"], "value": c["v"], "path": c["p"], "secure": c["s"], "httpOnly": c["h"], "url": f"https://{d}{c['p']}",
-                **({} if c["o"] else {"domain": "." + d}), **({"sameSite": c["x"]} if c["x"] else {})}
+        # Never over http, and not for pages of other sites in here (Firefox keeps those apart by site).
+        return {"name": c["n"], "value": c["v"], "path": c["p"], "secure": True, "httpOnly": c["h"], "url": f"https://{d}{c['p']}",
+                **({} if c["o"] else {"domain": "." + d}), **({"sameSite": {"None": "Lax"}.get(c["x"], c["x"])} if c["x"] else {})}
+
+    @staticmethod
+    def _tokens(values: list[str], host: str) -> tuple[str, ...]:
+        """Long random values, as they are and as a page may write them. (Not words: cutting those out could hide what a button says.)"""
+        out = set()
+        for v in values:
+            for x in {v, urllib.parse.unquote(v), urllib.parse.quote(v, safe=""), html.escape(v)}:
+                if re.fullmatch(r"[A-Za-z0-9._~%/+=:&;-]{16,}", x) and re.search(r"\d", x) and re.search(r"[A-Za-z]", x) and host not in x \
+                        and not re.search(r"[A-Za-z]{4,}([-_/. ][A-Za-z]{3,}){2}", x):
+                    out.add(x)
+        return tuple(sorted(out, key=len, reverse=True))
 
     def fill_session(self, req: dict) -> dict:
         host, path, given = req.get("host"), req.get("path"), req.get("cookies")
@@ -2344,22 +2372,29 @@ class Controller:
             raise Refused("there is nothing in that session that can be used")
         url = self.check_url(f"https://{host}{path}")
         s = self._new_session(engine)
-        s.signed_in = True  # from the first moment
-        s.tokens = tuple(c["value"] for c in cookies if c["httpOnly"] and len(c["value"]) >= 16)
+        s.signed_in = s.filled = True  # from the first moment
+        s.tokens = self._tokens([c["value"] for c in cookies if c["httpOnly"]], host)
         try:
-            s.cdp.call("Network.setCookies", {"cookies": cookies}, s.cdp_session)
-            # (An engine may leave one out without a word.)
+            for c in cookies:  # one by one: an engine that refuses one may refuse them all together
+                try:
+                    s.cdp.call("Network.setCookie", c, s.cdp_session)
+                except CdpProtocolError:
+                    continue
+            # (Or leave one out without a word.)
             there = s.cdp.call("Network.getCookies", {"urls": [f"https://{host}/", url]}, s.cdp_session).get("cookies") or []
-            names = {c.get("name") for c in there if isinstance(c, dict)}
-            kept = sum(c["name"] in names for c in cookies)
+            names = {(x.get("name"), str(x.get("domain") or "").lstrip(".")) for x in there if isinstance(x, dict)}
+            kept = sum((c["name"], login_host_of(c, host)) in names for c in cookies)
             if not kept:
                 raise Refused("the browser took nothing of that session")
             self._visit(s, url)
             s.cdp.call("Page.navigate", {"url": url}, s.cdp_session)
-            self._settle(s, NAV_TIMEOUT)
         except (Refused, CdpProtocolError) as e:
             self.drop()
             raise Refused(str(e) if isinstance(e, Refused) else "the browser couldn't take that session") from None
+        try:
+            self._settle(s, NAV_TIMEOUT)
+        except CdpProtocolError:
+            pass  # it is still loading: the next look tells
         return {"ok": True, "session": s.id, "kept": kept, "of": len(cookies)}
 
     def _moved(self, s: Session, top: dict) -> bool:

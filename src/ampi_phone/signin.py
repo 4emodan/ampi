@@ -79,7 +79,7 @@ NOT_LABELS = frozenset("google yahoo yandex hotmail gov govt gob gouv".split()) 
 NOT_WORDS = re.compile(r"bank|banque|banco|pankki|sparkasse")
 # What the phone and the gateway may answer; anything else is "failed".
 PHONE_CODES = frozenset({"no_login", "busy", "paused", "limit", "ringing", "notifications_off", "no_fingerprint", "key_gone",
-                         "denied", "expired", "interrupted", "unsupported", "bad_request", "failed", "no_signin", "no_session"})
+                         "denied", "expired", "interrupted", "unsupported", "bad_request", "failed", "no_signin", "no_session", "session_key_gone"})
 GATEWAY_CODES = frozenset({"offline", "no_vault", "busy", "limit", "no_answer"})
 
 
@@ -202,7 +202,9 @@ def given_of(r: dict, site: str) -> Given | None:
         return None
     if not isinstance(cookies, list) or not 0 < len(cookies) <= MAX_COOKIES or not all(isinstance(c, dict) and cookie_ok(c, host) for c in cookies):
         return None
-    return Given(host, path, [{k: c.get(k) for k in "nvdopshx"} for c in cookies])
+    # One for a name above a site that is refused goes there, too.
+    kept = [{k: c.get(k) for k in "nvdopshx"} for c in cookies if c["o"] or not any(n.endswith("." + c["d"]) for n in NOT)]
+    return Given(host, path, kept) if kept else None
 
 
 def cookie_ok(c: dict, host: str) -> bool:
@@ -539,12 +541,15 @@ class Service:
             self._forget()
             if end - time.monotonic() < 45 or gone(conn):
                 return {"ok": False, "code": "lost"}
-            r = self.controller({"cmd": "fill_session", "host": got.host, "path": got.path, "cookies": got.cookies, **engine},
-                                timeout=max(45, end - time.monotonic()))
         except Busy:
             return {"ok": False, "code": "browser_busy"}
         except (Lost, OSError, ValueError):
             return {"ok": False, "code": "no_browser"}
+        try:
+            r = self.controller({"cmd": "fill_session", "host": got.host, "path": got.path, "cookies": got.cookies, **engine},
+                                timeout=max(45, end - time.monotonic()))
+        except (Busy, Lost, OSError, ValueError):
+            return {"ok": False, "code": "session_unknown"}
         if r.get("ok") is not True:
             return {"ok": False, "code": "page", "error": words(r.get("error"))}
         kept, of = r.get("kept"), r.get("of")

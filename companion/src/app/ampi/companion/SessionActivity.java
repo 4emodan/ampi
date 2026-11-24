@@ -19,7 +19,7 @@ import java.security.GeneralSecurityException;
 /** Sessions from Firefox: takes one that is shared or pasted, and sets the extension up. Any app may share a text to it: it is
  *  opened only with the extension's key, and only when Ampi asks for that site and the owner gives a fingerprint. */
 public final class SessionActivity extends Activity {
-    private String note = "";
+    private String note = "", key = "";
 
     @Override
     protected void onCreate(Bundle state) {
@@ -38,14 +38,20 @@ public final class SessionActivity extends Activity {
     }
 
     private void received(Intent i) {
+        if (i == null || !Intent.ACTION_SEND.equals(i.getAction())) return;
         note = "";
-        if (i != null && Intent.ACTION_SEND.equals(i.getAction())) take(i.getStringExtra(Intent.EXTRA_TEXT));
+        try {
+            take(i.getStringExtra(Intent.EXTRA_TEXT));
+        } catch (RuntimeException e) {  // any app may send anything
+            Log.w("Ampi", "shared text", e);
+        }
     }
 
     private void take(String text) {
         try {
             SessionBox b = Handover.take(this, text);
-            note = "Got it. Ask Ampi within 10 minutes to use your session on " + b.site() + ".";
+            hideKey();
+            note = "Received. Ask Ampi within 10 minutes to use your session on " + b.site() + ". (It is checked when it is opened.)";
         } catch (IllegalArgumentException e) {
             note = e.getMessage();
         } catch (RuntimeException e) {
@@ -64,6 +70,10 @@ public final class SessionActivity extends Activity {
     }
 
     private void draw() {
+        if (!key.isEmpty()) {
+            drawKey();
+            return;
+        }
         LinearLayout page = page("Sessions from Firefox");
         Ui.small(page, "For sites you sign in to with Google, a passkey or something else Ampi can't do: sign in there yourself in Firefox, "
                 + "give the session with the Ampi button, and ask Ampi. It gets that one site's session, for one task, after your fingerprint.");
@@ -79,8 +89,10 @@ public final class SessionActivity extends Activity {
                 draw();
             });
         }
+        boolean gone = Handover.ready() && !Handover.usable();
+        if (gone) Ui.body(Ui.card(page), "The phone's fingerprints changed, so this key is no good any more: make a new one and paste it into the extension.");
         if (Handover.ready()) {
-            Ui.button(page, "Paste a session", true, v -> {
+            if (!gone) Ui.button(page, "Paste a session", true, v -> {
                 CharSequence text = pasted();
                 take(text == null ? "" : text.toString());
                 draw();
@@ -113,18 +125,29 @@ public final class SessionActivity extends Activity {
     }
 
     private void key() {
-        String key;
         try {
             key = Handover.create();
         } catch (GeneralSecurityException | RuntimeException e) {
             Log.e("Ampi", "session key", e);
             note = "The phone couldn't make the key: " + Texts.line(String.valueOf(e.getMessage()), 150);
-            draw();
-            return;
         }
+        draw();
+    }
+
+    private void hideKey() {
+        if (key.isEmpty()) return;
+        key = "";
+        try {
+            getSystemService(ClipboardManager.class).clearPrimaryClip();
+        } catch (RuntimeException e) {
+            Log.w("Ampi", "clipboard", e);
+        }
+    }
+
+    private void drawKey() {
         LinearLayout page = page("The extension's key");
         LinearLayout card = Ui.card(page);
-        Ui.body(card, "Copy it, then in Firefox open the Ampi button and paste it there. It is shown only now.");
+        Ui.body(card, "Copy it, then in Firefox open the Ampi button and paste it there, and come back here. It is shown only now.");
         TextView t = Ui.small(card, key);
         t.setTypeface(android.graphics.Typeface.MONOSPACE);
         ClipboardManager board = getSystemService(ClipboardManager.class);
@@ -136,11 +159,7 @@ public final class SessionActivity extends Activity {
             board.setPrimaryClip(clip);
         });
         Ui.button(page, "Done (empties the clipboard)", false, v -> {
-            try {
-                board.clearPrimaryClip();
-            } catch (RuntimeException e) {
-                Log.w("Ampi", "clipboard", e);
-            }
+            hideKey();
             note = "";
             draw();
         });

@@ -47,8 +47,10 @@ signin test example.com                                  only tests: the phone u
   owner wants the site all the same, and it isn't Google's (etc.) own: **their session from Firefox**. Tell them: sign in to the site in
   Firefox on the phone, tap the Ampi button there, "Give", then "Send to the Ampi app" (set up once: Ampi app, Sessions from
   Firefox). When they say it's done: no checkout session open, `signin session example.com` (with the Bash tool's `timeout: 240000`;
-  `--engine lightpanda` where the site needs that one), and they confirm with a fingerprint. From then on it is their account, as after
-  `signin fill`. A session is good for 10 minutes and once. If the site doesn't take it (it shows a sign-in page): say so, and stop.
+  `--engine lightpanda` where the site needs that one), and they confirm with a fingerprint. Use exactly the address the extension shows
+  (m.example.com isn't example.com). From then on it is their account, as after `signin fill`. A session is good for 10 minutes and once. If
+  the site doesn't take it (it shows a sign-in page): say so, and stop. Never sign out there: that would end it in their Firefox. Tell them
+  before the first time that some sites sign them out in Firefox when a session is used elsewhere.
 - For a site that asks for codes: in a **new** session open its plain sign-in page (or its start page, then its own "Log in"), and do
   nothing else there before `signin fill`: no other pages, no typing. After an address with another one in it (`?next=…`) no code can be
   filled in.

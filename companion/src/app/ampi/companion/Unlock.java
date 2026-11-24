@@ -151,17 +151,14 @@ final class Unlock {
 
         /** The fingerprint was given and the session opened: sent once, then it is gone here. */
         void given(byte[] plain) {
-            String no = left() <= 0 ? "expired" : paired.getAsBoolean() && Handover.current() == box ? null : "interrupted";
-            if (kind != Kind.SESSION || !end()) return;
-            if (no != null) {
-                answer(result(no));
-                return;
-            }
-            Handover.spent(app, box);
-            calm();
+            if (kind != Kind.SESSION) return;
+            String no = left() <= 0 ? "expired" : paired.getAsBoolean() ? null : "interrupted";
+            if (!end()) return;
             try {
-                answer(result(null).put("host", box.host()).put("path", box.path())
-                        .put("cookies", new JSONArray(new String(plain, StandardCharsets.UTF_8))));
+                JSONObject o = Handover.contents(plain, box);
+                if (no == null && !Handover.spend(app, box)) no = "interrupted";
+                if (no == null) calm();
+                answer(no != null ? result(no) : result(null).put("host", o.get("host")).put("path", o.get("path")).put("cookies", o.get("cookies")));
             } catch (JSONException e) {
                 answer(result("failed"));
             }
@@ -343,8 +340,18 @@ final class Unlock {
         if (!Logins.fingerprintReady(c)) return "no_fingerprint";
         if (kind == Kind.SESSION) {
             if (!allowed(c)) return "limit";
-            if (box != null) Handover.toOpen(box);  // is the key still there?
-            return box == null ? "no_session" : null;
+            if (box == null) {
+                // Asking for sites to find out which one was given doesn't go unnoticed.
+                Notes.change(c, "signin-missing", "Ampi asked for a session you didn't give",
+                        "If you didn't expect that, ask Ampi what it was for.", null, null);
+                return "no_session";
+            }
+            try {
+                Handover.toOpen(box);  // is the key still there?
+            } catch (Logins.Gone e) {
+                return "session_key_gone";
+            }
+            return null;
         }
         List<Logins.Login> all = Logins.all(c);
         if (!all.isEmpty()) Logins.toOpen(all.get(0));  // is the key still there?

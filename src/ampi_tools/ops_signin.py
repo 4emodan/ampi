@@ -54,8 +54,13 @@ WORDS = {
     "no_signin": "the phone only gives a code for a login it unlocked in the last 10 minutes, for a site of that login (at most three "
                  "times). Start again with `signin fill`; if this page is on another address than the login was saved for, the owner adds that "
                  "address to it in the app first",
-    "no_session": "no session of that site was given: the owner signs in there in Firefox, taps the Ampi button there (Give, then Send to the "
+    "no_session": "no session of exactly that address was given (only www. makes no difference: m.example.com isn't example.com; use the one the "
+                  "owner sees in the extension). The owner signs in there in Firefox, taps the Ampi button there (Give, then Send to the "
                   "Ampi app), and asks again within 10 minutes",
+    "session_key_gone": "the phone's fingerprints changed, so sessions from Firefox can't be opened any more: the owner makes a new key in the Ampi "
+                        "app (Sessions from Firefox) and pastes it into the extension",
+    "session_unknown": "the browser stopped answering while the session was put in: a session that is signed in MAY be open. Look with `checkout "
+                       "snapshot`, and close it if you don't need it; the owner has to give the session again",
     "unknown": "the browser stopped answering while the login was being filled in: it MAY have been sent. Look at the page (`checkout "
                "snapshot`) before trying again",
 }

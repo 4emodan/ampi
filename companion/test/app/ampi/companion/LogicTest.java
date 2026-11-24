@@ -164,8 +164,8 @@ final class LogicTest {
     static String box(String head, int sealed, long now) {
         var e = java.util.Base64.getUrlEncoder().withoutPadding();
         try {
-            SessionBox b = SessionBox.parse("x ampi-session1." + e.encodeToString(head.getBytes()) + "." + e.encodeToString(new byte[sealed]) + "\n", now);
-            return b.site() + " " + b.path() + " " + b.count() + " " + b.scope();
+            SessionBox b = SessionBox.parse("x ampi-session2." + e.encodeToString(head.getBytes()) + "." + e.encodeToString(new byte[sealed]) + "\n", now);
+            return b.site() + " " + b.count() + " " + b.scope();
         } catch (IllegalArgumentException x) {
             return "no";
         }
@@ -173,34 +173,36 @@ final class LogicTest {
 
     static void sessions() {
         String id = "0123456789abcdef0123456789abcdef";
-        eq("session", "club.example /my 3 club.example", box("www.club.example\n/my\n1000000\n" + id + "\n3\nclub.example", 200, 1000000));
-        eq("no scope", "club.example / 1 ", box("club.example\n/\n1000000\n" + id + "\n1\n", 60, 1000000 + SessionBox.GOOD_FOR));
-        for (String bad : new String[] {"club.example\n/\n1000000\n" + id + "\n1", "club.example\n/\n1000000\n" + id + "\n1\n\n", "club.example\nx\n1000000\n" + id + "\n1\n",
-                "club.example\n/a/../b\n1000000\n" + id + "\n1\n", "club.example\n//evil\n1000000\n" + id + "\n1\n", "club.example\n/?x\n1000000\n" + id + "\n1\n",
-                "Club.example\n/\n1000000\n" + id + "\n1\n", "club.example\n/\nx\n" + id + "\n1\n", "club.example\n/\n1000000\nxyz\n1\n", "club.example\n/\n1000000\n" + id + "\n0\n",
-                "club.example\n/\n1000000\n" + id + "\n81\n", "club.example\n/\n1000000\n" + id + "\n1\nother.example", "club.example\n/\n1000000\n" + id + "\n1\nexample",
-                "accounts.google.com\n/\n1000000\n" + id + "\n1\n", "www.github.com\n/\n1000000\n" + id + "\n1\n", "my.bank.example\n/\n1000000\n" + id + "\n1\n", ""}) {
-            eq("session " + bad, "no", box(bad, 200, 1000000));
+        eq("session", "club.example 3 club.example", box("www.club.example\n1000000\n" + id + "\n3\nclub.example", 400, 1000000));
+        eq("no scope", "club.example 1 ", box("club.example\n1000000\n" + id + "\n1\n", 300, 1000000 + SessionBox.GOOD_FOR));
+        for (String bad : new String[] {"club.example\n1000000\n" + id + "\n1", "club.example\n1000000\n" + id + "\n1\n\n", "Club.example\n1000000\n" + id + "\n1\n",
+                "club.example\nx\n" + id + "\n1\n", "club.example\n1000000\nxyz\n1\n", "club.example\n1000000\n" + id + "\n0\n", "club.example\n1000000\n" + id + "\n81\n",
+                "club.example\n1000000\n" + id + "\n1\nother.example", "club.example\n1000000\n" + id + "\n1\nexample", "accounts.google.com\n1000000\n" + id + "\n1\n",
+                "www.github.com\n1000000\n" + id + "\n1\n", "my.bank.example\n1000000\n" + id + "\n1\n", ""}) {
+            eq("session " + bad, "no", box(bad, 400, 1000000));
         }
-        eq("too old", "no", box("club.example\n/\n1000000\n" + id + "\n1\n", 60, 1000000 + SessionBox.GOOD_FOR + 1));
-        eq("from the future", "no", box("club.example\n/\n1000000\n" + id + "\n1\n", 60, 1000000 - SessionBox.AHEAD - 1));
-        eq("too long", "no", box("club.example\n/\n1000000\n" + id + "\n1\n", SessionBox.MAX + 1, 1000000));
+        eq("too old", "no", box("club.example\n1000000\n" + id + "\n1\n", 300, 1000000 + SessionBox.GOOD_FOR + 1));
+        eq("from the future", "no", box("club.example\n1000000\n" + id + "\n1\n", 300, 1000000 - SessionBox.AHEAD - 1));
+        eq("too long", "no", box("club.example\n1000000\n" + id + "\n1\n", SessionBox.MAX + 1, 1000000));
+        eq("too short", "no", box("club.example\n1000000\n" + id + "\n1\n", 256 + 28, 1000000));
     }
 
-    /** What the extension sealed, opened as the app does. */
-    static void open(String key, String text, long now) throws Exception {
+    /** What the extension sealed, opened as the app does (the private key as PKCS#8). */
+    static void open(String privateKey, String secret, String text, long now) throws Exception {
         SessionBox b = SessionBox.parse(text, now);
-        byte[] raw = java.util.Base64.getUrlDecoder().decode(key.substring("ampi-key1-".length()));
-        var c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
-        c.init(javax.crypto.Cipher.DECRYPT_MODE, new javax.crypto.spec.SecretKeySpec(raw, "AES"), new javax.crypto.spec.GCMParameterSpec(128, b.iv()));
-        c.updateAAD(b.bound());
-        System.out.println(b.host() + " " + b.path() + " " + b.count() + " " + b.scope());
-        System.out.println(new String(c.doFinal(b.data()), java.nio.charset.StandardCharsets.UTF_8));
+        var d = java.util.Base64.getUrlDecoder();
+        var c = javax.crypto.Cipher.getInstance("RSA/ECB/OAEPWithSHA-1AndMGF1Padding");
+        c.init(javax.crypto.Cipher.DECRYPT_MODE, java.security.KeyFactory.getInstance("RSA").generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(d.decode(privateKey))));
+        var mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new javax.crypto.spec.SecretKeySpec(d.decode(secret), "HmacSHA256"));
+        byte[] plain = b.open(mac.doFinal(b.forKey(c.doFinal(b.wrapped()))));
+        System.out.println(b.host() + " " + b.count() + " " + b.scope());
+        System.out.println(new String(plain, java.nio.charset.StandardCharsets.UTF_8));
     }
 
     public static void main(String[] a) throws Exception {
         if (a.length > 0 && a[0].equals("open")) {
-            open(a[1], a[2], Long.parseLong(a[3]));
+            open(a[1], a[2], a[3], Long.parseLong(a[4]));
             return;
         }
         if (a.length > 0) {

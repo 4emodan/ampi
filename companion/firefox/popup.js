@@ -31,11 +31,14 @@
     if (site.why) { only(''); say(site.why); return; }
     only('give');
     $('host').textContent = site.host;
-    $('what').textContent = 'Ampi can then use your account there as you, until its browser is closed. After that, and only if you want it '
-      + 'to end everywhere, sign out on the site.';
+    $('what').textContent = 'Ampi can then use your account there as you, until its browser is closed. Ask it for exactly this address. Some '
+      + 'sites then sign you out here. Only signing out on the site ends it everywhere.';
   }
 
   async function start() {
+    // A permission that was left over (the popup was closed while Firefox asked for it).
+    const had = (await browser.permissions.getAll()).origins || [];
+    if (had.length) await browser.permissions.remove({ origins: had }).catch(() => {});
     [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     site = Ampi.site(tab && tab.url, tab && tab.incognito);
     key = await store('readonly', (s) => s.get('key')) || null;

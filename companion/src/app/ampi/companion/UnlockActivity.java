@@ -111,7 +111,8 @@ public final class UnlockActivity extends Activity {
         TextView host = Ui.add(card, session ? ask.box.host() : ask.host, 26, Ui.accent(this));
         host.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD);
         Ui.body(card, session ? "The session you gave from Firefox goes to Ampi's browser on your server: it is signed in there as you, without "
-                + "your password or second factor, until that browser is closed. Only signing out on the site ends it for sure."
+                + "your password or second factor, until that browser is closed. Only signing out on the site ends it for sure. (Some sites then sign you "
+                + "out in Firefox, too.)"
                 : onlyCode ? "You just had your login filled in there. The site asks for a one-time code, and it goes into that page. "
                 + "Ampi doesn't see it."
                 : ask.kind == Unlock.Kind.TEST ? "Only a test: the login is unlocked here, and nothing of it is sent or filled in."
@@ -216,7 +217,7 @@ public final class UnlockActivity extends Activity {
         try {
             cipher = session ? Handover.toOpen(a.box) : Logins.toOpen(l);
         } catch (Logins.Gone e) {
-            a.end("key_gone");
+            a.end(session ? "session_key_gone" : "key_gone");
             return;
         } catch (GeneralSecurityException | RuntimeException e) {
             Log.e("Ampi", "unlock", e);
