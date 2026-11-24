@@ -5,9 +5,13 @@
   let scope = "chat", data, want = {}, now = {}, text = "", only = false, places = [];
   try { scope = decodeURIComponent((location.hash.match(/^#s=(.+)$/) || [])[1] || "chat"); } catch (e) { /* as it was */ }
   const changes = () => Object.fromEntries(Object.keys(want).filter((k) => want[k] !== now[k]).map((k) => [k, [now[k], want[k]]]));
-  async function load(open) {
-    if (Object.keys(changes()).length && !open) want = {};
-    data = await api("GET", `api/abilities?scope=${encodeURIComponent(scope)}`);
+  let turn = 0;
+  async function load(open, to = scope) {
+    const mine = ++turn;
+    for (const b of document.querySelectorAll("#out button")) b.disabled = true;  // the old place's
+    const got = await api("GET", `api/abilities?scope=${encodeURIComponent(to)}`).catch((e) => { if (mine === turn && data) draw(new Set()); throw e; });
+    if (mine !== turn) return;
+    data = got; scope = got.scope;
     want = {}; now = {};
     history.replaceState(null, "", scope === "chat" ? location.pathname : `#s=${encodeURIComponent(scope)}`);
     draw(open || new Set());
@@ -34,7 +38,7 @@
     }));
     pick.addEventListener("change", () => {
       if (Object.keys(changes()).length && !confirm("Leave without saving?")) { pick.value = scope; return; }
-      scope = pick.value; show(() => load());
+      show(() => load(undefined, pick.value));
     });
     const search = el("input", { type: "search", placeholder: "Find an action", "aria-label": "Find an action", value: text });
     const box = el("div", {});
@@ -50,7 +54,7 @@
         : "A topic can only be stricter than “Everywhere”."));
     if (!watcher) {
       out.append(el("div", { class: "panel" }, line("changes.*", "Everything that changes something",
-        "Sending, deleting, booking, editing, alarms. Off = read only here.", data.changes, ["off", "ask", "default"], null)));
+        "Sending, deleting, booking, editing, alarms, filling in your details. Not the web browser or workspace files.", data.changes, ["off", "ask", "default"], null)));
     }
     list(box, q, open);
     const save = button("Save", send, "primary"), hint = el("span", { class: "note" });
@@ -79,7 +83,7 @@
       d.dataset.a = a.adapter;
       d.open = open.has(a.adapter) || !!q || only;
       const body = el("div", {});
-      if (whole || ops.length) body.append(line(`${a.adapter}.*`, `All of ${a.name}`, "Off: nothing of it works here.", a.mode, ["off", "default"], null));
+      if (whole || ops.length) body.append(line(`${a.adapter}.*`, `All of ${a.name}`, a.modes.includes("ask") ? "Off: nothing of it works here. Ask: every change of it asks." : "Off: nothing of it works here.", a.mode, a.modes, null));
       body.append(...ops.map((o) => line(o.op, o.label || o.op, `${o.rule}${o.label ? ` · ${o.op}` : ""}`, o.mode, o.modes, o.now)));
       if (a.never.length) body.append(el("p", { class: "note" }, `Never here: ${a.never.join(", ")}`));
       d.append(body);
@@ -96,6 +100,7 @@
       say([r.changed ? `${r.changed} made stricter.` : "", r.approval ? `Request #${r.approval} waits for your Approve in Telegram (30 minutes), then reload.` : ""].join(" ").trim());
     } catch (e) { await load(open).catch(() => {}); say(e.message, true); }
   }
+  window.addEventListener("beforeunload", (e) => { if (Object.keys(changes()).length) e.preventDefault(); });
   show(async () => {
     const [t, w] = await Promise.all([api("GET", "api/topics"), api("GET", "api/watchers")]);
     places = [["chat", "Everywhere"], ...t.topics.map((x) => [x.scope, `Topic: ${x.title || x.where}`]), ...w.watchers.map((x) => [x.scope, `Watcher: ${x.name}`])];

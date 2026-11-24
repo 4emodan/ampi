@@ -18,7 +18,7 @@
           button("Save role", async () => { told(await api("POST", "api/role", { scope: t.scope, role: role.value })); }, "primary"),
           el("a", { class: "btn", href: `abilities#s=${encodeURIComponent(t.scope)}` }, "Limits"),
           el("span", { class: "spacer" }),
-          t.set ? null : twice("Forget", "Press again", async () => { await api("POST", "api/forget", { scope: t.scope }); await load(); say("Forgotten."); }))));
+          t.set || t.role || t.watchers.length ? null : twice("Forget", "Press again", async () => { await api("POST", "api/forget", { scope: t.scope }); await load(); say("Forgotten."); }))));
     }
     out.append(el("p", { class: "note" }, "In Telegram: /topic. Notes and logs are shared between topics: a role or a limit doesn't hide one topic's history from another."));
   });

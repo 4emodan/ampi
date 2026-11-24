@@ -21,25 +21,31 @@ SITE80=$(readlink -f "$SITE80" 2>/dev/null || echo "$SITE80")
 web_config() {
   [[ -f $CONF ]] || return 0
   python3 - "$CONF" "$1" <<'PY'
-import os, sys, tomllib
+import os, re, stat, sys, tempfile, tomllib
 path, url = sys.argv[1:]
-text = open(path, encoding="utf-8").read()
+fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)  # (the folder is the service's: its files aren't taken on trust)
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_uid != 0:
+    sys.exit(f"{path} isn't a file of root's")
+with os.fdopen(fd, encoding="utf-8") as f:
+    text = f.read()
 a, b = "# >>> ampi-dash", "# <<< ampi-dash"
 if text.count(a) == text.count(b) == 1 and text.index(a) < text.index(b):
     text = text[:text.index(a)].rstrip("\n") + "\n" + text[text.index(b) + len(b):].lstrip("\n")
 elif a in text or b in text:
     sys.exit(f"{path}: the ampi-dash lines were changed by hand; edit [web] yourself")
+text = re.sub(r'\n\n\[web\]\nurl = "https://[0-9.]+"\n\Z', "\n", text)  # as an earlier installer wrote it
 if url:
     if "web" in tomllib.loads(text):
         sys.exit(f"{path} already has a [web] section of its own")
     text = text.rstrip("\n") + f'\n\n{a}\n[web]\nurl = "{url}"\n{b}\n'
 tomllib.loads(text)
-st = os.stat(path)
-tmp = path + ".new"
-with open(tmp, "w", encoding="utf-8") as f:
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))  # a new file, only root's
+with os.fdopen(fd, "w", encoding="utf-8") as f:
     f.write(text)
-os.chmod(tmp, st.st_mode & 0o777)
-os.chown(tmp, st.st_uid, st.st_gid)
+    f.flush()
+    os.fchown(f.fileno(), st.st_uid, st.st_gid)
+    os.fchmod(f.fileno(), st.st_mode & 0o777)
 os.replace(tmp, path)
 PY
 }

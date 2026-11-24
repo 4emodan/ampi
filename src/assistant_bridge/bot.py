@@ -443,14 +443,16 @@ class ProfileBot:
             if react:
                 for i in ids:
                     self.store.add_owner_message(self.profile.name, chat_id, thread_id, i)
-                prompt = _join_items([f"[message {m.get('message_id')}]\n{b}" for m, b in bodies])
+                prompt = _join_items([f"{b}\n[message {m.get('message_id')}]" if b.startswith("/") else f"[message {m.get('message_id')}]\n{b}"
+                                      for m, b in bodies])
             for m, body in bodies if not social else ():
                 chatlog.append(log_dir, "Owner", body, chatlog.message_time(m))
             topic = await self.topics.get(chat_id, thread_id, self._topic_title(chat_id, thread_id, conv.title, title)) \
                 if self.topics is not None else None
             if topic is not None and not topic.known:
-                await self._send_text(chat_id, thread_id, "⚠️ The tools service isn't reachable; I work without web and Telegram "
-                                      "reading for now.", markdown=False)
+                await self._send_text(chat_id, thread_id, "⚠️ The tools service isn't reachable. " + (
+                    "This topic has limits of its own, so nothing runs here until it is back." if topic.restricted else
+                    "I work without web and Telegram reading for now."), markdown=False)
             system_prompt = self._system_prompt() + (
                 "\n\n" + topic.prompt() if topic is not None and topic.role and not social else "") + ("\n\n" + reactions.PROMPT if react else "")
             if group is not None:
@@ -495,7 +497,7 @@ class ProfileBot:
                         cwd=self.profile.workspace,
                         session_id=conv.session_id,
                         started=conv.started,
-                        **({"topic": (topic.scope, topic.restricted)} if topic is not None else {}),
+                        **({"topic": topic.run} if topic is not None else {}),
                         model=conv.model or self.profile.model,
                         allowed_tools=allowed,
                         append_system_prompt=system_prompt,
@@ -526,6 +528,10 @@ class ProfileBot:
                 with contextlib.suppress(Exception):
                     await self._send_text(chat_id, thread_id, "⏹ Stopped.", markdown=False)
                 return
+            except Exception:
+                with contextlib.suppress(Exception):
+                    await self._react(chat_id, ids if group is None else [], reactions.FAILED)
+                raise
             finally:
                 typing.cancel()
                 self._running.pop(key, None)
@@ -545,10 +551,12 @@ class ProfileBot:
                 reply = (reply + "\n\n" if reply else "") + f"⚠️ {result.error or 'error'}"
             if reply and reply != NO_REPLY and not social:
                 chatlog.append(log_dir, "Assistant", reply)
+            if own and result.ok and not result.text:  # a reaction says it all, if it is really there
+                if not react or not await self._final_reactions(chat_id, thread_id, ids, own, True, status=group is None):
+                    await self._send_text(chat_id, thread_id, " ".join(e for _, e in own if e) or "👌", markdown=False)
+                return
             if react:
-                await self._final_reactions(chat_id, thread_id, ids, own, result.ok, status=group is None)
-            if own and result.ok and not result.text:
-                return  # a reaction says it all
+                self._spawn(self._final_reactions(chat_id, thread_id, ids, own, result.ok, status=group is None))
             await self._deliver(chat_id, thread_id, result, quiet_ok=group is not None, social=social)
 
     # --- reactions ------------------------------------------------------------------------
@@ -557,23 +565,29 @@ class ProfileBot:
         return hasattr(self.api, "set_message_reaction") and \
             self.store.get_setting(self.profile.name, f"{reactions.KEY}{chat_id}:{thread_id}") != "off"
 
-    async def _react(self, chat_id: int, ids: list[int], emoji: str) -> None:
+    async def _react(self, chat_id: int, ids: list[int], emoji: str) -> bool:
         for i in ids[:20]:
             try:
                 await self.api.set_message_reaction(chat_id, i, emoji)
             except TelegramError as e:  # not allowed in this chat, the message is gone, …
                 log.info("[%s] reaction: %s", self.profile.name, e.description)
-                return
+                return False
+        return True
 
     async def _final_reactions(self, chat_id: int, thread_id: int, ids: list[int], own: list[tuple[int | None, str]],
-                               ok: bool, status: bool = True) -> None:
+                               ok: bool, status: bool = True) -> bool:
+        """Whether a reaction Ampi chose was set."""
         chosen = {(i if i is not None else ids[-1]): e for i, e in own if i is not None or ids}
         chosen = {i: e for i, e in chosen.items()
                   if self.store.is_owner_message(self.profile.name, chat_id, thread_id, i)}
-        for i in ids if status else ():
+        mine, done = set(chosen), False
+        for i in ids[:20] if status else ():
             chosen.setdefault(i, reactions.DONE if ok else reactions.FAILED)
-        for i, e in chosen.items():
-            await self._react(chat_id, [i], e)
+        for i, e in list(chosen.items())[:30]:
+            if not await self._react(chat_id, [i], e):
+                break
+            done = done or i in mine
+        return done
 
     async def _cmd_react(self, chat_id: int, thread_id: int, args: str) -> None:
         word = args.lower()

@@ -42,7 +42,7 @@ OUTSIDE_TOOLS = {"tg-read": ("Bash(tg-read:*)",), "web": ("WebSearch", "WebFetch
 # "changes.*": what changes something of the owner's or acts in their name. Not: looking around in the checkout browser and
 # filling in, which lead to a press that is one of these.
 CHANGES = frozenset(ws.WRITE_OPS) - {"checkout.snapshot", "checkout.open", "checkout.click", "checkout.type", "checkout.choose",
-                                     "checkout.back", "checkout.close", "checkout.fill", "info.reveal", "info.collect"} | {
+                                     "checkout.back", "checkout.close", "info.reveal", "info.collect"} | {
     "phone.notify", "phone.alarm", "phone.timer", "phone.cancel", "info.save_place", "info.revoke", "telegram.revoke",
     "gmail.download", "signin.fill", "signin.code", "signin.session"}
 # Already confirmed in their own way (a fingerprint on the phone), or their result is for Ampi: no "ask each time" for these.
@@ -140,7 +140,10 @@ def allowed_modes(scope: str, op: str, ops: Any, critical: Any) -> list[str]:
         known = ADAPTERS if scope == "chat" else (*ADAPTERS, *OUTSIDE_TOOLS)
         if kind(scope) == "watcher":
             known = tuple(k for k in known if k != "browse")
-        return ["default", "off"] if op[:-2] in known else []
+        if op[:-2] not in known:
+            return []
+        changes = kind(scope) != "watcher" and any(c.split(".", 1)[0] == op[:-2] for c in CHANGES - NO_ASK)
+        return ["default", "ask", "off"] if changes else ["default", "off"]
     if FLOW_RE.fullmatch(op):
         return ["default", "off"] if kind(scope) != "watcher" else []
     if op not in ops or (kind(scope) == "watcher" and op in ws.NOT_FOR_WATCHERS):
@@ -194,7 +197,10 @@ class Permissions:
                                          "checkout.fill": {"info"}}.get(op, set())
         if any(self.get(scope, f"{k}.*") == "off" for k in kinds):
             return "off"
-        return min((self.get(scope, e) for e in effects(op, args or {})), key=RANK.__getitem__)
+        own = min((self.get(scope, e) for e in effects(op, args or {})), key=RANK.__getitem__)
+        if op in CHANGES - NO_ASK and kind(scope) != "watcher" and any(self.get(scope, f"{k}.*") == "ask" for k in kinds):
+            own = min(own, "ask", key=RANK.__getitem__)
+        return own
 
     def off(self, scope: str) -> list[str]:
         out = {op[:-2] for op, m in self.all(scope).items() if op.endswith(".*") and m == "off"}
@@ -209,13 +215,13 @@ class Permissions:
         for r in self.db.execute("SELECT DISTINCT scope FROM settings WHERE scope LIKE 'topic:%'").fetchall():
             self.refuse(r["scope"], ops)
 
-    def remember(self, key: str, value: list) -> None:
+    def remember(self, key: str, value: Any) -> None:
         self.db.execute("INSERT OR REPLACE INTO notes VALUES (?, ?)", (key, json.dumps(value)))
         self.db.commit()
 
-    def remembered(self, key: str) -> list:
+    def remembered(self, key: str) -> Any:
         r = self.db.execute("SELECT value FROM notes WHERE key=?", (key,)).fetchone()
-        return json.loads(r["value"]) if r else []
+        return json.loads(r["value"]) if r else None
 
     # --- topics
 

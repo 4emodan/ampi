@@ -61,7 +61,7 @@ def test_all_changes(topic, mode):
 def test_every_operation_is_either_a_change_or_known_not_to_be():
     looking = {o for o in OPS if o not in perms.CHANGES}
     risky = {o for o in looking if OPS[o].critical}
-    assert risky <= {"checkout.fill", "info.reveal", "info.collect", "checkout.open", "checkout.click", "checkout.type",
+    assert risky <= {"info.reveal", "info.collect", "checkout.open", "checkout.click", "checkout.type",
                      "checkout.choose", "checkout.back", "checkout.close", "checkout.snapshot"}, risky
     for o in looking:
         assert o.split(".")[1] in {"tasks", "task", "projects", "labels", "completed", "ids", "show", "search", "read", "thread", "files",
@@ -262,7 +262,7 @@ def wired(setup, reply=None, fail=False):  # noqa: F811
         asked.append(req)
         if fail:
             raise ServiceError("away")
-        return {"ok": True, "role": "Be brief.", "off": ["web"], "restricted": True, "settings": {"web.*": "off"}, "chat": {},
+        return {"ok": True, "role": "Be brief.", "off": ["web"], "restricted": True, "limited": True, "settings": {"web.*": "off"}, "chat": {},
                 "watchers": [], **(reply or {})}
 
     bot.topics = Topics(bot, "x", ask)
@@ -273,20 +273,20 @@ def test_a_run_gets_its_topics_role_and_limits(setup):  # noqa: F811
     bot, api, runner, asked = wired(setup)
     brun(bot.handle_message(msg("hi", thread=7)))
     c = runner.calls[0]
-    assert c["topic"] == (T, True) and "Be brief." in c["append_system_prompt"] and "WebFetch" in c["extra_denied"]
+    assert c["topic"] == (T, True, True) and "Be brief." in c["append_system_prompt"] and "WebFetch" in c["extra_denied"]
     assert asked[0]["scope"] == T
 
 
 def test_the_tools_service_away(setup):  # noqa: F811
     bot, api, runner, _ = wired(setup, fail=True)
     brun(bot.handle_message(msg("hi", thread=7)))
-    assert runner.calls[0]["topic"] == (T, True) and "WebFetch" in runner.calls[0]["extra_denied"]
+    assert runner.calls[0]["topic"] == (T, False, True) and "WebFetch" in runner.calls[0]["extra_denied"]
     assert "isn't reachable" in api.sent[0]["text"]
 
 
 @pytest.mark.parametrize("text,req", [
     ("/topic role You are\nan accountant", {"role": "You are\nan accountant"}), ("/topic\nrole X", {"role": "X"}),
-    ("/topic role clear", {"role": ""}), ("/topic changes ask", {"changes": {"changes.*": "ask"}}),
+    ("/topic role clear", {"role": ""}), ("/topic role off", {"role": ""}), ("/topic ask gmail", {"changes": {"gmail.*": "ask"}}), ("/topic changes ask", {"changes": {"changes.*": "ask"}}),
     ("/topic changes on", {"changes": {"changes.*": "default"}}), ("/topic off gmail", {"changes": {"gmail.*": "off"}}),
     ("/topic on web", {"changes": {"web.*": "default"}}), ("/topic reset", {"reset": True})])
 def test_commands(setup, text, req):  # noqa: F811
@@ -343,3 +343,100 @@ def test_approvals_are_shown_in_their_topic_and_never_lost():
     assert sent[-1] is None
     brun(relay.send_notices([{"id": 1, "text": "x", "profile": "personal", "thread": 7}]))
     assert sent[-1] is None
+
+
+def test_a_limited_topics_run_gets_nothing_through_watchers():
+    from assistant_bridge.watch.control import PRIVATE_CMDS, Control, Who
+    from assistant_bridge.watch.engine import Caller
+    c = Control({}, "x")
+    for cmd in sorted(PRIVATE_CMDS):
+        out = brun(c.dispatch({"cmd": cmd, "name": "sorter"}, Who("private", "personal", caller=Caller("private", None, True))))
+        assert ("limited" in out["text"]) == (cmd not in ("list", "help", "lib", "pause")), (cmd, out)
+
+
+def test_the_topic_is_read_before_the_origin(topic):
+    d, gm, _ = topic
+    put(d, gmail___all="off")
+    order = []
+    d.runs.topic_of = lambda pid: order.append("topic")
+    d.runs.origin_of = lambda pid: order.append("origin") or "unknown"
+    assert not agent(d, "gmail.labels", pid=PID)["ok"] and order[:2] == ["topic", "origin"]
+
+
+def test_stop_remembers_what_was(topic):
+    d, *_ = topic
+    put(d, "chat", changes___all="ask")
+    hub_data.set_(d, T, {"changes.*": ["default", "off"]})
+    hub_data.set_(d, T, {"changes.*": ["off", "default"]})  # waits
+    hub_data.answer(d, "hub.stop", {})
+    assert not pending(d)
+    d.keeper.set_status("personal", "sorter", "active")
+    hub_data.answer(d, "hub.stop", {})
+    assert d.permissions.remembered("stopped") == {"mode": "ask", "watchers": [SCOPE]}
+    hub_data.answer(d, "hub.resume", {"everything": True})
+    (item,) = pending(d)
+    call(d, {"cmd": "approvals.decide", "id": item["id"], "approve": True, "nonce": item["nonce"], "message_id": None})
+    assert d.permissions.get("chat", "changes.*") == "ask" and not hub_data.home(d)["stopped"]
+    with pytest.raises(ToolError):
+        hub_data.answer(d, "hub.resume", {"everything": True})
+
+
+def test_two_requests_to_turn_on_are_one(topic):
+    from test_abilities import SORTER
+    from test_keeper import activate
+    d, *_ = topic
+    activate(d, SORTER.replace('"sorter"', '"other"'), name="other")
+    both = [SCOPE, "watcher:personal/other"]
+    hub_data.answer(d, "hub.pause", {"scopes": both})
+    for s in both:
+        hub_data.answer(d, "hub.resume", {"scopes": [s]})
+    (item,) = pending(d)
+    call(d, {"cmd": "approvals.decide", "id": item["id"], "approve": True, "nonce": item["nonce"], "message_id": None})
+    assert all(d.keeper.watcher("personal", n)["status"] == "active" for n in ("sorter", "other"))
+
+
+def test_an_old_role_request_doesnt_undo_a_newer_role(topic):
+    d, *_ = topic
+    hub_data.answer(d, "hub.role", {"scope": T, "role": "old"})
+    call(d, {"cmd": "topic.set", "scope": T, "role": "new"})
+    (item,) = pending(d)
+    out = call(d, {"cmd": "approvals.decide", "id": item["id"], "approve": True, "nonce": item["nonce"], "message_id": None})
+    assert out["status"] == "failed" and d.permissions.role(T) == "new"
+    with pytest.raises(ToolError):
+        hub_data.answer(d, "hub.forget", {"scope": T})
+
+
+def test_an_adapter_that_asks(topic):
+    d, gm, _ = topic
+    put(d, gmail___all="ask")
+    assert agent(d, "gmail.star", pid=PID, id="n1")["approval"] and agent(d, "gmail.labels", pid=PID)["ok"]
+    assert "ask" not in perms.allowed_modes(T, "maps.*", OPS, set()) and "ask" in perms.allowed_modes(T, "gmail.*", OPS, set())
+
+
+def test_limits_before_the_first_message(env):  # noqa: F811
+    d, *_ = env
+    new = "topic:personal/private/55"
+    assert call(d, {"cmd": "topic.set", "scope": new, "changes": {"changes.*": "off"}})["restricted"]
+    assert not call(d, {"cmd": "topic.set", "scope": new, "changes": {"nonsense.*": "default"}})["ok"]
+    assert not call(d, {"cmd": "topic.deliver", "scope": SCOPE, "topic": "topic:work/private/5"})["ok"]
+
+
+def test_a_run_that_may_not_start_is_forgotten():
+    from assistant_bridge.claude_runner import ClaudeRunner, NotRegistered
+    import sys
+    r = ClaudeRunner([sys.executable, "-c", "import time; time.sleep(30)"], timeout_seconds=20, max_concurrent=1)
+    gone = []
+
+    async def spawn(*a):
+        raise NotRegistered
+
+    async def left(pid):
+        gone.append(pid)
+
+    r.on_spawn, r.on_exit = spawn, left
+
+    async def go():
+        return await r._exec([sys.executable, "-c", "import time; time.sleep(30)"], "", __import__("pathlib").Path("."), topic=(T, True, True))
+
+    out = brun(go())
+    assert not out.ok and "nothing was run" in out.error and len(gone) == 1

@@ -37,6 +37,8 @@ const Hub = (() => {
         ...(id === on ? { "aria-current": "page" } : {}) }, name));
     }
     nav.append(el("span", { class: "grow" }));
+    const cur = nav.querySelector(".on");
+    if (cur && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = cur.offsetLeft - 40;
     if (!web) return;
     const b = el("button", { class: "btn", type: "button" }, "Sign out");
     nav.append(b);

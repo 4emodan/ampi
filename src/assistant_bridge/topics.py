@@ -16,7 +16,7 @@ TIMEOUT = 5
 HELP = (
     "/topic role TEXT – what I am here (my instructions in this topic); /topic role clear\n"
     "/topic changes ask|off|on – everything that changes something: ask each time, never, or the usual rules\n"
-    "/topic off NAME, /topic on NAME – an adapter here (gmail, todoist, telegram, tg-read, web, browse, …)\n"
+    "/topic off NAME, /topic ask NAME, /topic on NAME – an adapter here (gmail, todoist, telegram, tg-read, web, browse, …)\n"
     "/topic watcher NAME, /topic watcher NAME off – its messages and requests come here, or to the main chat again\n"
     "/topic reset – no role and no limits here\n"
     "A topic can only be stricter than everywhere else. Single actions: in the dashboard.")
@@ -27,8 +27,13 @@ class Info:
     scope: str
     role: str = ""
     off: tuple[str, ...] = ()
-    restricted: bool = False
+    restricted: bool = False  # by settings of its own: nothing runs there without ampi-tools knowing
+    limited: bool = False     # by those or by what holds everywhere
     known: bool = True
+
+    @property
+    def run(self) -> tuple[str, bool, bool]:
+        return self.scope, self.restricted, self.limited
 
     def prompt(self) -> str:
         if not self.role:
@@ -72,8 +77,10 @@ class Topics:
                 raise ServiceError(str(r.get("error")))
         except ServiceError as e:
             log.warning("topic %s: %s", scope, e)
-            return self.last.get(scope) or Info(scope, off=tuple(OUTSIDE_TOOLS), restricted=True, known=False)
-        info = self.last[scope] = Info(scope, str(r.get("role") or ""), tuple(r.get("off") or ()), bool(r.get("restricted")))
+            was = self.last.get(scope) or Info(scope)
+            return Info(scope, was.role, tuple(sorted({*was.off, *OUTSIDE_TOOLS})), was.restricted, True, False)
+        info = self.last[scope] = Info(scope, str(r.get("role") or ""), tuple(r.get("off") or ()), bool(r.get("restricted")),
+                                      bool(r.get("limited")))
         return info
 
     async def command(self, chat_id: int, thread_id: int, args: str, title: str) -> str:
@@ -86,11 +93,11 @@ class Topics:
         elif word == "role" and rest:
             if len(rest) > MAX_ROLE:
                 return f"At most {MAX_ROLE} characters."
-            req["role"] = "" if rest.lower() == "clear" else rest
+            req["role"] = "" if rest.lower() in ("clear", "off", "none") else rest
         elif word == "changes" and rest.lower() in ("ask", "off", "on"):
             req["changes"] = {"changes.*": "default" if rest.lower() == "on" else rest.lower()}
-        elif word in ("off", "on") and rest:
-            req["changes"] = {f"{rest.lower()}.*": "off" if word == "off" else "default"}
+        elif word in ("off", "ask", "on") and rest:
+            req["changes"] = {f"{rest.lower()}.*": "default" if word == "on" else word}
         elif word == "reset" and not rest:
             req["reset"] = True
         elif word == "watcher" and rest:

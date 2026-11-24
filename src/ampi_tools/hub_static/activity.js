@@ -15,6 +15,7 @@
     };
     out.replaceChildren(el("div", { class: "tools" },
       sel("Watcher", name, [["", "All watchers"], ...w.watchers.map((x) => [x.name, x.name])], (v) => { name = v; }),
+      sel("Action", op, [["", "All actions"], ...[...new Map([...(op ? [[op, op]] : []), ...a.watchers.map((r) => [r.op, r.label])])]], (v) => { op = v; }),
       sel("Result", status, [["", "Any result"], ["done", "Done"], ["requested", "Asked"], ["rejected", "Rejected"], ["expired", "Not answered"], ["failed", "Failed"], ["unknown", "Unclear"]], (v) => { status = v; })));
     const box = el("div", { class: "panel" });
     const more = button("Load more", async () => { const x = await api("GET", `api/activity?${q({ before: last })}`); add(x.watchers); });

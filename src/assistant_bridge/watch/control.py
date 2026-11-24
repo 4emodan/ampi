@@ -30,6 +30,8 @@ READ_CMDS = {"list", "show", "runs", "logs", "space", "audit", "lib", "help"}
 PRIVATE_CMDS = READ_CMDS | {"validate", "test", "build", "pause", "run", "retry"}
 # The builder reads real items while testing and could be misled by them: it sees only its own watcher, never run
 # logs, saved data or the audit of any watcher.
+# In a topic the owner limited: what shows or fetches what watchers see could be exactly what is off there.
+LIMITED_CMDS = {"list", "help", "lib", "pause"}
 BUILDER_CMDS = {"list", "lib", "help", "show", "validate", "test", "propose"}
 DM_WATCHER = "instagram-dms"
 SOCIAL_RUN_GAP = 600  # seconds between two DM-watcher runs started from social mode
@@ -137,8 +139,8 @@ class Control:
         allowed = PRIVATE_CMDS if who.kind == "private" else {"run"} if who.kind == "social" else BUILDER_CMDS
         if cmd not in allowed:
             return {"ok": False, "text": f"`watchers {cmd}` isn't available here."}
-        if who.kind == "private" and cmd in ("build", "run", "retry") and who.caller is not None and who.caller.limited:
-            return {"ok": False, "text": f"The owner limited this topic: `watchers {cmd}` isn't available here (a watcher acts with "
+        if who.kind == "private" and cmd not in LIMITED_CMDS and who.caller is not None and who.caller.limited:
+            return {"ok": False, "text": f"The owner limited this topic: `watchers {cmd}` isn't available here (a watcher acts and reads with "
                                          "its own permissions)."}
         engine = self.engines.get(who.profile)
         if engine is None:

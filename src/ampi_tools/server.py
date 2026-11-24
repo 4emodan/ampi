@@ -230,12 +230,13 @@ class Daemon:
                 # The watchers' YouTube ops use their own reserve of quota and requests; only the bridge has it.
                 if any(o["op"] in WATCHER_ONLY for o in ops) and not await self.trusted(pid):
                     raise ToolError("youtube.ids/youtube.show are for watchers; use `youtube feed` / `youtube video`")
-                # Where the request really comes from: the claude run it descends from (never what it says).
+                # Where the request really comes from: the claude run it descends from (never what it says). The topic first: a
+                # process that is cut off from its run in between is then "unknown", never a run without a topic.
+                topic = self.runs.topic_of(pid)
                 origin = self.runs.origin_of(pid)
                 # The bridge's own reads (its watchers' checks) aren't a chat's.
                 own = origin == "unknown" and not any(ws.is_write(o["op"]) for o in ops) and await self.trusted(pid)
-                resp = self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin, own,
-                                                    self.runs.topic_of(pid)), ops)
+                resp = self._masked(await self.run(ops, request.get("reason"), request.get("origin"), origin, own, topic), ops)
                 if origin == SOCIAL_ORIGIN and isinstance(resp.get("text"), str):
                     resp["text"] = clip(resp["text"])
                 return resp
@@ -664,7 +665,7 @@ class Daemon:
         finally:
             self.approvals.finish(approval_id, status, text)
             log.info("approval #%s %s", approval_id, status)
-        if always and any(self.permissions.mode(scope, o["op"]) == "ask" for o in json.loads(item["ops"])):
+        if always and (self.permissions.restricted(scope) or any(self.permissions.mode(scope, o["op"]) == "ask" for o in json.loads(item["ops"]))):
             always = False  # set to ask each time meanwhile
         if always and ok and grants and grants[0].get("kind") == "site":
             g = grants[0]  # from the stored request, never from the button
@@ -728,9 +729,12 @@ class Daemon:
         p = self.permissions
         if cmd == "topic.deliver":
             topic = req.get("topic") or ""
-            if perms.kind(scope) != "watcher" or (topic and not perms.private_thread(topic)):
-                raise ToolError("a watcher's messages go to a topic of the private chat")
             hub_data.check_scope(self, scope)
+            if perms.kind(scope) != "watcher":
+                raise ToolError("not a watcher")
+            if topic:
+                hub_data.check_delivery(scope, topic)
+                p.seen(topic, "")
             p.set_delivery(scope, topic, "Telegram")
             return {"ok": True}
         if perms.kind(scope) != "topic":
@@ -739,13 +743,16 @@ class Daemon:
             title = req.get("title")
             p.seen(scope, clean(title, 80) if isinstance(title, str) else "")
         else:
+            p.seen(scope, "")
+            changes = req.get("changes") or {}
+            crit = hub_data.critical_ops(self)
+            if not isinstance(changes, dict) or any(not perms.allowed_modes(scope, op, OPS, crit) for op in changes):
+                raise ToolError("there is no such adapter or action: " + clean(", ".join(map(str, changes)), 80))
             role = req.get("role")
             if role is not None:
                 p.set_role(scope, hub_data.check_role(role), "Telegram")
-            changes = req.get("changes") or {}
             if changes:
-                pairs = {op: [p.get(scope, op), new] for op, new in changes.items() if p.get(scope, op) != new} \
-                    if isinstance(changes, dict) else {}
+                pairs = {op: [p.get(scope, op), new] for op, new in changes.items() if p.get(scope, op) != new}
                 if pairs:
                     hub_data.check_changes(self, scope, pairs)
                     p.apply(scope, pairs, "Telegram")
@@ -753,7 +760,7 @@ class Daemon:
                 p.apply(scope, {op: [p.get(scope, op), "default"] for op in p.all(scope)}, "Telegram")
                 p.set_role(scope, "", "Telegram")
         return {"ok": True, "role": p.role(scope), "off": p.off(scope), "settings": p.all(scope), "chat": p.all("chat"),
-                "restricted": p.restricted(scope) or bool(p.all("chat").get("changes.*")),
+                "restricted": p.restricted(scope), "limited": p.restricted(scope) or bool(p.all("chat")),
                 "watchers": [w["name"] for w in (self.keeper.list_all() if self.keeper else [])
                              if p.delivery(perms.watcher_scope(w["profile"], w["name"])) == scope]}
 
@@ -765,15 +772,17 @@ class Daemon:
             meta = json.loads(row.get("meta") or "{}") if row.get("kind") == "settings.change" else {}
             if row["status"] == "pending" and meta.get("scope") == scope:
                 changes = {**{op: c for op, c in meta["changes"].items() if self.permissions.get(scope, op) == c[0]}, **changes}
-                extra = {**(meta.get("extra") or {}), **(extra or {})}
+                old = meta.get("extra") or {}
+                resume = sorted({*(old.get("resume") or ()), *((extra or {}).get("resume") or ())})
+                extra = {**old, **(extra or {}), **({"resume": resume} if resume else {})}
                 replaced.append(row["id"])
-        lines = [f"Change what {perms.words(scope)} may do:"]
+        lines = [f"Change what {perms.words(scope)} may do:" if changes else f"Change for {perms.words(scope)}:"]
         for op, (old, new) in changes.items():
             note = "" if op.endswith(".*") or op.startswith("flow:") else f" ({cards.note_of(op)})"
             lines.append(f"• {op}: {old} → {new}{note}")
         lines += hub_data.extra_lines(self, extra or {})
         summary = "\n".join(lines)
-        if len(summary) > 2800 or len(changes) > 60:
+        if len(summary) > 3200 or len(changes) > 60:
             raise ToolError("too many changes at once; save a few at a time")
         for i in replaced:
             self.approvals.claim(i, "expired")

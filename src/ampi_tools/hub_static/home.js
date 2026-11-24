@@ -5,9 +5,10 @@
     const h = await api("GET", "api/home"), t = h.today;
     out.replaceChildren();
     if (h.stopped) {
-      out.append(el("div", { class: "panel" }, row("Everything is stopped", "Watchers are paused and Ampi changes nothing.",
-        button("Turn on again", async () => { told(await api("POST", "api/resume", { everything: true })); }, "primary"))));
+      out.append(el("div", { class: "panel" }, row("Everything is stopped", "Watchers were paused, and changes are refused in every chat. Reading, the web browser and workspace files still work.",
+        button("Turn on again", async () => { const r = await api("POST", "api/resume", { everything: true }); if (!r.approval) await load(); told(r, "On again."); }, "primary"))));
     }
+    if (!h.stopped && h.changes === "off") out.append(el("div", { class: "panel" }, row("Changes are off everywhere", "Set under Abilities. Watchers aren't affected.")));
     out.append(el("h2", {}, "Needs you"));
     const bad = h.watchers.filter((w) => w.status === "failing");
     const need = el("div", { class: "panel" });
@@ -25,7 +26,7 @@
     out.append(el("h2", {}, "Latest"), el("div", { class: "panel" }, ...(h.recent.length ? h.recent.map((r) =>
       row(`${r.label}${r.items > 1 ? ` ×${r.items}` : ""}`, `${r.name} · ${when(r.at)} · ${r.status}`)) : [el("p", { class: "empty" }, "Nothing yet.")])));
     if (!h.stopped) {
-      out.append(el("h2", {}, "Emergency"), el("div", { class: "panel" }, row("Stop everything", "Pauses every watcher and refuses every change. Turning it on again needs your Approve in Telegram.",
+      out.append(el("h2", {}, "Emergency"), el("div", { class: "panel" }, row("Stop everything", "Pauses every watcher and refuses every change in your chats. Turning it on again needs your Approve in Telegram.",
         twice("Stop everything", "Press again to stop", async () => { const r = await api("POST", "api/stop", {}); await load(); say(`Stopped. ${r.paused} watcher(s) paused.`); }, "danger"))));
     }
   });

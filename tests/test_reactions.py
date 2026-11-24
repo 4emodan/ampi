@@ -20,13 +20,20 @@ class API(FakeAPI):
         self.set.append((message_id, emoji))
 
 
+async def settled(bot, message):
+    await bot.handle_message(message)
+    await asyncio.gather(*bot._tasks)
+
+
 def m(i, text="do it", **kw):
     return {**msg(text, **kw), "message_id": i}
 
 
 @pytest.mark.parametrize("text,out,found", [
     ("Done.\nREACT: 🔥", "Done.", [(None, "🔥")]), ("REACT 812: ✅", "", [(812, "👌")]), ("REACT 5: none", "", [(5, "")]),
-    ("REACT: ❤️", "", [(None, "❤")]), ("REACT: 🦖", "", []), ("a REACT: 👍", "a REACT: 👍", []),
+    ("REACT: ❤️", "", [(None, "❤")]), ("REACT: 🦖", "🦖", []), ("REACT: 👍🏽", "", [(None, "👍")]),
+    ("REACT: 👍\nNO_REPLY", "NO_REPLY", [(None, "👍")]), ("a\nREACT: 👍\nSEND_FILE: x.pdf", "a\nSEND_FILE: x.pdf", [(None, "👍")]),
+    ("`REACT: 👍`", "", [(None, "👍")]), ("a REACT: 👍", "a REACT: 👍", []),
     ("```\nREACT: 👍\n```", "```\nREACT: 👍\n```", []), ("he wrote\nREACT: 👍\nso", "he wrote\nREACT: 👍\nso", []),
     ("a\n\nREACT 1: 👍\nREACT 2: 🔥\n", "a", [(1, "👍"), (2, "🔥")]), ("```\nREACT: 👍", "```\nREACT: 👍", []), ("no lines", "no lines", [])])
 def test_parse(text, out, found):
@@ -40,11 +47,11 @@ def test_everything_offered_is_allowed():
 
 def test_status_of_a_task(setup):  # noqa: F811
     bot, api, runner, _ = setup(api=API())
-    run(bot.handle_message(m(7)))
+    run(settled(bot, m(7)))
     assert api.set == [(7, "👀"), (7, "👌")] and "[message 7]" in runner.calls[0]["prompt"]
     assert runner.calls[0]["tag"][-1] == "do it"  # the owner's words without the id
     runner.ok = False
-    run(bot.handle_message(m(8)))
+    run(settled(bot, m(8)))
     assert api.set[-1] == (8, "👎")
 
 
@@ -58,7 +65,7 @@ def test_only_the_owners_messages_of_this_conversation(setup):  # noqa: F811
     bot, api, runner, store = setup(api=API(), runner=FakeRunner("ok\nREACT 5: 🔥\nREACT 6: 🔥\nREACT 99: 🔥"))
     store.add_owner_message("personal", CHAT, 0, 5)
     store.add_owner_message("personal", CHAT, 33, 6)
-    run(bot.handle_message(m(7)))
+    run(settled(bot, m(7)))
     assert (5, "🔥") in api.set and not any(i in (6, 99) for i, _ in api.set)
     assert "REACT" not in api.sent[0]["text"]
 
@@ -71,7 +78,7 @@ def test_off_per_topic(setup):  # noqa: F811
     run(bot.handle_message(m(8)))
     assert api.set
     run(bot.handle_message(msg("/react on", thread=3)))
-    run(bot.handle_message(m(9, thread=3)))
+    run(settled(bot, m(9, thread=3)))
     assert (9, "🔥") in api.set
 
 
@@ -99,3 +106,10 @@ def test_only_the_latest_are_kept(setup):  # noqa: F811
     for i in range(1, 20):
         store.add_owner_message("personal", CHAT, 0, i, keep=5)
     assert not store.is_owner_message("personal", CHAT, 0, 14) and store.is_owner_message("personal", CHAT, 0, 15)
+
+
+@pytest.mark.parametrize("reply,fail", [("REACT 99: 🔥", False), ("REACT: 🔥", True)])
+def test_a_reply_never_vanishes(setup, reply, fail):  # noqa: F811
+    bot, api, *_ = setup(api=API(fail=fail), runner=FakeRunner(reply))
+    run(bot.handle_message(m(7)))
+    assert [s["text"] for s in api.sent] == ["🔥"]

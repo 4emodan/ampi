@@ -209,8 +209,8 @@ async def serve(config: Config) -> None:
         else:
             socket_path = None
 
-        async def on_spawn(pid: int, origin: str, tag: object = None, topic: tuple[str, bool] | None = None) -> None:
-            await control.on_spawn(pid, origin, tag, bool(topic and topic[1]))
+        async def on_spawn(pid: int, origin: str, tag: object = None, topic: tuple[str, bool, bool] | None = None) -> None:
+            await control.on_spawn(pid, origin, tag, bool(topic and topic[2]))
             # The builder never talks to ampi-tools; leaving it unregistered makes it "unknown" there.
             if socket_path is None or (isinstance(tag, tuple) and tag and tag[0] == "builder"):
                 return

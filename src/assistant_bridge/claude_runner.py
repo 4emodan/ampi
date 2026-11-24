@@ -183,7 +183,7 @@ class ClaudeRunner:
 
     async def _exec(self, args: list[str], prompt: str, cwd: Path, origin: str | None = None,
                     extra_env: Mapping[str, str] | None = None, tag: object = None,
-                    topic: tuple[str, bool] | None = None) -> RunResult:
+                    topic: tuple[str, bool, bool] | None = None) -> RunResult:
         env = {**self._env, **(extra_env or {})}
         if origin:
             # Tells the tool commands (and so the owner's approval requests) that this run handles outside
@@ -197,20 +197,20 @@ class ClaudeRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        if self.on_spawn is not None:
-            # Before claude reads its prompt (stdin), so no tool call can come before the registration.
-            try:
-                if topic is None:
-                    await self.on_spawn(proc.pid, origin or "private", tag)
-                else:
-                    await self.on_spawn(proc.pid, origin or "private", tag, topic)
-            except NotRegistered:
-                await _stop(proc)
-                return RunResult(ok=False, text="", error="the tools service isn't reachable, and this topic has limits of its own: "
-                                                          "nothing was run. Try again in a minute.")
-            except Exception:
-                log.warning("could not register run %s with the tools service", proc.pid, exc_info=True)
         try:
+            if self.on_spawn is not None:
+                # Before claude reads its prompt (stdin), so no tool call can come before the registration.
+                try:
+                    if topic is None:
+                        await self.on_spawn(proc.pid, origin or "private", tag)
+                    else:
+                        await self.on_spawn(proc.pid, origin or "private", tag, topic)
+                except NotRegistered:
+                    await _stop(proc)
+                    return RunResult(ok=False, text="", error="the tools service isn't reachable, and this topic has limits of its own: "
+                                                              "nothing was run. Try again in a minute.")
+                except Exception:
+                    log.warning("could not register run %s with the tools service", proc.pid, exc_info=True)
             out, err = await asyncio.wait_for(proc.communicate(prompt.encode("utf-8")), self._timeout)
         except asyncio.TimeoutError:
             await _stop(proc)
@@ -247,7 +247,7 @@ class ClaudeRunner:
         watchers_edit: bool = False,
         extra_denied: Sequence[str] = (),
         setting_sources: str | None = None,
-        topic: tuple[str, bool] | None = None,  # (its scope, whether it has limits of its own)
+        topic: tuple[str, bool, bool] | None = None,  # topics.Info.run
     ) -> RunResult:
         """Send one message to the conversation's Claude session. `origin` (e.g. "watcher:gmail-inbox") marks
         runs that handle outside content rather than the owner's own messages.
