@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS social_messages (
     message_id INTEGER NOT NULL,
     PRIMARY KEY (chat_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS owner_messages (
+    profile    TEXT    NOT NULL,
+    chat_id    INTEGER NOT NULL,
+    thread_id  INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY (profile, chat_id, message_id)
+);
 CREATE TABLE IF NOT EXISTS social_texts (hash TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS settings (
     profile TEXT NOT NULL,
@@ -180,6 +187,18 @@ class Store:
             (now_iso(), profile, chat_id, thread_id),
         )
         self._db.commit()
+
+    def add_owner_message(self, profile: str, chat_id: int, thread_id: int, message_id: int, keep: int = 500) -> None:
+        """What Ampi may react to: the owner's own messages it handled, per conversation."""
+        self._db.execute("INSERT OR REPLACE INTO owner_messages VALUES (?, ?, ?, ?)", (profile, chat_id, thread_id, message_id))
+        self._db.execute("DELETE FROM owner_messages WHERE profile=? AND chat_id=? AND thread_id=? AND message_id NOT IN (SELECT "
+                         "message_id FROM owner_messages WHERE profile=? AND chat_id=? AND thread_id=? ORDER BY message_id DESC "
+                         "LIMIT ?)", (profile, chat_id, thread_id) * 2 + (keep,))
+        self._db.commit()
+
+    def is_owner_message(self, profile: str, chat_id: int, thread_id: int, message_id: int) -> bool:
+        return self._db.execute("SELECT 1 FROM owner_messages WHERE profile=? AND chat_id=? AND thread_id=? AND message_id=?",
+                                (profile, chat_id, thread_id, message_id)).fetchone() is not None
 
     def add_social_message(self, chat_id: int, message_id: int | None, text: str | None = None) -> None:
         """A message Ampi sent that carries Instagram/Threads text: quoting or forwarding it later must not bring the

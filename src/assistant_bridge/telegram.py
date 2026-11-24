@@ -137,6 +137,11 @@ class TelegramAPI:
             attempts=1,
         )
 
+    async def set_message_reaction(self, chat_id: int, message_id: int, emoji: str) -> None:
+        """One emoji of Telegram's list, or "" for none."""
+        await self.call("setMessageReaction", {"chat_id": chat_id, "message_id": message_id,
+                                               "reaction": [{"type": "emoji", "emoji": emoji}] if emoji else []}, attempts=1)
+
     async def create_forum_topic(self, chat_id: int, name: str) -> dict:
         return await self.call("createForumTopic", {"chat_id": chat_id, "name": name[:128]})
 

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import chatlog, persona
+from . import chatlog, persona, reactions
 from .chatlog import CHATS_DIR
 from .claude_runner import ClaudeRunner, RunResult
 from .config import Group, Profile, Watcher
@@ -50,6 +50,7 @@ COMMANDS = [
     {"command": "cancel", "description": "Stop the current task"},
     {"command": "model", "description": "Show or set the model for this conversation"},
     {"command": "persona", "description": "Tone and character of my replies"},
+    {"command": "react", "description": "Emoji reactions on your messages here: on or off"},
     {"command": "protect", "description": "Answer here only when you tag me"},
     {"command": "status", "description": "Show this conversation's status"},
     {"command": "watchers", "description": "List watchers (automations)"},
@@ -68,6 +69,7 @@ HELP_TEXT = (
     "/model [name|default] – show or change the model here\n"
     "/persona – tone and character of my replies\n"
     "/protect – in this chat or topic I act only when you tag me (/protect chat: with all its topics; /protect off)\n"
+    "/react – my emoji reactions on your messages here (/react off, /react on)\n"
     "/status – session info and usage\n"
     "/watchers – your watchers; /watcher NAME – details and buttons\n"
     "/info – your personal info (masked) and which sites may fill it\n"
@@ -423,9 +425,16 @@ class ProfileBot:
                     "\"Bash(instagram:*)\" and/or \"Bash(threads:*)\", written exactly like that. Nothing was run; "
                     "/reset leaves social mode.", markdown=False)
                 return
+            words = prompt
+            react = not social and self._reacts(*key)
+            ids = [m["message_id"] for m, _ in bodies if isinstance(m.get("message_id"), int)] if react else []
+            if react:
+                for i in ids:
+                    self.store.add_owner_message(self.profile.name, chat_id, thread_id, i)
+                prompt = _join_items([f"[message {m.get('message_id')}]\n{b}" for m, b in bodies])
             for m, body in bodies if not social else ():
                 chatlog.append(log_dir, "Owner", body, chatlog.message_time(m))
-            system_prompt = self._system_prompt()
+            system_prompt = self._system_prompt() + ("\n\n" + reactions.PROMPT if react else "")
             if group is not None:
                 system_prompt += "\n\n" + self._group_prompt(group, title)
             # Every social turn until /new is kept apart, because the context holds text written by strangers (feeds,
@@ -435,6 +444,7 @@ class ProfileBot:
             self._running[key] = asyncio.current_task()  # type: ignore[assignment]
             typing = asyncio.create_task(self._keep_typing(chat_id, thread_id))
             started_at = now_iso()
+            seen = asyncio.create_task(self._react(chat_id, ids, reactions.SEEN))
             try:
                 with contextlib.ExitStack() as stack:
                     allowed, extra_args, extra_env = self.profile.allowed_tools, self.profile.extra_args, None
@@ -482,10 +492,12 @@ class ProfileBot:
                         # alone (never as the owner's words).
                         tag=("social", self.profile.name) if social else None
                         if group is not None or outside
-                        else ("chat", self.profile.name, chat_id, thread_id, prompt[:4000]),
+                        else ("chat", self.profile.name, chat_id, thread_id, words[:4000]),
                     )
             except asyncio.CancelledError:
-                self._record(conv, started_at, RunResult(ok=False, text="", error="cancelled"), prompt)
+                self._record(conv, started_at, RunResult(ok=False, text="", error="cancelled"), words)
+                with contextlib.suppress(Exception):
+                    await self._react(chat_id, ids, "")
                 if not social:
                     chatlog.append(log_dir, "Assistant", "(stopped by /cancel)")
                 with contextlib.suppress(Exception):
@@ -498,13 +510,55 @@ class ProfileBot:
             if result.ok or result.text:
                 # Claude Code created the session; later turns resume it.
                 self.store.mark_started(self.profile.name, chat_id, thread_id, conv.session_id)
-            self._record(conv, started_at, result, prompt)
+            self._record(conv, started_at, result, words)
+            with contextlib.suppress(Exception):
+                await seen  # (its reaction comes before the last one)
+            own: list[tuple[int | None, str]] = []
+            if not social:
+                text, own = reactions.parse(result.text or "")
+                result = replace(result, text=text)
             reply = (result.text or "").strip()
             if not result.ok:
                 reply = (reply + "\n\n" if reply else "") + f"⚠️ {result.error or 'error'}"
             if reply and reply != NO_REPLY and not social:
                 chatlog.append(log_dir, "Assistant", reply)
+            if react:
+                await self._final_reactions(chat_id, thread_id, ids, own, result.ok)
+            if own and result.ok and not result.text:
+                return  # a reaction says it all
             await self._deliver(chat_id, thread_id, result, quiet_ok=group is not None, social=social)
+
+    # --- reactions ------------------------------------------------------------------------
+
+    def _reacts(self, chat_id: int, thread_id: int) -> bool:
+        return hasattr(self.api, "set_message_reaction") and \
+            self.store.get_setting(self.profile.name, f"{reactions.KEY}{chat_id}:{thread_id}") != "off"
+
+    async def _react(self, chat_id: int, ids: list[int], emoji: str) -> None:
+        for i in ids[:20]:
+            try:
+                await self.api.set_message_reaction(chat_id, i, emoji)
+            except TelegramError as e:  # not allowed in this chat, the message is gone, …
+                log.info("[%s] reaction: %s", self.profile.name, e.description)
+                return
+
+    async def _final_reactions(self, chat_id: int, thread_id: int, ids: list[int], own: list[tuple[int | None, str]],
+                               ok: bool) -> None:
+        chosen = {(i if i is not None else ids[-1]): e for i, e in own if i is not None or ids}
+        chosen = {i: e for i, e in chosen.items()
+                  if self.store.is_owner_message(self.profile.name, chat_id, thread_id, i)}
+        for i in ids:
+            chosen.setdefault(i, reactions.DONE if ok else reactions.FAILED)
+        for i, e in chosen.items():
+            await self._react(chat_id, [i], e)
+
+    async def _cmd_react(self, chat_id: int, thread_id: int, args: str) -> None:
+        word = args.lower()
+        if word in ("on", "off"):
+            self.store.set_setting(self.profile.name, f"{reactions.KEY}{chat_id}:{thread_id}", "off" if word == "off" else None)
+        on = self._reacts(chat_id, thread_id)
+        await self._send_text(chat_id, thread_id, f"Reactions on your messages here are {'on' if on else 'off'}. "
+                              f"/react {'off' if on else 'on'} changes it.", markdown=False)
 
     async def handle_callback(self, cq: dict) -> None:
         if self.info_ui is not None and (cq.get("data") or "").startswith("pi:"):
