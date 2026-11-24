@@ -161,7 +161,7 @@ def served():
 
 def test_pages_hold_no_data(served):
     req, asked, _ = served
-    for p in ("/", "/abilities", "/watchers", "/activity", "/hub.css", "/hub.js", "/overview.js"):
+    for p in ("/", "/abilities", "/watchers", "/activity", "/hub.css", "/hub.js", "/home.js", "/topics", "/given", "/setup"):
         status, body, r = req("GET", p, cookie="")
         assert status == 200 and "default-src 'none'" in r.getheader("Content-Security-Policy")
         assert 'href="/' not in body and 'src="/' not in body
@@ -226,3 +226,22 @@ def test_one_request_per_connection_and_odd_json(served):
     req, asked, _ = served
     assert req("GET", "/api/overview", body={"a": 1})[2].getheader("Connection") == "close"
     assert req("POST", "/api/set", headers={"Content-Type": "application/json"}, body=None)[0] in (400, 413)
+
+
+def test_every_page_script_and_command_is_served(served):
+    req, asked, _ = served
+    from ampi_tools import hub
+    assert dash.POSTS == hub.POSTS
+    for p in (*dash.PAGES, *dash.ASSETS):
+        assert req("GET", p)[0] == 200, p
+    assert set(dash.PAGES) <= set(hub.PAGES) and set(dash.ASSETS) <= set(hub.ASSETS)
+    for name, fields in dash.POSTS.items():
+        assert req("POST", f"/api/{name}", {**{f: "x" for f in fields}, "other": 1})[0] == 200
+        assert asked[-1] == {"cmd": f"hub.{name}", "session": "s" * 43, **{f: "x" for f in fields}}
+        assert f"hub.{name}" in srv.HUB
+    assert req("POST", "/api/nope", {})[0] == 404 and req("GET", "/api/stop")[0] == 404
+    assert req("GET", "/api/activity?before=12&name=x&evil=1")[0] == 200
+    assert asked[-1] == {"cmd": "hub.activity", "session": "s" * 43, "scope": "chat", "name": "x", "before": 12}
+    installed = (Path(__file__).parents[1] / "deploy/install-dash.sh").read_text(encoding="utf-8")
+    for f in [*dash.PAGES.values(), *(a[1:] for a in dash.ASSETS)]:
+        assert f" {f}" in installed, f

@@ -42,10 +42,13 @@ from .vault import ADDRESS_FIELDS, LATLNG, Conflict, Vault, check_name, entry_re
 log = logging.getLogger("ampi-hub")
 
 STATIC = Path(__file__).with_name("hub_static")
-PAGES = {"/": "index.html", "/address-book": "address-book.html", "/activity": "activity.html",
-         "/abilities": "abilities.html", "/watchers": "watchers.html"}
+PAGES = {"/": "index.html", "/address-book": "address-book.html", **{f"/{p}": f"{p}.html" for p in (
+    "abilities", "topics", "watchers", "activity", "given", "setup")}}
 ASSETS = {"/hub.css": ("hub.css", "text/css; charset=utf-8"), "/hub.js": ("hub.js", "text/javascript; charset=utf-8"),
-          **{f"/{n}.js": (f"{n}.js", "text/javascript; charset=utf-8") for n in ("address-book", "overview", "activity", "abilities", "watchers")}}
+          **{f"/{n}.js": (f"{n}.js", "text/javascript; charset=utf-8") for n in (
+              "address-book", "home", "activity", "abilities", "watchers", "topics", "given", "setup")}}
+POSTS = {"set": ("scope", "changes"), "role": ("scope", "role"), "pause": ("scopes",), "resume": ("scopes", "everything"), "stop": (),
+         "forget": ("scope",), "deliver": ("scope", "topic"), "revoke": ("kind", "key")}
 HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 MAX_BODY = 64 * 1024
 GEOCODES_PER_DAY = 30
@@ -346,12 +349,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._static(path)
             self._check_api()
             book = self.hub.book
-            if method == "GET" and (m := re.fullmatch(r"/api/(overview|activity|watchers|abilities)", path)):
-                scope = parse_qs(urlsplit(self.path).query).get("scope", ["chat"])[0]
-                return self._json(200, self.hub.ask({"cmd": f"hub.{m[1]}", "scope": scope}))
-            if method == "POST" and path == "/api/set":
+            if method == "GET" and (m := re.fullmatch(r"/api/(home|overview|activity|watchers|abilities|topics|given)", path)):
+                q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items() if k in ("scope", "name", "op", "status")}
+                before = parse_qs(urlsplit(self.path).query).get("before", [""])[0]
+                return self._json(200, self.hub.ask({"cmd": f"hub.{m[1]}", "scope": "chat", **q,
+                                                     **({"before": int(before)} if re.fullmatch(r"\d{1,15}", before) else {})}))
+            if method == "POST" and (m := re.fullmatch(r"/api/([a-z]+)", path)) and m[1] in POSTS:
                 body = self._body()
-                return self._json(200, self.hub.ask({"cmd": "hub.set", "scope": body.get("scope"), "changes": body.get("changes")}))
+                return self._json(200, self.hub.ask({"cmd": f"hub.{m[1]}", **{k: body.get(k) for k in POSTS[m[1]]}}))
             if path == "/api/places":
                 if method == "GET":
                     return self._json(200, {"places": book.places()})

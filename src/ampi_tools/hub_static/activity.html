@@ -3,18 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Activity · Ampi hub</title>
+<meta name="color-scheme" content="light dark">
+<title>Activity · Ampi</title>
 <link rel="stylesheet" href="hub.css">
 <script src="hub.js"></script>
 <script src="activity.js" defer></script>
 </head>
 <body>
-<header><a class="brand" href="./">Ampi hub</a><nav><a href="./">Overview</a><a href="abilities">Abilities</a><a href="watchers">Watchers</a><a class="on" href="activity">Activity</a><a href="address-book">Address book</a></nav><button id="out-btn" class="btn hidden" type="button">Sign out</button></header>
+<header id="nav" data-page="activity"></header>
 <main>
   <h1>Activity</h1>
-  <p class="sub">What watchers did, what was asked of you, and what you changed here.</p>
+  <p class="sub">What was done, asked and changed.</p>
   <div id="msg" class="msg hidden" role="status"></div>
-  <div id="out"></div>
+  <div id="out" aria-live="polite"><p class="note">Loading…</p></div>
 </main>
 </body>
 </html>

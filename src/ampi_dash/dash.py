@@ -16,9 +16,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 HERE = Path(__file__).resolve().parent
-PAGES = {"/": "index.html", "/abilities": "abilities.html", "/watchers": "watchers.html", "/activity": "activity.html"}
+PAGES = {"/": "index.html", **{f"/{p}": f"{p}.html" for p in ("abilities", "topics", "watchers", "activity", "given", "setup")}}
 ASSETS = {"/hub.css": "text/css; charset=utf-8", **{f"/{n}.js": "text/javascript; charset=utf-8" for n in (
-    "hub", "overview", "abilities", "watchers", "activity")}}
+    "hub", "home", "abilities", "topics", "watchers", "activity", "given", "setup")}}
+POSTS = {"set": ("scope", "changes"), "role": ("scope", "role"), "pause": ("scopes",), "resume": ("scopes", "everything"), "stop": (),
+         "forget": ("scope",), "deliver": ("scope", "topic"), "revoke": ("kind", "key")}
 MAX_BODY = 16 * 1024
 WORKERS = 12
 COOKIE = "__Host-ampi"
@@ -141,14 +143,17 @@ class Handler(BaseHTTPRequestHandler):
             self._body()
             self._tools({"cmd": "web.logout", "session": session})
             return self._json(200, {"ok": True}, "")
-        m = re.fullmatch(r"/api/(overview|activity|watchers|abilities)", path)
+        m = re.fullmatch(r"/api/(home|overview|activity|watchers|abilities|topics|given)", path)
         if m and self.command == "GET":
-            scope = parse_qs(urlsplit(self.path).query).get("scope", ["chat"])[0]
-            return self._json(200, self._tools({"cmd": f"hub.{m[1]}", "session": session, "scope": scope}))
-        if path == "/api/set" and self.command == "POST":
+            query = parse_qs(urlsplit(self.path).query)
+            q = {k: v[0] for k, v in query.items() if k in ("scope", "name", "op", "status")}
+            before = query.get("before", [""])[0]
+            return self._json(200, self._tools({"cmd": f"hub.{m[1]}", "session": session, "scope": "chat", **q, **(
+                {"before": int(before)} if re.fullmatch(r"\d{1,15}", before) else {})}))
+        m = re.fullmatch(r"/api/([a-z]+)", path)
+        if m and self.command == "POST" and m[1] in POSTS:
             b = self._body()
-            return self._json(200, self._tools({"cmd": "hub.set", "session": session, "scope": b.get("scope"),
-                                                "changes": b.get("changes")}))
+            return self._json(200, self._tools({"cmd": f"hub.{m[1]}", "session": session, **{k: b.get(k) for k in POSTS[m[1]]}}))
         raise Refused(404, "not found")
 
     def _handle(self) -> None:

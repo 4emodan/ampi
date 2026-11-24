@@ -424,7 +424,7 @@ def answer(d: Any, cmd: str, req: dict) -> dict:
     if cmd == "hub.abilities":
         if not isinstance(scope, str) or not perms.SCOPE_RE.fullmatch(scope):
             raise ToolError("bad scope")
-        return {"ok": True, "scope": scope, "adapters": ops_rows(d, scope), "waiting": waiting(d, scope)}
+        return {"ok": True, "scope": scope, "changes": d.permissions.get(scope, "changes.*"), "adapters": ops_rows(d, scope), "waiting": waiting(d, scope)}
     if cmd == "hub.activity":
         asked = [{"id": r["id"], "at": r["created"], "status": r["status"], "kind": r.get("kind") or "chat",
                   "summary": d._mask_obj((r["summary"] or "")[:600], "all")}

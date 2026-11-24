@@ -298,7 +298,7 @@ def test_the_hub_passes_requests_on(tmp_path):
         n = len(asked)
         assert req(port, "POST", "/api/set", {}, token=None)[0] == 401 and req(port, "GET", "/api/overview", token="x" * 43)[0] == 401
         assert len(asked) == n
-        for p in ("/", "/abilities", "/watchers", "/activity", "/overview.js", "/abilities.js", "/watchers.js", "/activity.js"):
+        for p in ("/", "/abilities", "/watchers", "/activity", "/home.js", "/topics", "/given", "/setup", "/abilities.js", "/watchers.js", "/activity.js"):
             assert req(port, "GET", p, token=None)[0] == 200
     finally:
         server.shutdown()

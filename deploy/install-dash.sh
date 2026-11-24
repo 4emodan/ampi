@@ -75,7 +75,8 @@ getent group "$DASH" >/dev/null || groupadd --system "$DASH"
 id "$DASH" >/dev/null 2>&1 || useradd --system --gid "$DASH" --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$DASH"
 install -d -o root -g root -m 755 "$LIB" "$LIB/static" /etc/ampi-dash
 install -o root -g root -m 644 "$SRC/src/ampi_dash/dash.py" "$LIB/dash.py"
-for f in index.html abilities.html watchers.html activity.html hub.css hub.js overview.js abilities.js watchers.js activity.js; do
+for f in index.html abilities.html topics.html watchers.html activity.html given.html setup.html hub.css hub.js home.js abilities.js topics.js \
+    watchers.js activity.js given.js setup.js; do
   install -o root -g root -m 644 "$SRC/src/ampi_tools/hub_static/$f" "$LIB/static/$f"
 done
 printf 'AMPI_DASH_URL=https://%s\n' "$HOST" > /etc/ampi-dash/env
