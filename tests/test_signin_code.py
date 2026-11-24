@@ -362,7 +362,8 @@ def test_a_page_that_offers_to_sign_out_is_an_account(env, how, ok):
 @pytest.mark.parametrize("words,kw,ok", [
     ("Enter the code we sent to your email", {"label": "Enter it here"}, False), ("Check your inbox for a code", {"label": "", "name": "x1"}, False), ("Enter the code from your email", {"label": "Email"}, True),
     ("Please check your email address", {"label": "Member number"}, True), ("Your confirmation will be sent to your email. Phone number", {"label": "Emergency contact"}, True),
-    ("Security code", {"label": "Apartment"}, True), ("Código de descuento", {"label": "Cupón"}, True),
+    ("Security code", {"label": "Apartment"}, True), ("Number of guests Age Table Enter promo code Email", {"label": "Age"}, True), ("Enter your postal code Email", {"label": "House number"}, True),
+    ("Enter promo code. We sent a code to your email", {"label": "Age"}, False), ("Código de descuento", {"label": "Cupón"}, True),
     ("Verification code", {"name": "search"}, True), ("Find a class", {"label": "Enter it here"}, True), ("We have emailed you a code", {"label": "Promo code"}, True),
     ("Código de verificación", {"label": "Aquí"}, False)])
 def test_where_the_page_asks_for_a_code_ampi_types_only_plain_fields(env, words, kw, ok):

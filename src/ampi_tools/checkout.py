@@ -108,6 +108,7 @@ CODE_SENT = re.compile(
     r"two.?(factor|step)|\d chiffres|code (reçu|envoyé)|(wysłaliśmy|wysłano|podaj|wpisz).{0,40}\bkod|\bkod z\b|vahvistuskoodi|kertakäyttö|engångskod|bestätigungscode|"
     r"código de (verif|seguridad|acceso|confirm)|code de (vérification|sécurité)|codice di (verif|sicur)|"
     r"код подтверждения|отправили.{0,40}код|κωδικό.{0,20}(επαλήθευσης|που σας)", re.I)
+OTHER_CODE = re.compile(r"\b(promo\w*|discount|coupon|voucher|gift( card)?|referral|postal|post|zip|area|door|dress|country|booking|reservation) codes?\b", re.I)
 PLAIN_FIELD = re.compile(
     r"(your |the )?((first|last|full|given|family|user|company|card ?holder) ?)?name|e-?mail( address)?|(phone|mobile)( number)?|search|q|query|(street )?address( line)?( ?\d)?|"
     r"city|town|zip|post(al)? ?code|zip ?code|country|company|organi[sz]ation|subject|message|comments?|notes?|birth ?date|date( of birth)?|nickname|title|quantity|qty|"
@@ -1645,7 +1646,7 @@ class Controller:
         if like_one and d.get("kind") == "input" and d.get("type") in CODE_TYPES and not any(
                 PLAIN_FIELD.fullmatch(x := _spaced(d, k).strip(" *:")) or QUANTITY.fullmatch(x) for k in ("name", "id", "label")):
             r = self._run(s, frame, {"op": "code", "n": n}) or {}
-            if CODE_SENT.search(br.clean(str(r.get("words") or ""))) and not NOT_CODE.search(_spaced(d, "label") if d.get("label") else _spaced(d, "name", "id")):
+            if CODE_SENT.search(OTHER_CODE.sub(" ", br.clean(str(r.get("words") or "")))) and not NOT_CODE.search(_spaced(d, "label") if d.get("label") else _spaced(d, "name", "id")):
                 raise no
 
     def _part_of_a_form(self, s: Session, frame: dict, n: int, d: dict) -> None:
